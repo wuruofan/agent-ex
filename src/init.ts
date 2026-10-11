@@ -14,7 +14,7 @@
 import { execSync } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { join, resolve as pathResolve } from "node:path";
+import { join, dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentFlowHome, ensureRuntimeDirs } from "./paths.js";
 import { loadConfig } from "./config.js";
@@ -183,6 +183,58 @@ export function buildConfig(a: InitAnswers) {
   };
 }
 
+/**
+ * 解析当前运行 init 的 node 解释器绝对路径（用于 MCP 配置里）。
+ * 刻意不用 process.execPath 之外的手段：execPath 就是真实解释器，天然带 shebang 的
+ * `#!/usr/bin/env node` 之外的绝对路径，避免 MCP 客户端 spawn 时依赖 PATH。
+ */
+export function nodeExecPath(): string {
+  return process.execPath;
+}
+
+/**
+ * 生成可直接粘贴进宿主 MCP 配置的片段。
+ * **为什么必须用绝对路径**：MCP 客户端 spawn 子进程时不继承用户 shell 的 PATH——
+ * `node_modules/.bin` 只有 npm 脚本执行时才临时注入。所以 `{command:"agent-flow-ex"}`
+ * 这类裸命令名在 IDE（GUI 应用不读 .zshrc，尤其 nvm 用户）里会直接 command not found。
+ * 2026-10-10 实测：同一台机器 PATH 不含 .bin 时裸命令名失败、绝对路径正常。
+ */
+export function mcpServerSnippet(serverEntry: string): string {
+  return JSON.stringify(
+    { mcpServers: { "agent-flow-ex": { command: nodeExecPath(), args: [serverEntry] } } },
+    null,
+    2,
+  );
+}
+
+/** init 末尾的收尾指引：MCP 注册 + skill 安装 + 宿主差异提示。 */
+export function nextSteps(home: string, serverEntry: string): string {
+  return [
+    "",
+    "Next steps:",
+    "",
+    "1) Set the data dir (put it in your MCP server env):",
+    `     export AGENT_FLOW_HOME=${home}`,
+    "",
+    "2) Register the MCP server — paste into your client's MCP config",
+    "   (Trae: TRAE SOLO CN/User/mcp.json, WorkBuddy: ~/.workbuddy/mcp.json):",
+    mcpServerSnippet(serverEntry),
+    "",
+    "   Absolute paths matter: MCP clients spawn the server without your shell PATH,",
+    "   so a bare \"agent-flow-ex\" command often fails to start (common with nvm).",
+    "",
+    "3) Install the dispatch skill (optional but recommended — gives you the",
+    "   dispatch workflow and the background waiter):",
+    "     npx -y skills add wuruofan/agent-flow-ex --skill agent-flow-dispatch -g -y",
+    "",
+    "   Already have a clone? ./scripts/install-skill.sh links it instead.",
+    "   Skill dirs differ per host; if the load does not take effect, find yours with:",
+    "     find ~ -maxdepth 4 -type d -name skills -path '*<host>*' 2>/dev/null",
+    "",
+    "4) Optional: edit " + join(home, "config.json") + " to tune model aliases / env.",
+  ].join("\n");
+}
+
 export async function runInit(input: NodeJS.ReadableStream = process.stdin): Promise<void> {
   const home = agentFlowHome();
   ensureRuntimeDirs();
@@ -269,19 +321,19 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
       console.log(`\n\u26a0 ${tokenKey} not set — add it to ${join(home, ".env")} (or export it) before running the server, otherwise tasks will fail.`);
     }
 
-    console.log("\nNext steps:");
-    console.log(`  export AGENT_FLOW_HOME=${home}   (or set it in your MCP server env)`);
-    console.log("\nRegister as an MCP server (copy into your client's MCP config):");
-    console.log(JSON.stringify({
-      mcpServers: {
-        "agent-flow-ex": { command: "agent-flow-ex" },
-      },
-    }, null, 2));
-    console.log('  (installed via npx instead of -g? use { "command": "npx", "args": ["-y", "agent-flow-ex@latest"] })');
-    console.log(`  optional: edit ${cfgPath} to tune model aliases / default env (e.g. API_TIMEOUT_MS)`);
+    console.log(nextSteps(home, resolveServerEntry()));
   } finally {
     rl.close();
   }
+}
+
+/**
+ * MCP 注册要指向的 server 入口绝对路径。
+ * init 自己就在这个文件里（dist/init.js），server 入口是同目录的 dist/server.js——
+ * 由当前文件位置推导，不依赖 cwd，也不需要用户自己拼。
+ */
+export function resolveServerEntry(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), "server.js");
 }
 
 // 直接运行时自动启动：tsx src/init.ts / node dist/init.js。
