@@ -76,18 +76,23 @@ worker 终态 ─> 飞书卡片 ─> 用户 ─> 回到 IDE ─> 告诉我 ─> 
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **WorkBuddy automation** | `automation_update` + RRULE / `scheduledAt` | **1 小时**（实测：`MINUTELY` 不支持，仅 DAILY/HOURLY/WEEKLY/MONTHLY/YEARLY；`BYMINUTE` 被静默忽略） | **已验证**：初始工具列表**不可见**，须 `ToolSearch` 加载后 `DeferExecuteTool` 调用（见 §4.1 步骤 0） | 每次触发新会话；平台另提供 `.workbuddy/automations/<id>/memory.md` 跨轮记忆（v1 不用） | store 即外部记忆 | **v1 首选**（2026-08-29 21:20 端到端实测通过） |
 | **Trae IDE hooks** | hooks 框架（trae-hooks）事件触发 | 事件级（写文件、跑命令等） | hooks 默认 deny（v2 spec 提到） | 无 agent 进程概念 | 同上 | 事件型不直接适配「定时调度」 |
-| **Trae Schedule** | 内置 `Schedule`（cron） | 10 分钟（最小粒度） | **未达（待重跑回测）**：真因已定 = **Trae 的 MCP 客户端 11:56:19 `MCPClient#onClose → Disconnected` 后不会自动重连**，此后成功调用次数为 0（含主会话）。主 IDE 显示的 3 工具是**过期缓存**。诱导因素：为注入 V5 测试工具而 kill/重启 MCP server 进程。**修复动作**：MCP 面板 disable → re-enable `agent-flow-ex`（或重启 Trae）强制重连 | 每次触发新会话，无内存 | store 即外部记忆 | 重连后按 `../../diagnostics/2026-08-29-trae-retest.md` 重跑回测；仍不通按 §5.4 走 launchd |
+| **Trae Schedule** | 内置 `Schedule`（cron） | 10 分钟（最小粒度） | **✅ 已验证**（2026-10-10 实测通过）：步骤 0 的 a 分支「直接调用 `agent_flow_status()`」在 Trae Schedule 新会话里**直接可用**，无需工具发现。判别用**探针法**而非自报——埋一个 `elapsed > 2×timeout_sec` 的假 running 任务，tick 在 35s 内把它 `cancel` 掉，证明真的调用了 `agent_flow_cancel` | 每次触发新会话，无内存 | store 即外部记忆 | **粒度比 WorkBuddy 细 6 倍**（10min vs 1h）。⚠️ 唯一前置：MCP 客户端须是活连接——server 被 kill 后不会自愈（见 `../../diagnostics/2026-08-29-trae-mcp-visibility.md`），届时须在 MCP 面板 disable → re-enable |
 | **Codex CLI** | 待 spike | 待 spike | 待 spike | 待 spike | 待 spike | 不知道是否暴露自动化能力 |
 | **launchd / cron** | 系统级 | 分钟级 | 进程独立启动，**必须手动加载 MCP**（启动参数注入或环境变量） | N/A | 文件系统 | 通用兜底，需写调度脚本 |
+| **`wait-task.mjs`（非 Scheduler）** | 派发方**手动起后台进程**，不用 cron | 立即（事件驱动） | **不适用**——它不调 MCP，只读 store | ✅ **完整保留**（唤醒的是原会话） | store + 任务 jsonl | **2026-10-10 本机采用**。与宿主无关（纯 node 内置模块 + SQLite 只读），免确认弹窗；代价是需有人在环发起 |
+
+> **`wait-task.mjs` 严格说不是 Scheduler**，放这里是为了对照：它是「等一个特定 task_id 到达可行动状态」的**阻塞原语**，不做任何决策。派发方（人或 agent）决定何时起它，它负责把「任务需要你了」这件事带回原会话。与 cron 的区别不是粒度，而是**上下文是否保留**。
 
 > **矩阵里「MCP 可见性」这一列的正确测法**（2026-08-29 教训）：不能只问「能不能调通」，必须拆成三问——① 新会话初始工具列表是否直接可见？② 不可见时的加载路径是什么？③ 加载后真实调用返回值如何？
 > Trae 那次之所以在这列填了 ✅ 却仍然踩坑，正是因为只测了③、没测①②。
 
 **结论**：
 
-- **首选 WorkBuddy automation**：2026-08-29 21:20 实测端到端通过——定时触发 → `ToolSearch` 加载 3 个工具 → `ToolSearch`/`DeferExecuteTool` 调 `agent_flow_status()` → 返回 `[]` → 判定 idle → 无副作用。
-- **Trae Schedule 出局**：WorkBuddy 对照实验 2026-08-29 15:30 实测**已定性**——Trae MCP 客户端**无自动重连**，不是配置问题、不是开关问题、不是 prompt 问题。详见 [2026-08-29-self-loop-dispatcher-trial.md](../plans/2026-08-29-self-loop-dispatcher-trial.md) §4.1（真实根因终稿）；重连行为实测记录见 [2026-08-29-trae-mcp-visibility.md](../../diagnostics/2026-08-29-trae-mcp-visibility.md) §9–§10。
-- **22:52–23:00 那轮回测无效**：它是在客户端已断连的状态下跑的，新 prompt 从未被真正检验。据此得出的「Trae 出局」结论**已撤回**。
+- **两个派发方均已实测可用**（2026-10-10 复测 Trae Schedule 通过，见 §3 矩阵与 `../../diagnostics/2026-08-29-trae-retest.md` §0）：
+  - **WorkBuddy automation**：2026-08-29 21:20 实测端到端通过——定时触发 → `ToolSearch` 加载 3 个工具 → 调 `agent_flow_status()` → 返回 `[]` → 判定 idle → 无副作用。粒度 **1 小时**。
+  - **Trae Schedule**：2026-10-10 探针实测通过（假 running 任务被 tick 在 35s 内收割），且工具在 tick 新会话里**初始即可见**。粒度 **10 分钟**。
+- **⚠️ 「Trae MCP 客户端无自动重连」这条根因仍然成立，但它不是「Trae 出局」的理由**：它描述的是 server 被 kill 后的恢复问题，与 tick 能否拿到工具是两回事。2026-08-29 正是因为把两者混为一谈，才误判出局。判活方法见 `../../diagnostics/2026-08-29-trae-mcp-visibility.md` §11.6。
+- **先选粒度再选派发方**：要 10 分钟收敛选 Trae，要 1 小时粒度但已在用 WorkBuddy 就保持现状。两者可以并存（`submit(continue_of=)` 有原子校验，先到先得、后到返错）。
 - **Codex 路线必须 spike**：当前没有任何 Codex 自动化机制的一手知识，不应基于假设设计方案。
 
 ---
@@ -136,7 +141,11 @@ Dispatcher 是个 agent 进程，每次触发执行同一个 prompt。**核心�
 | 派发方 | 初始可见 | 加载方式 | 实测状态 |
 | :--- | :--- | :--- | :--- |
 | WorkBuddy automation | 否 | `ToolSearch(tool_names=["mcp__agent-flow-ex__agent_flow_status", ..._submit, ..._cancel])` → `DeferExecuteTool` | ✅ 已验证（2026-08-29 15:57 探针） |
-| Trae SOLO CN Schedule | 否（据失败现象推断） | **未知**——Trae 是否提供等价的工具发现能力未验证 | ❓ 待验证 |
+| Trae SOLO CN Schedule | **是** | 不需要加载，直接调 | ✅ **已验证**（2026-10-10 探针：`94b4f694` tick 收割了假 running 任务，见 §3 矩阵） |
+
+> **2026-10-10 更新**：Trae 的可见性与 WorkBuddy **相反**——`agent_flow_*` 在 Schedule 新会话的初始工具列表里**直接可用**，步骤 0 的 a 分支一次命中、不需要 b 分支的工具发现。
+>
+> 这条实测同时**推翻了步骤 0 存在的原始理由**（「定时触发的新会话初始工具列表里可能没有 `agent_flow_*`」是 WorkBuddy 观察到的现象，不是 Trae 的）。步骤 0 仍然保留：它的措辞是「按序尝试」而非硬编码某个平台的 API，**两个平台的行为不同恰恰是多平台共用一份 prompt 时最需要它的原因**——若当初硬编码成「先调 `ToolSearch`」，在 Trae 上就会直接失败。
 
 **因此步骤 0 写成「按序尝试」而非硬编码某个 API**：先直接调、失败再找发现机制、再失败才放弃并如实上报。这样同一份 prompt 在两个平台上都能工作，且即使某个平台完全没有发现机制，调度员也会回报「tools unavailable + 我尝试过什么」，而不是静默地假装工具不存在。
 
@@ -397,9 +406,11 @@ V1/V3 已完成；V2 随 recurring 上线覆盖；V4/V5 是**真正的验收项*
 
 ## 11. 待决问题（评审决议）
 
-1. **V1 派发方选型**：**已改决议（2026-08-29）** = **WorkBuddy automation**（端到端实测通过，见 §5.1.2）。Trae Schedule 降备选、launchd 仅兜底。
-   **Trae 回测（5 分钟，未做）**：只把 Schedule `8a989934` 的 `message` 换成带步骤 0 的 §4.1 Prompt 并 `trigger` 一次——通了说明 Trae 也只是延迟加载问题，可迁回；不通再去 UI 开「对话流设置 → 自动运行 MCP」。
-   Trae 侧**无需改动**的项：MCP server 配置（`~/Library/Application Support/TRAE SOLO CN/User/mcp.json`，已正确注册 agent-flow-ex）、agent-flow-ex 代码（0 改动）、调度员 prompt 的其余部分。
+1. **V1 派发方选型**：**两个派发方都已实测通过，选型不再是技术问题，而是「要什么粒度」**。
+   - WorkBuddy automation：2026-08-29 21:20 端到端实测通过（见 §5.1.2），粒度 1 小时。
+   - Trae Schedule：2026-10-10 实测通过（`94b4f694` tick 收割探针任务；自然 tick 亦在无人参与下于 09:51:26 自行触发，见 `../../diagnostics/2026-08-29-trae-retest.md` §0），粒度 10 分钟。
+   - **2026-10-10 决策：本机不再常驻定时任务**。理由是 tick 每轮都失忆、只能按 prompt 机械判断，而 `skills/agent-flow-dispatch/scripts/wait-task.mjs` 已在 Trae 下实测可用（exit 0 / `WAIT=terminal` / 报告正确提取），它保留完整上下文且免去创建时的确认弹窗。定时巡检仅在需要**完全无人值守**（含人睡觉时收割 needs_input）时才值得开。
+   - Trae 侧**无需改动**的项：MCP server 配置（`~/Library/Application Support/TRAE SOLO CN/User/mcp.json`）、agent-flow-ex 代码（0 改动）、调度员 prompt 的其余部分。
 2. **是否采纳 §6.1「聚合查询」新工具**？**已决议** = v1 不采纳，先让调度员直接消费 `agent_flow_status()`；待 v1 跑通后按需再加。
 3. **调度员 prompt 是否需要随 profile 变化**？**已决议** = v1 统一用最终 Prompt（§4.1），不随 profile 变化；调度员用派发方自身 runtime，不强制复用 worker profile。
 4. **「调度员误答」的人兜底**：v1 **不**做「取消续跑/人工接管」按钮。人随时可在会话内直接 `agent_flow_submit(continue_of=)` 抢先，原子 `status=needs_input` 保证后到者返回明确错误。

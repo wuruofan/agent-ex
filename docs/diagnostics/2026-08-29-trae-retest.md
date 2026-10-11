@@ -1,28 +1,71 @@
 # Trae 调度员回测操作手册
 
-**状态**：⚠️ **22:52–23:00 那轮回测无效，须重跑。**
+**状态**：✅ **已回测通过（2026-10-10）**。结论见 §0 追加。下方 2–5 节保留为**重跑时的操作手册**。
 
-> **无效原因**：Trae 的 MCP 客户端早在 11:56:19 就断连且不会自动重连（见 `2026-08-29-trae-mcp-visibility.md` §3）。那轮是在**客户端已死**的状态下测的，新 prompt 从未被真正检验。
-> 先前据此得出的「Trae 出局」结论**已撤回**。
-
-**重跑前必做（1 分钟）**：先让 Trae 重连 MCP —— MCP 面板 `agent-flow-ex` disable → re-enable，或退出重启 Trae。确认 `exthost/mcp-servers-host.log` 尾部出现新的 `Connected` / `listTools Got tools` 再开始。
-
-**诊断归档**：`2026-08-29-trae-mcp-visibility.md`（含 `raw/` 下 4 份 Trae 侧原始报告与逐条复核）
-
-**用途**：给在 Trae 里手动执行的人照着做。预计 5–10 分钟。
-**前置结论**：WorkBuddy 路线已全绿（V1–V5），所以这次回测**不是救火**，而是决定「要不要从 60 分钟粒度换回 10 分钟粒度」。
+> **历史无效轮次**：2026-08-29 22:52–23:00 那轮回测无效——当时 Trae 的 MCP 客户端已在 11:56:19 断连且不会自动重连（见 `2026-08-29-trae-mcp-visibility.md` §3），那轮是在**客户端已死**的状态下测的，新 prompt 从未被真正检验。据此得出的「Trae 出局」结论**已撤回**。
 
 ---
 
-## 0. 为什么值得做
+## 0. 2026-10-10 回测结果（当前有效结论）
 
-| | WorkBuddy（已验证） | Trae（待回测） |
-| :--- | :--- | :--- |
-| 派发粒度 | **1 小时**（`MINUTELY` 不支持，`BYMINUTE` 被静默忽略） | **10 分钟**（内置 cron） |
-| 最坏收敛 | 轮数 × 60 分钟 | 轮数 × 10 分钟 |
-| 可靠性 | ✅ 实测通过 | ❓ 27 tick 只成功 1 次，原因待定 |
+**结论：Trae Schedule ✅ 可用，10 分钟粒度成立，MCP 工具在 tick 新会话里初始即可见。**
 
-**Trae 若能跑通，是 6 倍的延迟优势**，值得花这 5 分钟验证。
+| 项 | 值 |
+| :--- | :--- |
+| Schedule ID | `94b4f694`（`agent-flow 调度员`，Active，cron `*/10 * * * *`，tz `Asia/Shanghai`） |
+| 前置代码 | `f2eb264`（已重新 `npm run build`，`dist/server.js` 时间戳 10-09 17:27） |
+| 主会话 MCP | 健康：`agent_flow_version` → `gitSha: f2eb264` |
+
+### 0.1 判别方法：**探针法**，不信自报
+
+调度员自报「idle」几乎没有信息量——它可能只是在复述 prompt。真正有判别力的是**它是否真的改变了 store**。
+
+**做法**：往 `tasks.db` 直接 INSERT 一个虚构任务，构造���命中步骤 3 收割条件的字段：
+
+```sh
+NOW=$(date +%s)
+sqlite3 ~/.agent-flow-ex/tasks.db <<SQL
+INSERT INTO tasks (id,status,prompt,project_path,executor,profile,timeout_sec,
+  session_id,rounds,result,question,progress,files_changed,pid,error,log_path,role,
+  created_at,started_at,ended_at,notify_failed)
+VALUES ('probe-trae-mcp-turn-test','running','探针：非真实任务…','/x','claude','default',
+  60,NULL,1,NULL,NULL,NULL,'[]',NULL,NULL,'/tmp/probe-nonexistent.jsonl','worker',
+  $NOW,$((NOW-1000)),NULL,0);
+SQL
+```
+
+`status=running` + `timeout_sec=60` + `elapsed≈1000` ⇒ `1000 > 2×60`，正落在步骤 3 的收割条件里。
+
+然后 `trigger` 一次并轮询 `status`：
+
+```sh
+for i in 1 2 3 4 5 6; do sleep 30
+  sqlite3 ~/.agent-flow-ex/tasks.db \
+    "select status from tasks where id='probe-trae-mcp-turn-test';"; done
+```
+
+**实测**：09:39:45 手动 trigger → **09:40:20（35s 内）** 探针已变 `cancelled`。唯一可能的写入来源就是这个 tick 调了 `agent_flow_cancel`。
+
+**为什么这个判据强**：自然 tick（09:40:00）还没到，且本会话主 agent 全程未调用 `cancel`；状态变化只能来自那个 tick。⇒ 同时证明了「工具拿到了」「调用成功了」「MCP→store 链路通」三件事。
+
+**收尾**：探针是虚构任务，取消无副作用，但仍须 `DELETE FROM tasks WHERE id='probe-…';` 清理（实测清理后活跃任务数为 0）。
+
+### 0.2 三个反直觉发现
+
+1. **Trae 的工具可见性与 WorkBuddy 相反**：`agent_flow_*` 在 tick 新会话的**初始工具列表里直接可见**，步骤 0 的 a 分支一次命中，不需要 `ToolSearch`。所以 §2 Step 5 那条「失败 → 去开『自动运行 MCP』」**对本轮不适用**——它开不开都不影响结果。
+2. **不必先点 MCP 面板重连**：文档反复强调的「server 被 kill 后客户端不自愈」是**另一条故障**（`visibility.md` §11）。本轮主会话 MCP 一直健康（build 后仍能调 `agent_flow_version`），tick 也就正常。⇒ **先验证 MCP 是否真的活着，再决定要不要走重连流程**，否则会把「客户端本来就是好的」误判成「需要重连」。
+3. **定时任务不是唯一选择，且不一定是最好的**：`skills/agent-flow-dispatch/scripts/wait-task.mjs` 在 Trae 下同样可用（2026-10-10 实测 exit 0 / `WAIT=terminal` / `ELAPSED_SEC=25` / `REPORT_TEXT=PONG`）。它只依赖 node 内置模块、直连 SQLite **只读**、完全不碰 MCP，所以与宿主无关；派发后起一个后台进程即可，**不需要任何确认弹窗**，而且唤醒的是**原会话**（上下文完整）。
+
+   ⇒ **两条路线怎么选**：
+
+   | | 定时巡检（Schedule） | wait-task.mjs |
+   | :--- | :--- | :--- |
+   | 需要确认 | 创建时要点 | ❌ 不用 |
+   | 醒来后是谁 | 全新会话，无记忆 | **原会话**，上下文完整 |
+   | 能做什么 | 只能按 prompt 机械判断 | 能按 plan 真实意图复核 |
+   | 适合 | 完全无人值守（人睡觉时收割 needs_input / 孤儿） | 守着特定任务直到收尾 |
+
+   2026-10-10 决策：本机不再常驻定时任务，走 wait-task 路线。
 
 ---
 
@@ -35,9 +78,13 @@
 | MCP server 配置 `~/Library/Application Support/TRAE SOLO CN/User/mcp.json` | ✅ 已正确注册 agent-flow-ex，**不用动** |
 | agent-flow-ex 代码 | ✅ 0 改动 |
 | 调度员 prompt 除「步骤 0」外的部分 | ✅ 与 WorkBuddy 完全一致 |
-| Schedule 的本地文件 | ❌ **不存在**——Schedule 存云端，全盘搜 `8a989934` 无任何痕迹，只能走 UI |
+| Schedule 的本地文件 | ❌ **不存在**——Schedule 存云端，只能走 `Schedule` 工具 |
 
-> 注意：本机装了两个 Trae。`TRAE SOLO CN` 是在用的；`Trae CN`（`~/.trae-cn/`）7/30 起已停更，别在那边找。
+> ⚠️ **2026-10-10 更正一条会误导人的旧说法**：本目录早前记着「`~/.trae-cn/` 是 7/30 起停更的旧版 Trae CN，别在那边找」。
+> 那条**只对 MCP 注册表成立**（在用的 `TRAE SOLO CN` 从 `~/Library/Application Support/TRAE SOLO CN/User/mcp.json` 读），
+> **但 `~/.trae-cn/` 恰恰是当前在用的 Trae 的用户级 skills 目录**——本仓库 skill 的软链就装在那里
+> （`~/.trae-cn/skills/agent-flow-dispatch → <repo>/skills/agent-flow-dispatch`），2026-10-10 实测加载正常。
+> ⇒ 装 skill 用 `~/.trae-cn/skills`；查 MCP 注册表才去 `TRAE SOLO CN/User/`。两件事别混。
 
 ---
 
@@ -45,15 +92,18 @@
 
 ### Step 1 · 确认 Schedule 还在不在（1 分钟）
 
-在 Trae 里列出现有 Schedule，找 `8a989934`（`agent-flow 调度员`）：
+用 `Schedule` 工具（`action: "list"`）列出现有任务，找 `agent-flow 调度员`：
 
 - **还在、且是 Paused** → 直接 Step 2
 - **还在、且是 Active** → 先 Pause，再 Step 2（避免改 message 期间它自己触发）
-- **已经不在了** → 新建一个：
+- **已经不在了**（2026-10-10 实测就是这个状态：历史 `8a989934` 已不存在）→ 新建一个：
   - `name`：`agent-flow 调度员`
   - `cron_expression`：`*/10 * * * *`
   - `timezone`：`Asia/Shanghai`
   - `message`：Step 2 的全文
+
+> ⚠️ **创建/修改都要点确认弹窗**（2026-10-10 连续撞了 3 次 10 分钟超时）。但**只有创建那一次要**——
+> 之后每 10 分钟的 tick 自己跑，无人参与（实测自然 tick 于 09:51:26 自行触发，`Executions` 3→4）。
 
 ### Step 2 · 把 message 换成下面这段（务必整段替换）
 

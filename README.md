@@ -16,7 +16,7 @@
 ## 架构
 
 ```
-MCP Client (TRAE 等)
+MCP Client (TRAE / WorkBuddy / Claude Code / 任何 MCP 宿主)
    │  stdio: submit / status / cancel
    ▼
 server.ts (MCP Server)
@@ -122,8 +122,9 @@ npx -y skills add wuruofan/agent-flow-ex --skill agent-flow-dispatch -g -y
 WorkBuddy 会扫描这些路径，所以在任何项目里都能用。仓库里的 `./skills/` 是普通目录，**不是**项目级 skill 路径
 （那会是 `./.workbuddy/skills`），因此既不会只在本仓库生效，也不会与项目级 skill 冲突。
 
-> ⚠️ 默认目标**不含 Trae**：它的前端在后台任务结束时**不会开新 turn**，所以「派发完就等着收通知」在 Trae 上不成立，
-> 只能自己查 `status`。需要时把目标目录显式传进去：`./install-skill.sh ~/.trae-cn/skills`（路线 A 则去掉 `-g`，按 CLI 提示选 Trae）。
+> **Trae**：它的用户级 skills 目录因安装版本而异（本机 `TRAE SOLO CN` 用 `~/.trae-cn/skills`），
+> 所以不在默认目标里，显式传进去即可：`./install-skill.sh ~/.trae-cn/skills`（路线 A 则去掉 `-g`，按 CLI 提示选 Trae）。
+> 2026-10-10 实测：软链装好后 skill 在 Trae 里正常加载，派发 → 后台等待 → 完成后**开新 turn** 整条链路都通。
 
 ## 安装（从源码，开发者路线）
 

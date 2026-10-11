@@ -16,9 +16,14 @@
 # picked up as a project-scoped skill and never shadows this install.
 #
 # Default targets: ~/.agents/skills (shared, tool-agnostic convention on this machine)
-# and ~/.workbuddy/skills. Trae is intentionally NOT a default: its front-end does not
-# open a new turn when a background task finishes, so "dispatch and get notified" does not
-# hold there — you'd have to poll status yourself.
+# and ~/.workbuddy/skills.
+#
+# Trae hosts are NOT a default because the skill dir differs per install and layout:
+# this machine runs "TRAE SOLO CN", whose user-level skills path is ~/.trae-cn/skills
+# (~/.trae-cn is also where the IDE reads MCP configs from). Pass the target explicitly:
+#   ./install-skill.sh ~/.trae-cn/skills
+# Verified 2026-10-10: with that symlink in place the skill loads and works in Trae,
+# including dispatch -> background wait -> new turn on completion.
 #
 # Usage:
 #   ./install-skill.sh                         # default: ~/.agents/skills + ~/.workbuddy/skills
