@@ -41,27 +41,42 @@ worker 以 agent CLI 的「跳过权限确认」模式运行（claude：`--dange
 ## 快速开始
 
 ```bash
-npm i -g agent-flow-ex    # 或免安装：npx agent-flow-ex@latest init
+npm i -g agent-flow-ex    # 或免安装：npx -y agent-flow-ex@latest init
 agent-flow-ex init        # 交互式配置：探测 CLI、收集密钥、生成 config + .env
 ```
 
-`init` 结束时会**直接打印** MCP 注册片段，把它拷进你的 MCP 客户端配置即可（WorkBuddy 为 `~/.workbuddy/mcp.json`）：
+> 未发布到公共 registry 前请用源码路线（见下方「安装（从源码，开发者路线）」）；`npx -y agent-flow-ex@latest`
+> 只有在 `npm publish` 之后才可用。
+
+`init` 结束时会**直接打印**可直接粘贴的 MCP 注册片段（用**绝对路径**，理由见下方注意事项），把它拷进你的 MCP 客户端配置即可（Trae：`TRAE SOLO CN/User/mcp.json`；WorkBuddy：`~/.workbuddy/mcp.json`）：
 
 ```jsonc
 {
   "mcpServers": {
-    "agent-flow-ex": { "command": "agent-flow-ex" }
+    "agent-flow-ex": {
+      "command": "/abs/path/to/node",          // init 现场打印，无需自己拼
+      "args": ["/abs/path/to/node_modules/agent-flow-ex/dist/server.js"]
+    }
   }
 }
 ```
 
-> 用 npx 免安装形态：`{ "command": "npx", "args": ["-y", "agent-flow-ex@latest"] }`。
 > 注册后需在客户端里信任/启用该 server（首次接入通常要重启或手动连接）。
+> `init` 还会提示 dispatch skill 的安装方式与各宿主 skills 目录的查法，见「可选：安装 dispatch skill」。
 
-> ⚠️ **`command` 必须能被客户端找到。** 客户端拉起 MCP server 时**不一定带你的 shell PATH**，
-> 裸写 `agent-flow-ex` 或 `node` 在 PATH 受限的环境下会直接 `ENOENT`。已实测：`PATH=/usr/bin:/bin`
-> 下 `node` 与 `agent-flow-ex` 均找不到。若你用 nvm / homebrew / WorkBuddy 托管版 node，
-> 建议写**绝对路径**（也可显式补 `env.PATH`）：
+> ⚠️ **`command` 建议写绝对路径。** MCP 客户端拉起 server 时**不继承你的 shell PATH**，
+> 而 `node_modules/.bin` 只有 `npm run`/`npx` 执行时才会临时注入。已实测（2026-10-11，tarball 全新安装）：
+> `PATH=/usr/bin:/bin` 下裸写 `agent-flow-ex` 直接 `command not found`，写绝对路径则正常返回。
+> nvm / homebrew / GUI 应用托管的环境尤其容易踩。
+>
+> 绝对路径怎么拿：
+>
+> ```bash
+> which node        # Linux/macOS → /Users/<you>/.nvm/versions/node/<v>/bin/node
+> # 找不到 node 时 init 会把它启动时用的那个绝对路径直接打给你，照抄即可
+> ```
+>
+> 也可显式补 `env.PATH`，但用绝对路径更省事：
 >
 > ```jsonc
 > {
@@ -177,7 +192,7 @@ export AGENT_FLOW_HOME="$HOME/.agent-flow-ex"   # 缺省即此；也可指向任
 
 | 字段 | 说明 |
 |---|---|
-| `executors.<name>.bin` | agent CLI 的**绝对路径**（见下方「重要」）。 |
+| `executors.<name>.bin` | agent CLI 的位置：**绝对路径或裸命令名皆可**（见「`executors.<name>.bin`」）。 |
 | `executors.<name>.extra_flags` | 拼到 agent 命令后的额外参数。权限开关按 executor 区分：claude 用 `--dangerously-skip-permissions`，opencode 用 `--auto`（`init` 会自动写对）。 |
 | `profiles.<name>.executor` | 引用 `executors` 里的某个 executor。 |
 | `profiles.<name>.env` | 传给 agent 子进程的环境变量；支持 `{env:VAR}` 占位符（见下）。**opencode 一般留空**（provider 由 opencode 自己的 `auth.json`/`opencode.json` 管理）；要给某个 profile 单独指定模型，写 `OPENCODE_CONFIG_CONTENT: "{\"model\":\"provider/model\"}"`——`extra_flags` 是 executor 级，多 profile 无法用它区分模型。另注意 `buildAgentEnv` 只给极简 `PATH`，worker 里的 shell 用不到 `/opt/homebrew/bin` 等，需要时在此显式补 `PATH`。 |
@@ -256,17 +271,25 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
 
 ### 作为 MCP Server（stdio）
 
-生产形态（全局安装后）用 bin 名注册，**不要写绝对路径**（换机器/挪目录都不断）：
+生产形态（全局安装后）注册。**推荐用绝对路径**——`init` 会直接打印可粘贴的片段：
 
 ```jsonc
 {
-  "command": "agent-flow-ex",
-  "env": {
-    "AGENT_FLOW_HOME": "/abs/path/to/your/home"   // 可省，缺省 ~/.agent-flow-ex
-    // 密钥不用放这里：server 启动时会自动读 $AGENT_FLOW_HOME/.env
+  "mcpServers": {
+    "agent-flow-ex": {
+      "command": "/abs/path/to/node",
+      "args": ["/abs/path/to/node_modules/agent-flow-ex/dist/server.js"],
+      "env": {
+        "AGENT_FLOW_HOME": "/abs/path/to/your/home"   // 可省，缺省 ~/.agent-flow-ex
+        // 密钥不用放这里：server 启动时会自动读 $AGENT_FLOW_HOME/.env
+      }
+    }
   }
 }
 ```
+
+> 裸写 `"command": "agent-flow-ex"`（依赖 PATH）虽然更「可搬机」，但 MCP 客户端 spawn 时不继承
+> 你的 shell PATH，在 nvm / GUI 应用环境下很容易 `command not found`——优先用 `init` 打印的绝对路径。
 
 开发模式（直接跑 TS，无需先 build）：
 
@@ -285,12 +308,15 @@ npm run runner <task_id>     # = tsx src/runner.ts <task_id>
 ### 跑测试
 
 ```bash
-npm run build && npm test            # 单元 + 集成 = 75 全绿
-npm run test:integration            # 只跑集成（会自动先 build）
+npm run build && npm test            # 单元 + 集成 = 127 全绿
+npm run test:integration            # 只跑集成（会自动先build）
 npm run typecheck                   # 仅类型检查
 ```
 
 集成测试直接跑预编译的 `dist/runner.js`（与生产同款），避免 dev 路径下 tsx 冷启动拖慢 timing 断言。
+
+> `tests/proc-tree.test.ts` 依赖 `ps` 枚举进程树，在拒绝执行 setuid `/bin/ps` 的沙箱里会自动 skip
+> （这是刻意设计：能力不可验证时诚实跳过，而不是报假红）。
 
 ## MCP 工具
 
@@ -351,8 +377,8 @@ npm run typecheck                   # 仅类型检查
 
 ## 排错
 
-- **`executor "claude" bin "…" not found or not executable`**：`bin` 路径不对或没 `+x`，改绝对路径。
-- **任务 `failed`，`error: failed to spawn runner: … ENOENT`**：`bin` 用了裸名导致子进程 PATH 找不到 agent，改绝对路径（见上「重要」）。
+- **`executor "claude" bin "…" not found or not executable`**：`bin` 路径不对或没 `+x`。写裸命令名时按 `process.env.PATH` 解析（见「`executors.<name>.bin`」），解析不到就写绝对路径。
+- **任务 `failed`，`error: failed to spawn runner: … ENOENT`**：多因`bin` 指向的位置下没有可执行文件。注意 worker 子进程的 `PATH` 只由 `dirname(bin)` + 系统目录组成（见「`profiles.<name>.env`」），`/opt/homebrew/bin` 等不在其中——裸名建议先 `which` 确认解析结果。
 - **飞书不推送**：检查 `dry_run` 是否还是 `true`；检查 `.env` 里 `FEISHU_WEBHOOK_URL` 是否存在（或 server 进程环境是否已 `export`）。
 - **`{env:VAR}` 报错 `not found in process environment`**：对应密钥不在 `.env` 里，也没 `export` 到 server 进程环境。加到 `$AGENT_FLOW_HOME/.env` 后重启 server。
 - **任务频繁超时，且日志里反复出现 `ran out of context`**：上下文被反复压缩，agent 丢失状态后重复劳动。查压缩阈值配置（见上「上下文压缩」）——若 `ANTHROPIC_MODEL` 没带 `[1m]`，窗口会被锁在 200k；工单过大（工具调用 ≫150 次）也会撞阈值，应先拆单。
@@ -382,9 +408,10 @@ node dist/server.js init    # 即 `agent-flow-ex init`
 - 写 `config.json`（**只含 `{env:VAR}` 占位符**，零明文）并自动用 `loadConfig()` 自校验；
 - 把确认/粘贴到的密钥写进 `$AGENT_FLOW_HOME/.env`（**chmod 600**，幂等——同值不重写）；
 - 若密钥最终没进 `.env`，会打印 ⚠ 提醒「运行时必须有该变量，否则任务失败」；
-- 末尾提示可编辑 `config.json` 调整模型别名与通用默认 env（如 `API_TIMEOUT_MS`）。
+- 打印 4 步收尾指引：`AGENT_FLOW_HOME` 怎么设、**可直接粘贴的 MCP 注册片段（绝对路径）**、
+  dispatch skill 的安装方式与各宿主 skills 目录的 `find` 查法、以及调 `config.json` 的提示。
 
-> 已有 `config.json` 时 `init` 会先确认是否覆盖。opencode executor 不询问 provider——它由 opencode 自己的配置管理（`opencode auth login` / `opencode.json`），agent-flow 只负责拉起。
+> 已有 `config.json` 时 `init` 会先确认是否覆盖。opencode executor 不询问 provider——它由opencode 自己的配置管理（`opencode auth login` / `opencode.json`），agent-flow 只负责拉起。
 
 ## 发布（npm）
 
