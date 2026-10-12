@@ -8,7 +8,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { collectDescendants, isPsAvailable, killTree } from "../src/proc-tree.js";
 
 // 依赖 `ps` 才能发现「逃逸孙进程」的用例：ps 不可用时（如 WorkBuddy Bash 工具的 Seatbelt 沙箱
@@ -66,6 +66,24 @@ async function waitForFile(path: string, timeoutMs = 5000): Promise<void> {
   throw new Error(`timeout waiting for ${path}`);
 }
 
+/**
+ * 等到心跳文件出现至少一行。
+ *
+ * 为什么不能用固定 sleep：心跳间隔 40ms，但全量并发时子进程调度延迟可达数百毫秒
+ * （2026-10-11 实测约 1/3 概率`hbLines` 仍为 0 而 gPid 存活——启动慢，不是没跑）。
+ * 固定等待把「调度延迟」误报成「功能坏了」。
+ *
+ * 判别力不变：G 真的没跑时依然会超时抛错，只是失败原因更准确、且不再随机。
+ */
+async function waitForHeartbeat(hb: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (hbLines(hb) > 0) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`timeout waiting for heartbeat in ${hb} (g alive=${pidAlive(Number(readFileSync(join(dirname(hb), "g.pid"), "utf8")))})`);
+}
+
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -73,6 +91,16 @@ function pidAlive(pid: number): boolean {
 function hbLines(hb: string): number {
   if (!existsSync(hb)) return 0;
   return readFileSync(hb, "utf8").split("\n").filter(Boolean).length;
+}
+
+/** 等进程真正消失。同理不用固定 sleep：kill 传播速度受调度影响，固定 300ms 偶发不够。 */
+async function waitForExit(pid: number, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!pidAlive(pid)) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`timeout waiting for pid ${pid} to exit (still alive)`);
 }
 
 let trees: Tree[] = [];
@@ -136,16 +164,16 @@ describe("killTree", () => {
     const sPid = Number(readFileSync(sPidfile, "utf8"));
     const gPid = Number(readFileSync(gPidfile, "utf8"));
 
-    // 让心跳先跑一会儿，确认 G 活着且在写
-    await new Promise((r) => setTimeout(r, 300));
+    // 让心跳先跑起来，确认 G 活着且在写（轮询而非固定 sleep，见 waitForHeartbeat 注释）
+    await waitForHeartbeat(hb);
     expect(pidAlive(gPid)).toBe(true);
-    expect(hbLines(hb)).toBeGreaterThan(0);
 
     // 核心：killTree 根进程 → 逃逸的 G 也应被清
     killTree(root.pid!, { graceMs: 800 });
 
-    // 等 SIGTERM 传播
-    await new Promise((r) => setTimeout(r, 300));
+    // 等 SIGTERM 传播（轮询，理由同waitForExit 注释）
+    await waitForExit(sPid);
+    await waitForExit(gPid);
     expect(pidAlive(sPid)).toBe(false); // 同组 agent 死
     expect(pidAlive(gPid)).toBe(false); // 逃逸孙进程死（旧实现会活着）
 
@@ -176,10 +204,12 @@ describe("killTree with real runner group semantics", () => {
     await waitForFile(gPidfile);
     const sPid = Number(readFileSync(sPidfile, "utf8"));
     const gPid = Number(readFileSync(gPidfile, "utf8"));
-    await new Promise((r) => setTimeout(r, 200));
+    // 等心跳真正跑起来再 kill：否则「G 还没启动就被杀」与「G 启动了但没被杀掉」无法区分，
+    // 后者才是本用例要抓的回归（2026-10-11 与主用例同源的固定 sleep 隐患）。
+    await waitForHeartbeat(hb);
 
     killTree(root.pid!, { graceMs: 800 });
-    await new Promise((r) => setTimeout(r, 300));
+    await waitForExit(gPid);
     expect(pidAlive(root.pid ?? 0)).toBe(false); // 组 leader 本体死（组杀语义保持）
     expect(pidAlive(sPid)).toBe(false);
     expect(pidAlive(gPid)).toBe(false);
