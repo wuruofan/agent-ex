@@ -1,17 +1,25 @@
-# agent-flow-ex
+# agent-ex
 
-把 AI 编程 Agent（Claude Code / OpenCode）当作「后台任务」来调度的 **MCP Server**。
+**Dispatch and review with *external* agents.** 一个把 AI 编程 Agent（Claude Code / OpenCode）当作「外部执行者」来协作的 **MCP Server**——既能派发后台任务，也能让外部 agent 独立出方案、相互 review。
 
 通过 MCP 工具 `submit` / `status` / `cancel` 提交任务：server 以 detached 子进程拉起**真实** agent CLI，用 SQLite 记录任务状态机，支持 `NEEDS_INPUT` 续跑、超时、取消，并在任务结束时推送飞书通知。
 
+三种典型协作形态（都只是 `submit` 的不同 prompt，**不需要任何新工具**）：
+
+| 形态 | 怎么用 |
+| :--- | :--- |
+| **派发实现** | `submit(prompt=自包含工单)` → worker 独立完成 → `wait-task.mjs` 带回结果 |
+| **独立起草方案** | `submit(prompt="读 docs/ 与代码，产出设计方案写到 docs/plans/xxx.md")` |
+| **相互 review** | `submit(prompt="审阅 docs/plans/xxx.md，按可执行性/遗漏/矛盾列问题")` |
+
 ## 特性
 
-- **后台调度**：任务在独立 detached 进程里跑，不阻塞你的对话；随时 `status` 查进度、`cancel` 终止。
+- **外部执行者**：任务在独立 detached 进程里跑，不阻塞你的对话；随时 `status` 查进度、`cancel` 终止。
 - **状态机**：`queued → running → (needs_input → running → …) → completed | failed | cancelled`，最多 5 轮续跑。
 - **多 Agent / 多 Provider**：内置 `claude` 与 `opencode` 两个 executor，可配置不同 profile（如 MiniMax、DeepSeek 网关）。
 - **NEEDS_INPUT 续跑**：agent 反问时任务进入 `needs_input`，用 `submit(continue_of=…)` 把答案喂回去继续跑。
 - **飞书通知**：任务终态（完成 / 失败 / 取消）推送飞书，支持 `dry_run` 调试。
-- **密钥零落盘（config）**：`config.json` 只含 `{env:ENV_VAR}` 占位符；真实密钥落在 `$AGENT_FLOW_HOME/.env`（chmod 600，server 启动自动加载），不进 git、不被同步。
+- **密钥零落盘（config）**：`config.json` 只含 `{env:ENV_VAR}` 占位符；真实密钥落在 `$AGENT_EX_HOME/.env`（chmod 600，server 启动自动加载），不进 git、不被同步。
 
 ## 架构
 
@@ -41,11 +49,11 @@ worker 以 agent CLI 的「跳过权限确认」模式运行（claude：`--dange
 ## 快速开始
 
 ```bash
-npm i -g agent-flow-ex    # 或免安装：npx -y agent-flow-ex@latest init
-agent-flow-ex init        # 交互式配置：探测 CLI、收集密钥、生成 config + .env
+npm i -g agent-ex    # 或免安装：npx -y agent-ex@latest init
+agent-ex init        # 交互式配置：探测 CLI、收集密钥、生成 config + .env
 ```
 
-> 未发布到公共 registry 前请用源码路线（见下方「安装（从源码，开发者路线）」）；`npx -y agent-flow-ex@latest`
+> 未发布到公共 registry 前请用源码路线（见下方「安装（从源码，开发者路线）」）；`npx -y agent-ex@latest`
 > 只有在 `npm publish` 之后才可用。
 
 `init` 结束时会**直接打印**可直接粘贴的 MCP 注册片段（用**绝对路径**，理由见下方注意事项），把它拷进你的 MCP 客户端配置即可（Trae：`TRAE SOLO CN/User/mcp.json`；WorkBuddy：`~/.workbuddy/mcp.json`）：
@@ -53,9 +61,9 @@ agent-flow-ex init        # 交互式配置：探测 CLI、收集密钥、生成
 ```jsonc
 {
   "mcpServers": {
-    "agent-flow-ex": {
+    "agent-ex": {
       "command": "/abs/path/to/node",          // init 现场打印，无需自己拼
-      "args": ["/abs/path/to/node_modules/agent-flow-ex/dist/server.js"]
+      "args": ["/abs/path/to/node_modules/agent-ex/dist/server.js"]
     }
   }
 }
@@ -66,7 +74,7 @@ agent-flow-ex init        # 交互式配置：探测 CLI、收集密钥、生成
 
 > ⚠️ **`command` 建议写绝对路径。** MCP 客户端拉起 server 时**不继承你的 shell PATH**，
 > 而 `node_modules/.bin` 只有 `npm run`/`npx` 执行时才会临时注入。已实测（2026-10-11，tarball 全新安装）：
-> `PATH=/usr/bin:/bin` 下裸写 `agent-flow-ex` 直接 `command not found`，写绝对路径则正常返回。
+> `PATH=/usr/bin:/bin` 下裸写 `agent-ex` 直接 `command not found`，写绝对路径则正常返回。
 > nvm / homebrew / GUI 应用托管的环境尤其容易踩。
 >
 > 绝对路径怎么拿：
@@ -81,10 +89,10 @@ agent-flow-ex init        # 交互式配置：探测 CLI、收集密钥、生成
 > ```jsonc
 > {
 >   "mcpServers": {
->     "agent-flow-ex": {
+>     "agent-ex": {
 >       "command": "/Users/<you>/.nvm/versions/node/<v>/bin/node",
->       "args": ["/path/to/agent-flow-ex/dist/server.js"],
->       "env": { "AGENT_FLOW_HOME": "/Users/<you>/.agent-flow-ex" }
+>       "args": ["/path/to/agent-ex/dist/server.js"],
+>       "env": { "AGENT_EX_HOME": "/Users/<you>/.agent-ex" }
 >     }
 >   }
 > }
@@ -103,14 +111,14 @@ MCP 工具是「底层能力」，dispatch skill 是叠加在上面的**派发�
 ### 路线 A：`npx skills`（推荐给使用者，不依赖本地仓库）
 
 本仓库的 skill 遵循 [Agent Skills](https://github.com/agentskills) 开放规范（`SKILL.md` + `scripts/` + `references/`），
-因此可以直接用 Vercel 的 [`skills` CLI](https://www.npmjs.com/package/skills) 从 GitHub 装——**无需 clone、无需 `npm i -g agent-flow-ex`**：
+因此可以直接用 Vercel 的 [`skills` CLI](https://www.npmjs.com/package/skills) 从 GitHub 装——**无需 clone、无需 `npm i -g agent-ex`**：
 
 ```bash
 # 先看这个仓库里有哪些 skill（dry-run，不落盘）
-npx -y skills add wuruofan/agent-flow-ex --list
+npx -y skills add wuruofan/agent-ex --list
 
 # 全局安装单个 skill
-npx -y skills add wuruofan/agent-flow-ex --skill agent-flow-dispatch -g -y
+npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y
 ```
 
 - 缺省安装到 `~/.agents/skills/`（用户级，**全局生效**，任何项目里都能用）。
@@ -125,7 +133,7 @@ npx -y skills add wuruofan/agent-flow-ex --skill agent-flow-dispatch -g -y
 ./scripts/install-skill.sh ~/some/other/skills   # 或指定目录
 ```
 
-脚本把仓库里的 `skills/agent-flow-dispatch` **软链**到各宿主工具的用户级 skills 目录——
+脚本把仓库里的 `skills/agent-ex-dispatch` **软链**到各宿主工具的用户级 skills 目录——
 它是仓库的软链，**改完立刻生效、不会产生副本漂移**，适合边写 skill 边验证。可重复执行（幂等：已指向正确位置会 skip；
 若目标路径已有**实体目录**则会中止并提示手动处理，不会覆盖）。
 
@@ -144,7 +152,7 @@ WorkBuddy 会扫描这些路径，所以在任何项目里都能用。仓库里�
 ## 安装（从源码，开发者路线）
 
 ```bash
-git clone https://github.com/wuruofan/agent-flow-ex && cd agent-flow-ex
+git clone https://github.com/wuruofan/agent-ex && cd agent-ex
 npm install
 npm run build        # tsc → 生成 dist/
 npm run init         # 开发模式跑 init（tsx）
@@ -155,10 +163,10 @@ npm run init         # 开发模式跑 init（tsx）
 
 ### 配置目录
 
-配置放在 `AGENT_FLOW_HOME` 指向的目录下，文件名 `config.json`：
+配置放在 `AGENT_EX_HOME` 指向的目录下，文件名 `config.json`：
 
 ```bash
-export AGENT_FLOW_HOME="$HOME/.agent-flow-ex"   # 缺省即此；也可指向任意目录
+export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目录
 ```
 
 ### config.json 结构
@@ -229,7 +237,7 @@ window  = min(模型窗口, max(100k, AUTO_COMPACT_WINDOW))
 | 90 | 442,800 |
 | 不设 | 479,000 |
 
-> **注意**：`~/.claude/settings.json` 的 `env` 块也会注入这些变量。agent-flow 传了 `HOME` 给子进程，claude 会自行读取该文件——**若那里设了同名 key，agent-flow 的 `profiles.<name>.env` 优先级更高**（仅当该 key 已在 profile 中显式设置）。想完全由 agent-flow 单点控制，就把两个变量都写进 profile env。
+> **注意**：`~/.claude/settings.json` 的 `env` 块也会注入这些变量。agent-ex 传了 `HOME` 给子进程，claude 会自行读取该文件——**若那里设了同名 key，agent-ex 的 `profiles.<name>.env` 优先级更高**（仅当该 key 已在 profile 中显式设置）。想完全由 agent-ex 单点控制，就把两个变量都写进 profile env。
 
 **验证是否真的生效**：看任务日志 `result` 事件的 `modelUsage.<model>.contextWindow`——它反映模型窗口（带 `[1m]` 应为 `1000000`）；而**压缩工作窗口**不体现在该字段，要看日志里是否出现 `ran out of context`。
 
@@ -251,10 +259,10 @@ which opencode      # → /usr/local/bin/opencode
 
 ### 密钥：config 占位符 + `.env` 真实值
 
-`env` 与 `feishu_webhook_url` 里写成 `"{env:VAR_NAME}"` 形式的值，会在**任务运行时**（runner 进程）从环境变量替换。**config.json 永远不写真实密钥**，真实值放在 `$AGENT_FLOW_HOME/.env`：
+`env` 与 `feishu_webhook_url` 里写成 `"{env:VAR_NAME}"` 形式的值，会在**任务运行时**（runner 进程）从环境变量替换。**config.json 永远不写真实密钥**，真实值放在 `$AGENT_EX_HOME/.env`：
 
 ```bash
-# $AGENT_FLOW_HOME/.env（示例；init 命令会自动生成，chmod 600）
+# $AGENT_EX_HOME/.env（示例；init 命令会自动生成，chmod 600）
 MINIMAX_API_KEY=sk-xxxx
 FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
 ```
@@ -276,19 +284,19 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
 ```jsonc
 {
   "mcpServers": {
-    "agent-flow-ex": {
+    "agent-ex": {
       "command": "/abs/path/to/node",
-      "args": ["/abs/path/to/node_modules/agent-flow-ex/dist/server.js"],
+      "args": ["/abs/path/to/node_modules/agent-ex/dist/server.js"],
       "env": {
-        "AGENT_FLOW_HOME": "/abs/path/to/your/home"   // 可省，缺省 ~/.agent-flow-ex
-        // 密钥不用放这里：server 启动时会自动读 $AGENT_FLOW_HOME/.env
+        "AGENT_EX_HOME": "/abs/path/to/your/home"   // 可省，缺省 ~/.agent-ex
+        // 密钥不用放这里：server 启动时会自动读 $AGENT_EX_HOME/.env
       }
     }
   }
 }
 ```
 
-> 裸写 `"command": "agent-flow-ex"`（依赖 PATH）虽然更「可搬机」，但 MCP 客户端 spawn 时不继承
+> 裸写 `"command": "agent-ex"`（依赖 PATH）虽然更「可搬机」，但 MCP 客户端 spawn 时不继承
 > 你的 shell PATH，在 nvm / GUI 应用环境下很容易 `command not found`——优先用 `init` 打印的绝对路径。
 
 开发模式（直接跑 TS，无需先 build）：
@@ -380,7 +388,7 @@ npm run typecheck                   # 仅类型检查
 - **`executor "claude" bin "…" not found or not executable`**：`bin` 路径不对或没 `+x`。写裸命令名时按 `process.env.PATH` 解析（见「`executors.<name>.bin`」），解析不到就写绝对路径。
 - **任务 `failed`，`error: failed to spawn runner: … ENOENT`**：多因`bin` 指向的位置下没有可执行文件。注意 worker 子进程的 `PATH` 只由 `dirname(bin)` + 系统目录组成（见「`profiles.<name>.env`」），`/opt/homebrew/bin` 等不在其中——裸名建议先 `which` 确认解析结果。
 - **飞书不推送**：检查 `dry_run` 是否还是 `true`；检查 `.env` 里 `FEISHU_WEBHOOK_URL` 是否存在（或 server 进程环境是否已 `export`）。
-- **`{env:VAR}` 报错 `not found in process environment`**：对应密钥不在 `.env` 里，也没 `export` 到 server 进程环境。加到 `$AGENT_FLOW_HOME/.env` 后重启 server。
+- **`{env:VAR}` 报错 `not found in process environment`**：对应密钥不在 `.env` 里，也没 `export` 到 server 进程环境。加到 `$AGENT_EX_HOME/.env` 后重启 server。
 - **任务频繁超时，且日志里反复出现 `ran out of context`**：上下文被反复压缩，agent 丢失状态后重复劳动。查压缩阈值配置（见上「上下文压缩」）——若 `ANTHROPIC_MODEL` 没带 `[1m]`，窗口会被锁在 200k；工单过大（工具调用 ≫150 次）也会撞阈值，应先拆单。
 
 ## 快速初始化（`init` 命令）
@@ -390,7 +398,7 @@ npm run typecheck                   # 仅类型检查
 ```bash
 npm run init                 # 开发模式（tsx）
 # 或生产形态：
-node dist/server.js init    # 即 `agent-flow-ex init`
+node dist/server.js init    # 即 `agent-ex init`
 ```
 
 交互流程（claude executor 为例）：
@@ -406,20 +414,20 @@ node dist/server.js init    # 即 `agent-flow-ex init`
 结束后：
 
 - 写 `config.json`（**只含 `{env:VAR}` 占位符**，零明文）并自动用 `loadConfig()` 自校验；
-- 把确认/粘贴到的密钥写进 `$AGENT_FLOW_HOME/.env`（**chmod 600**，幂等——同值不重写）；
+- 把确认/粘贴到的密钥写进 `$AGENT_EX_HOME/.env`（**chmod 600**，幂等——同值不重写）；
 - 若密钥最终没进 `.env`，会打印 ⚠ 提醒「运行时必须有该变量，否则任务失败」；
-- 打印 4 步收尾指引：`AGENT_FLOW_HOME` 怎么设、**可直接粘贴的 MCP 注册片段（绝对路径）**、
+- 打印 4 步收尾指引：`AGENT_EX_HOME` 怎么设、**可直接粘贴的 MCP 注册片段（绝对路径）**、
   dispatch skill 的安装方式与各宿主 skills 目录的 `find` 查法、以及调 `config.json` 的提示。
 
-> 已有 `config.json` 时 `init` 会先确认是否覆盖。opencode executor 不询问 provider——它由opencode 自己的配置管理（`opencode auth login` / `opencode.json`），agent-flow 只负责拉起。
+> 已有 `config.json` 时 `init` 会先确认是否覆盖。opencode executor 不询问 provider——它由opencode 自己的配置管理（`opencode auth login` / `opencode.json`），agent-ex 只负责拉起。
 
 ## 发布（npm）
 
-包名 `agent-flow-ex`，MIT。发布配置已在 `package.json` 就位：
+包名 `agent-ex`，MIT。发布配置已在 `package.json` 就位：
 
 | 字段 | 值 | 说明 |
 |---|---|---|
-| `bin` | `dist/server.js` | 全局安装后 `agent-flow-ex` 可直接跑 server |
+| `bin` | `dist/server.js` | 全局安装后 `agent-ex` 可直接跑 server |
 | `files` | `dist` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包 |
 | `prepublishOnly` | `build` + `test` | 发布前自动构建并跑全量测试，测试红则发布中止 |
 | `engines.node` | `>=22.5` | 依赖 `node:sqlite`（server 与 runner 都要用） |
@@ -433,7 +441,7 @@ npm publish --access public
 
 > ⚠️ **npm 包不含 dispatch skill**：`skills/` 与 `scripts/` 不在 `files` 白名单里。
 > 但这已不再是分发缺口——skill 走 [Agent Skills](https://github.com/agentskills) 规范，
-> 使用者用 `npx skills add wuruofan/agent-flow-ex --skill agent-flow-dispatch -g -y` 从 GitHub 直接装（见「安装 dispatch skill」）。
+> 使用者用 `npx skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y` 从 GitHub 直接装（见「安装 dispatch skill」）。
 
 ## 后续（planned）
 

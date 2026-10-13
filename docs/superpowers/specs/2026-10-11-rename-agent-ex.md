@@ -439,3 +439,13 @@ cd /Users/wuruofan/mine/rfw/agent-flow-ex
 | E-1 | **GitHub 仓库已提前改名** | `gh repo rename agent-ex` 已执行（admin 权限），`wuruofan/agent-ex` → 200、旧地址 `wuruofan/agent-flow-ex` → **301**，本地 remote 已自动更新为 `git@github.com:wuruofan/agent-ex.git`。⇒ Step 3 的「远端 404 / 改名完成前禁 push」已失效，本段随之删除 |
 | E-2 | **Trae CN 的项目级 `.trae/mcp.json` 已删除** | 用户决定不要（每改名一次就要跟着改，且含本机绝对路径）。⇒ Step 5 与验收 #9 从 3 处收敛为 **2 处**；Trae CN 当前不持有此 server。若日后要在 Trae CN 用，需新建 `Trae CN/User/mcp.json`（路径同构已验证，但无官方文档确认，配置后须实测） |
 | E-3 | Step 1 的 `-uno` 与 §3 的 `.trae/` 说明作废 | `.trae/` 已随文件删除，`git status` 现在本就干净，`-uno` 不再必要（保留也无害） |
+
+### 执行期实测偏差（2026-10-13 执行时发现，原 spec 未覆盖）
+
+| # | 偏差 | 处置与应补的规则 |
+| :--- | :--- | :--- |
+| X-1 | **`mv ~/.agent-flow-ex ~/.agent-ex` 撞上已存在的目标目录**。Step 1 跑测试时 `AGENT_EX_HOME` 的新默认值 `~/.agent-ex` 已被创建（空目录），于是旧目录被**嵌套**进去（`~/.agent-ex/.agent-flow-ex/`），随后 `sqlite3 ... "UPDATE tasks"` 报 `no such table: tasks` | 已把嵌套层内容提出、核对 21 行数据完好、删除嵌套层与空壳 `tasks.db`，**无数据丢失**（日志 42 个文件全在）。⇒ Step 2 应加前置守卫：`[ -e ~/.agent-ex ] && ls -A ~/.agent-ex` 先看清是空壳还是有内容，再决定 `mv` / 合并 |
+| X-2 | **Step 1 之后必须立刻 `npm run build`，测试才有意义**。integration 测试跑的是 `dist/runner.js`，dist 仍是改名前的旧代码 ⇒ 9 个用例报 `runner exited with code 2 before claim`。原 spec 把 build 放在 Step 5，太靠后 | 已补跑 build（dist 旧名残留 0），127/127 恢复。⇒ Step 1 的验证块应加「`npm run build` 后再 `npm test`」，否则 `npm test` 不是有效验收 |
+| X-3 | **沙箱会拦写用户级目录**。`install-skill.sh` 与两份 `mcp.json` 都在 `~/.agents/skills`、`~/.workbuddy`、`~/Library/Application Support/TRAE SOLO CN/User` 下，会话沙箱直接报 `Operation not permitted`，即使开「需批准」也过不去 | 这三处由用户在终端执行（已完成）。⇒ 改名 spec 应写明「哪些步骤必然需要人在终端」，否则执行到一半才发现被拦 |
+| X-4 | **目录改名会让 agent 会话的 cwd 失效**，后续工具调用报 `cwd does not exist`（工具无法自建终端，继承旧 cwd） | 用户在 IDE 里重新指定工作区后恢复。⇒ Step 3 之后应显式提示「重新打开工作区」，且执行顺序上更稳的做法是先提交再改名 |
+| X-5 | `disabled: true` 是用户执行 Step 0 时由客户端写入的（两份 `.bak` 里本来就有），不是本次改名引入的 | 记录在案，避免日后误以为是残留字段 |
