@@ -22,7 +22,7 @@ const mockedSpawn = vi.mocked(spawnDetachedRunner);
 let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "afex-"));
-  process.env.AGENT_FLOW_HOME = home;
+  process.env.AGENT_EX_HOME = home;
   mkdirSync(join(home, "logs"), { recursive: true });
   writeFileSync(join(home, "config.json"), JSON.stringify({
     executors: { fake: { bin: process.execPath, extra_flags: ["ignored"] } },
@@ -32,7 +32,7 @@ beforeEach(() => {
   }));
   mockedSpawn.mockClear();
 });
-afterEach(() => { rmSync(home, { recursive: true, force: true }); delete process.env.AGENT_FLOW_HOME; });
+afterEach(() => { rmSync(home, { recursive: true, force: true }); delete process.env.AGENT_EX_HOME; });
 
 describe("submit", () => {
   it("creates queued task with generated id and spawns runner (pid recorded)", async () => {
@@ -160,8 +160,8 @@ describe("cancel", () => {
 });
 
 describe("setStartedAt (test helper)", () => {
-  beforeEach(() => { process.env.AGENT_FLOW_TEST_MODE = "1"; });
-  afterEach(() => { delete process.env.AGENT_FLOW_TEST_MODE; });
+  beforeEach(() => { process.env.AGENT_EX_TEST_MODE = "1"; });
+  afterEach(() => { delete process.env.AGENT_EX_TEST_MODE; });
   it("rewrites started_at when test mode enabled", async () => {
     const { setStartedAt } = await import("../src/tools/test-helpers.js");
     const store = openStore(join(home, "tasks.db"));
@@ -183,8 +183,8 @@ describe("setStartedAt (test helper)", () => {
     expect(setStartedAt({ task_id: "x", started_at: NaN })).toEqual({ error: "started_at must be a finite number (unix seconds)" });
   });
   it("refuses when test mode disabled", async () => {
-    delete process.env.AGENT_FLOW_TEST_MODE;
+    delete process.env.AGENT_EX_TEST_MODE;
     const { setStartedAt } = await import("../src/tools/test-helpers.js");
-    expect(setStartedAt({ task_id: "x", started_at: 1 })).toEqual({ error: "AGENT_FLOW_TEST_MODE not enabled" });
+    expect(setStartedAt({ task_id: "x", started_at: 1 })).toEqual({ error: "AGENT_EX_TEST_MODE not enabled" });
   });
 });

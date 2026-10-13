@@ -7,10 +7,10 @@ worker（后台 agent CLI）的终态报告**默认不完全采信**——M3 wor
 来自 9/3 真实任务的两个边界场景：
 
 - **截断**：notifier 推飞书时 `MAX_RESULT_LEN=4012` 字符，长报告的 §止血建议 / §遗留问题经常被切掉——只看卡片可能漏关键信息。
-  **补救路径（9/19 实测）**：全文在 `~/.agent-flow-ex/logs/task_<id>.jsonl`（完整 worker 会话）。
+  **补救路径（9/19 实测）**：全文在 `~/.agent-ex/logs/task_<id>.jsonl`（完整 worker 会话）。
   用 python 取收尾报告：逐行 `json.loads`，`type=="assistant"` 时遍历 `o["message"]["content"]` 里
   `c["type"]=="text"` 的 `c["text"]`（取最后一条含 `## ` 的），或 `type=="result"` 的 `o["result"]`。
-  两个反例别走：`~/.agent-flow-ex/tasks.db` 的 `result` 列**同样被截**（9/19 实测 `len(result)` 恰为 4012，
+  两个反例别走：`~/.agent-ex/tasks.db` 的 `result` 列**同样被截**（9/19 实测 `len(result)` 恰为 4012，
   是**记录时**就截了，不是卡片层截的）；`tasks.db` 的 `log_path` 字段指向的是另一个 **0 字节**的
   `logs/task_<id>.log`，不是全文。
   ⇒ 所以「§5–§7 没出现」在卡片上与「worker 根本没写」**不可区分**，唯一判据是去 jsonl 里找。
@@ -33,8 +33,8 @@ worker（后台 agent CLI）的终态报告**默认不完全采信**——M3 wor
 | 档位 | 5 问命中 | 处置 |
 |---|---|---|
 | **高** | 4-5 问 ✓，无内部矛盾 | 直接转给用户，附 task_id + 关键产出路径 |
-| **中** | 3 问 ✓，有 1-2 项需复核 | `agent_flow_status({ task_id })` 拉完整 result 复核后再转；若复核仍模糊，走 needs_input 反问 |
-| **低** | ≤2 问 ✓，或自相矛盾，或关键事实无证据 | **不直接转用户**。要么 needs_input 反问让 worker 补证据，要么 `agent_flow_cancel` 重派（带更明确的 Context） |
+| **中** | 3 问 ✓，有 1-2 项需复核 | `agent_ex_status({ task_id })` 拉完整 result 复核后再转；若复核仍模糊，走 needs_input 反问 |
+| **低** | ≤2 问 ✓，或自相矛盾，或关键事实无证据 | **不直接转用户**。要么 needs_input 反问让 worker 补证据，要么 `agent_ex_cancel` 重派（带更明确的 Context） |
 
 ## 真实例子（来自 9/3 task_mtla69fx_3872f3 vs task_mtljliko_759d7a）
 
@@ -174,7 +174,7 @@ ripgrep shim，`-P` 直接报错，而我没看 exit code 差点当成"0 个制�
    文件（含 `../cc-black/src/utils/git.ts`、`deny-paths.ts`、`backup.ts`、docs/*、若干 test），
    而磁盘上只有 23 个。**先 `git status --short` 对齐 plan 的 §2 文件表**，再看别的；否则会照着
    一张假清单去追越界改动。判"某文件是否被动过"用 `git status`，别用 `files_changed`。
-   **机制已查实（9/20 读 agent-flow-ex 源码 + 复现）**：它**不是** worker 自述，而是 **runner 进程**
+   **机制已查实（9/20 读 agent-ex 源码 + 复现）**：它**不是** worker 自述，而是 **runner 进程**
    解析 CLI stream-json 攒的 —— `src/executors/claude.ts:26-30` 取每条 assistant 消息里**第一个**
    `tool_use` 块，只要 `input.file_path` 是字符串就塞进 Set，**完全不判工具名** ⇒ `Read` 一样进；
    `src/runner.ts:114/152` 才落库（`src/tools/status.ts:31` 原样返回，无截断/过滤）。

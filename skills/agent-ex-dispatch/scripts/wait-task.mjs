@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * wait-task.mjs — block until an agent-flow task reaches a terminal state, then
+ * wait-task.mjs — block until an agent-ex task reaches a terminal state, then
  * extract the worker's final report from its run log.
  *
  * Why this exists
@@ -37,7 +37,7 @@
  *   --once              query once and exit; no waiting
  *   --verbose           heartbeat to stderr on each poll
  *   --no-digest         omit the digest fields (see "Token economy" above)
- *   --home PATH         agent-flow home (default $AGENT_FLOW_HOME, else ~/.agent-flow-ex)
+ *   --home PATH         agent-ex home (default $AGENT_EX_HOME, else ~/.agent-ex)
  *
  * How long can this wait?
  * -----------------------
@@ -168,7 +168,7 @@ const opts = {
   once: false,
   verbose: false,
   noDigest: false,
-  home: process.env.AGENT_FLOW_HOME ?? join(homedir(), ".agent-flow-ex"),
+  home: process.env.AGENT_EX_HOME ?? join(homedir(), ".agent-ex"),
 };
 
 const positional = [];

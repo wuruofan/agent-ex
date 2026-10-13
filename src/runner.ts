@@ -22,8 +22,8 @@ const MAX_RESULT_LEN = 4000;
 // 瞬态重试：agent 自身内部重试耗尽后仍把 429/529 当作终态报错时，runner 再兜底重试。
 // 仅对「瞬时/可恢复」错误重试；timeout（真超时）、needs_input（等人工）、硬失败不重试。
 const MAX_ATTEMPTS = 3;
-// 退避可用 AGENT_FLOW_RETRY_BACKOFF_MS 覆盖（逗号分隔，毫秒），便于集成测试走短退避；生产默认 30s/60s。
-const RETRY_BACKOFF_MS = (process.env.AGENT_FLOW_RETRY_BACKOFF_MS ?? "30000,60000")
+// 退避可用 AGENT_EX_RETRY_BACKOFF_MS 覆盖（逗号分隔，毫秒），便于集成测试走短退避；生产默认 30s/60s。
+const RETRY_BACKOFF_MS = (process.env.AGENT_EX_RETRY_BACKOFF_MS ?? "30000,60000")
   .split(",").map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
 
 /** 判断 agent 终态报错是否为可重试的瞬时错误（429 限流 / 529 集群过载 / 5xx / 连接重置 / 配额临时不可用）。 */

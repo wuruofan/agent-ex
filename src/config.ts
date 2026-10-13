@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { agentFlowHome, ensureRuntimeDirs } from "./paths.js";
+import { agentExHome, ensureRuntimeDirs } from "./paths.js";
 
 export interface ExecutorConfig {
   bin: string;
@@ -38,7 +38,7 @@ export function resolveEnvPlaceholders(env: Record<string, string>): Record<stri
 
 export function loadConfig(home?: string): Config {
   ensureRuntimeDirs();
-  const cfgPath = join(home ?? agentFlowHome(), "config.json");
+  const cfgPath = join(home ?? agentExHome(), "config.json");
   const cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Config;
   validate(cfg);
   return cfg;

@@ -1,8 +1,8 @@
 // stdio 冒烟：模拟 Trae 客户端发 initialize + tools/list 给 server.js
 import { spawn } from "node:child_process";
 
-const server = spawn("/usr/local/bin/node", ["/Users/meow/workspace/agent-flow-ex/dist/server.js"], {
-  env: { ...process.env, AGENT_FLOW_HOME: "/tmp/agent-flow-ex-smoke" },
+const server = spawn("/usr/local/bin/node", ["/Users/meow/workspace/agent-ex/dist/server.js"], {
+  env: { ...process.env, AGENT_EX_HOME: "/tmp/agent-ex-smoke" },
   stdio: ["pipe", "pipe", "pipe"],
 });
 
@@ -35,7 +35,7 @@ setTimeout(() => {
         const names = j.result.tools.map((t) => t.name);
         console.log("=== tools ===");
         console.log(names);
-        const want = ["agent_flow_submit", "agent_flow_status", "agent_flow_cancel"];
+        const want = ["agent_ex_submit", "agent_ex_status", "agent_ex_cancel"];
         const missing = want.filter((n) => !names.includes(n));
         if (missing.length === 0) console.log("OK: all three tools registered");
         else { console.log("FAIL: missing", missing); process.exit(1); }

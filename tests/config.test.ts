@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentFlowHome, dbPath, logsDir } from "../src/paths.js";
+import { agentExHome, dbPath, logsDir } from "../src/paths.js";
 import { loadConfig, resolveEnvPlaceholders } from "../src/config.js";
 
 // 用 process.execPath 作为 fixture bin：保证测试环境一定存在（validate 会做 existsSync 校验）。
@@ -21,20 +21,20 @@ const validConfig = {
 };
 
 describe("paths", () => {
-  beforeEach(() => { process.env.AGENT_FLOW_HOME = mkdtempSync(join(tmpdir(), "afex-")); });
-  afterEach(() => { rmSync(process.env.AGENT_FLOW_HOME!, { recursive: true, force: true }); delete process.env.AGENT_FLOW_HOME; });
+  beforeEach(() => { process.env.AGENT_EX_HOME = mkdtempSync(join(tmpdir(), "afex-")); });
+  afterEach(() => { rmSync(process.env.AGENT_EX_HOME!, { recursive: true, force: true }); delete process.env.AGENT_EX_HOME; });
 
-  it("resolves home from env with fallback to ~/.agent-flow-ex", () => {
-    expect(agentFlowHome()).toBe(process.env.AGENT_FLOW_HOME);
+  it("resolves home from env with fallback to ~/.agent-ex", () => {
+    expect(agentExHome()).toBe(process.env.AGENT_EX_HOME);
     const savedHome = process.env.HOME;
-    const savedAfHome = process.env.AGENT_FLOW_HOME;
-    delete process.env.AGENT_FLOW_HOME;
-    expect(agentFlowHome()).toBe(join(savedHome!, ".agent-flow-ex"));
-    process.env.AGENT_FLOW_HOME = savedAfHome;
+    const savedAfHome = process.env.AGENT_EX_HOME;
+    delete process.env.AGENT_EX_HOME;
+    expect(agentExHome()).toBe(join(savedHome!, ".agent-ex"));
+    process.env.AGENT_EX_HOME = savedAfHome;
   });
   it("derives db and logs paths", () => {
-    expect(dbPath()).toBe(join(agentFlowHome(), "tasks.db"));
-    expect(logsDir()).toBe(join(agentFlowHome(), "logs"));
+    expect(dbPath()).toBe(join(agentExHome(), "tasks.db"));
+    expect(logsDir()).toBe(join(agentExHome(), "logs"));
   });
 });
 

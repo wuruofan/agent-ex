@@ -78,15 +78,15 @@ describe("buildConfig", () => {
 describe("MCP 配置片段（2026-10-10 实测：必须绝对路径）", () => {
   it("command 是 node 解释器绝对路径，不是裸命令名", () => {
     const parsed = JSON.parse(mcpServerSnippet("/x/dist/server.js"));
-    const entry = parsed.mcpServers["agent-flow-ex"];
-    // 回归防线：曾输出 {command:"agent-flow-ex"}，MCP 客户端 spawn 时无 PATH → command not found。
-    expect(entry.command).not.toBe("agent-flow-ex");
+    const entry = parsed.mcpServers["agent-ex"];
+    // 回归防线：曾输出 {command:"agent-ex"}，MCP 客户端 spawn 时无 PATH → command not found。
+    expect(entry.command).not.toBe("agent-ex");
     expect(isAbsolute(entry.command)).toBe(true);
     expect(entry.command).toBe(nodeExecPath());
   });
   it("args 带 server 入口绝对路径，且片段是合法 JSON", () => {
     const parsed = JSON.parse(mcpServerSnippet("/x/dist/server.js"));
-    expect(parsed.mcpServers["agent-flow-ex"].args).toEqual(["/x/dist/server.js"]);
+    expect(parsed.mcpServers["agent-ex"].args).toEqual(["/x/dist/server.js"]);
   });
   it("server 入口由 init 自身位置推导，不依赖 cwd", () => {
     const entry = resolveServerEntry();
@@ -96,11 +96,11 @@ describe("MCP 配置片段（2026-10-10 实测：必须绝对路径）", () => {
 });
 
 describe("nextSteps 收尾指引", () => {
-  const text = nextSteps("/home/u/.agent-flow-ex", "/abs/dist/server.js");
+  const text = nextSteps("/home/u/.agent-ex", "/abs/dist/server.js");
   it("包含数据目录、注册片段与 skill 安装指引", () => {
-    expect(text).toContain("AGENT_FLOW_HOME=/home/u/.agent-flow-ex");
+    expect(text).toContain("AGENT_EX_HOME=/home/u/.agent-ex");
     expect(text).toContain("/abs/dist/server.js");
-    expect(text).toContain("skills add wuruofan/agent-flow-ex");
+    expect(text).toContain("skills add wuruofan/agent-ex");
   });
   it("解释了绝对路径的原因（PATH 不可继承）与宿主 skills 目录查找法", () => {
     expect(text).toMatch(/without your shell PATH|不继承/);

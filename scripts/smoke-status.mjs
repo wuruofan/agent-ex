@@ -1,4 +1,4 @@
-// stdio 冒烟 #2：调 tools/call agent_flow_status 无参，期望 []
+// stdio 冒烟 #2：调 tools/call agent_ex_status 无参，期望 []
 import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,8 +13,8 @@ writeFileSync(join(home, "config.json"), JSON.stringify({
   defaults: { profile: "fake", timeout_sec: 60 },
 }));
 
-const server = spawn("/usr/local/bin/node", ["/Users/meow/workspace/agent-flow-ex/dist/server.js"], {
-  env: { ...process.env, AGENT_FLOW_HOME: home },
+const server = spawn("/usr/local/bin/node", ["/Users/meow/workspace/agent-ex/dist/server.js"], {
+  env: { ...process.env, AGENT_EX_HOME: home },
   stdio: ["pipe", "pipe", "pipe"],
 });
 
@@ -27,7 +27,7 @@ const send = (obj) => server.stdin.write(JSON.stringify(obj) + "\n");
 
 send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "smoke", version: "0" } } });
 send({ jsonrpc: "2.0", method: "notifications/initialized" });
-send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_flow_status", arguments: {} } });
+send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_ex_status", arguments: {} } });
 
 setTimeout(() => {
   server.kill();

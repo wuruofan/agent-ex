@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# install-skill.sh — symlink the agent-flow-dispatch skill into AI-tool skill dirs.
+# install-skill.sh — symlink the agent-ex-dispatch skill into AI-tool skill dirs.
 #
-# The skill has a single canonical source of truth at <repo>/skills/agent-flow-dispatch.
+# The skill has a single canonical source of truth at <repo>/skills/agent-ex-dispatch.
 # This script fans it out as symlinks into each tool's user-level skills directory.
 #
 # Why symlinks and not copies: the skill is under active development. A copy would
@@ -28,11 +28,11 @@
 # Usage:
 #   ./install-skill.sh                         # default: ~/.agents/skills + ~/.workbuddy/skills
 #   ./install-skill.sh /path/a/skills /path/b  # explicit targets (overrides default)
-#   AGENT_FLOW_SKILL_TARGETS="~/.x/skills:~/.y" ./install-skill.sh   # env override
+#   AGENT_EX_SKILL_TARGETS="~/.x/skills:~/.y" ./install-skill.sh   # env override
 #
 # This is the DEVELOPER route (symlink to a local clone). End users should install from
 # GitHub instead, which needs no clone and is the distribution path that works everywhere:
-#   npx -y skills add wuruofan/agent-flow-ex --skill agent-flow-dispatch -g -y
+#   npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y
 # Don't install both into the same target dir — pick one, delete the other.
 #
 set -euo pipefail
@@ -40,7 +40,7 @@ set -euo pipefail
 # Resolve repo root from this script: <repo>/scripts/install-skill.sh -> <repo>
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SKILL_NAME="agent-flow-dispatch"
+SKILL_NAME="agent-ex-dispatch"
 CANONICAL="$REPO_ROOT/skills/$SKILL_NAME"
 
 if [ ! -f "$CANONICAL/SKILL.md" ]; then
@@ -54,12 +54,12 @@ DEFAULT_TARGETS=(
   "$HOME/.workbuddy/skills"
 )
 
-# Targets: CLI args > AGENT_FLOW_SKILL_TARGETS env > defaults
+# Targets: CLI args > AGENT_EX_SKILL_TARGETS env > defaults
 TARGETS=()
 if [ "$#" -gt 0 ]; then
   TARGETS=("$@")
-elif [ -n "${AGENT_FLOW_SKILL_TARGETS:-}" ]; then
-  IFS=':' read -ra TARGETS <<< "$AGENT_FLOW_SKILL_TARGETS"
+elif [ -n "${AGENT_EX_SKILL_TARGETS:-}" ]; then
+  IFS=':' read -ra TARGETS <<< "$AGENT_EX_SKILL_TARGETS"
 else
   TARGETS=("${DEFAULT_TARGETS[@]}")
 fi

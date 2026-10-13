@@ -3,9 +3,9 @@
  * Isolated verification for wait-task.mjs. Run it after any edit to the script:
  *
  *   node --disable-warning=ExperimentalWarning \
- *     skills/agent-flow-dispatch/scripts/wait-task.test.mjs
+ *     skills/agent-ex-dispatch/scripts/wait-task.test.mjs
  *
- * It never touches ~/.agent-flow-ex: every case builds a throwaway AGENT_FLOW_HOME with a
+ * It never touches ~/.agent-ex: every case builds a throwaway AGENT_EX_HOME with a
  * synthetic tasks.db and log file, so it cannot disturb the MCP server, a live runner, or
  * the Feishu notifier.
  *
@@ -73,7 +73,7 @@ function run(args) {
   const t0 = Date.now();
   return new Promise((resolve) => {
     const p = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", SCRIPT, ...args],
-      { env: { ...process.env, AGENT_FLOW_HOME: HOME } });
+      { env: { ...process.env, AGENT_EX_HOME: HOME } });
     let out = "", err = "";
     p.stdout.on("data", (d) => (out += d));
     p.stderr.on("data", (d) => (err += d));
@@ -200,7 +200,7 @@ console.log("=== 6. wait budget: derived from timeout_sec / explicit / never ===
   // the point where a finite budget would have fired (interval is 1s).
   const child = spawn(process.execPath,
     ["--disable-warning=ExperimentalWarning", SCRIPT, "task_mock_budget_0001", "--interval-sec", "1", "--max-wait-sec", "0"],
-    { env: { ...process.env, AGENT_FLOW_HOME: HOME } });
+    { env: { ...process.env, AGENT_EX_HOME: HOME } });
   let out = "";
   child.stdout.on("data", (x) => (out += x));
   await new Promise((r) => setTimeout(r, 6000));

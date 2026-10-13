@@ -1,6 +1,6 @@
 # Prompt 模板
 
-worker（后台 agent CLI）不共享调度会话的任何上下文。以下模板保证工单自包含。填好后整体作为 `agent_flow_submit` 的 `prompt`。
+worker（后台 agent CLI）不共享调度会话的任何上下文。以下模板保证工单自包含。填好后整体作为 `agent_ex_submit` 的 `prompt`。
 
 ## 模板 A：编码任务（功能/修复/重构）
 
@@ -63,7 +63,7 @@ worker（后台 agent CLI）不共享调度会话的任何上下文。以下模�
 背景补充（如需要）：<只补本次答复需要的新事实，不要重复整份工单>
 ```
 
-提交为 `agent_flow_submit({ continue_of: <task_id>, prompt: <上面内容> })`。worker 带着原上下文继续，所以只答问题本身，简洁为要；但若你的答复引入了原工单没有的新约束，要把新约束写清楚。
+提交为 `agent_ex_submit({ continue_of: <task_id>, prompt: <上面内容> })`。worker 带着原上下文继续，所以只答问题本身，简洁为要；但若你的答复引入了原工单没有的新约束，要把新约束写清楚。
 
 ## 模板 C：只读评审/调研（不改代码）
 

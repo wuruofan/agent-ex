@@ -5,7 +5,7 @@ import { describe, test, expect, vi } from "vitest";
 import { version } from "../src/tools/version.js";
 import { restart } from "../src/tools/restart.js";
 
-describe("agent_flow_version", () => {
+describe("agent_ex_version", () => {
   test("reads build meta from a given path", () => {
     const dir = mkdtempSync(join(tmpdir(), "af-meta-"));
     const metaPath = join(dir, "build-meta.json");
@@ -33,7 +33,7 @@ describe("agent_flow_version", () => {
   });
 });
 
-describe("agent_flow_restart", () => {
+describe("agent_ex_restart", () => {
   test("returns restarting shape and triggers shutdown (injected, no real exit)", () => {
     const spy = vi.fn();
     const res = restart(spy);

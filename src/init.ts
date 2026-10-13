@@ -1,8 +1,8 @@
 /**
- * `agent-flow-ex init` —— 交互式 onboarding。
+ * `agent-ex init` —— 交互式 onboarding。
  * 自动探测 agent CLI 绝对路径、引导填写 profile 与密钥，生成：
- *   $AGENT_FLOW_HOME/config.json   —— 只含 {env:VAR} 占位符，零明文密钥
- *   $AGENT_FLOW_HOME/.env          —— 真实密钥，chmod 600，本地文件不提交不同步
+ *   $AGENT_EX_HOME/config.json   —— 只含 {env:VAR} 占位符，零明文密钥
+ *   $AGENT_EX_HOME/.env          —— 真实密钥，chmod 600，本地文件不提交不同步
  * 完成后用 loadConfig() 自校验，并提示可编辑 config.json 调整模型别名/默认 env。
  *
  * 密钥处理策略：
@@ -16,7 +16,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { join, dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentFlowHome, ensureRuntimeDirs } from "./paths.js";
+import { agentExHome, ensureRuntimeDirs } from "./paths.js";
 import { loadConfig } from "./config.js";
 
 type RL = ReturnType<typeof createInterface>;
@@ -195,13 +195,13 @@ export function nodeExecPath(): string {
 /**
  * 生成可直接粘贴进宿主 MCP 配置的片段。
  * **为什么必须用绝对路径**：MCP 客户端 spawn 子进程时不继承用户 shell 的 PATH——
- * `node_modules/.bin` 只有 npm 脚本执行时才临时注入。所以 `{command:"agent-flow-ex"}`
+ * `node_modules/.bin` 只有 npm 脚本执行时才临时注入。所以 `{command:"agent-ex"}`
  * 这类裸命令名在 IDE（GUI 应用不读 .zshrc，尤其 nvm 用户）里会直接 command not found。
  * 2026-10-10 实测：同一台机器 PATH 不含 .bin 时裸命令名失败、绝对路径正常。
  */
 export function mcpServerSnippet(serverEntry: string): string {
   return JSON.stringify(
-    { mcpServers: { "agent-flow-ex": { command: nodeExecPath(), args: [serverEntry] } } },
+    { mcpServers: { "agent-ex": { command: nodeExecPath(), args: [serverEntry] } } },
     null,
     2,
   );
@@ -214,18 +214,18 @@ export function nextSteps(home: string, serverEntry: string): string {
     "Next steps:",
     "",
     "1) Set the data dir (put it in your MCP server env):",
-    `     export AGENT_FLOW_HOME=${home}`,
+    `     export AGENT_EX_HOME=${home}`,
     "",
     "2) Register the MCP server — paste into your client's MCP config",
     "   (Trae: TRAE SOLO CN/User/mcp.json, WorkBuddy: ~/.workbuddy/mcp.json):",
     mcpServerSnippet(serverEntry),
     "",
     "   Absolute paths matter: MCP clients spawn the server without your shell PATH,",
-    "   so a bare \"agent-flow-ex\" command often fails to start (common with nvm).",
+    "   so a bare \"agent-ex\" command often fails to start (common with nvm).",
     "",
     "3) Install the dispatch skill (optional but recommended — gives you the",
     "   dispatch workflow and the background waiter):",
-    "     npx -y skills add wuruofan/agent-flow-ex --skill agent-flow-dispatch -g -y",
+    "     npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y",
     "",
     "   Already have a clone? ./scripts/install-skill.sh links it instead.",
     "   Skill dirs differ per host; if the load does not take effect, find yours with:",
@@ -236,7 +236,7 @@ export function nextSteps(home: string, serverEntry: string): string {
 }
 
 export async function runInit(input: NodeJS.ReadableStream = process.stdin): Promise<void> {
-  const home = agentFlowHome();
+  const home = agentExHome();
   ensureRuntimeDirs();
   const cfgPath = join(home, "config.json");
   const rl = createInterface({ input, output: process.stdout });
@@ -283,7 +283,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
       const secret = await collectSecret(rl, { label: "API key", varName: tokenVar, detect: presetName !== "custom" });
       if (secret) envUpdates[tokenVar] = secret;
     } else {
-      console.log("opencode: provider 由 opencode 自己的配置管理（opencode auth login / opencode.json），agent-flow 只负责拉起；如需额外环境变量，稍后加到 config.json 的 profile.env。");
+      console.log("opencode: provider 由 opencode 自己的配置管理（opencode auth login / opencode.json），agent-ex 只负责拉起；如需额外环境变量，稍后加到 config.json 的 profile.env。");
     }
 
     const feishuSecret = await collectSecret(rl, { label: "Feishu webhook URL", varName: "FEISHU_WEBHOOK_URL", detect: true });
@@ -340,5 +340,5 @@ export function resolveServerEntry(): string {
 // 被 server.ts import（argv[1] 是 server）时不自动跑，避免与 server 的 init 分支重复执行。
 const invokedDirectly = !!process.argv[1] && fileURLToPath(import.meta.url) === pathResolve(process.argv[1]);
 if (invokedDirectly) {
-  runInit().catch((e) => { console.error("[agent-flow-ex] init failed:", e); process.exit(1); });
+  runInit().catch((e) => { console.error("[agent-ex] init failed:", e); process.exit(1); });
 }

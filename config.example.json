@@ -46,7 +46,7 @@
   "notify": {
     "feishu_webhook_url": "{env:FEISHU_WEBHOOK_URL}",
     "dry_run": true,
-    "keyword": "agent-flow-ex"
+    "keyword": "agent-ex"
   },
   "defaults": {
     "profile": "opencode-minimax-3",

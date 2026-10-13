@@ -119,8 +119,8 @@ function setupHome(extraProfileEnv: Record<string, string> = {}, timeoutSec = 30
 
 beforeEach(() => {
   home = mkdtempSync("/tmp/afex-int-");
-  process.env.AGENT_FLOW_HOME = home;
-  process.env.AGENT_FLOW_RUNNER = builtRunner;
+  process.env.AGENT_EX_HOME = home;
+  process.env.AGENT_EX_RUNNER = builtRunner;
   mkdirSync(join(home, "logs"), { recursive: true });
   setupHome();
 });
@@ -135,8 +135,8 @@ afterEach(() => {
     }
   } catch { /* 清理失败不阻断 */ }
   if (existsSync(home)) rmSync(home, { recursive: true, force: true });
-  delete process.env.AGENT_FLOW_HOME;
-  delete process.env.AGENT_FLOW_RUNNER;
+  delete process.env.AGENT_EX_HOME;
+  delete process.env.AGENT_EX_RUNNER;
 });
 
 async function waitForTerminal(id: string, timeoutMs = 8_000): Promise<string> {
@@ -317,7 +317,7 @@ suite("integration: concurrent submits", () => {
 
 suite("integration: transient API error retry (P0)", () => {
   it("retries on 429 and completes after transient failures", async () => {
-    process.env.AGENT_FLOW_RETRY_BACKOFF_MS = "50,50";
+    process.env.AGENT_EX_RETRY_BACKOFF_MS = "50,50";
     const attemptFile = join(home, "attempt.txt");
     setupHome({ FAKE_MODE: "transient", FAKE_ATTEMPT_FILE: attemptFile, FAKE_FAIL_TIMES: "2" });
     const r = await submit({ prompt: "do work", project_path: home });
@@ -330,11 +330,11 @@ suite("integration: transient API error retry (P0)", () => {
     expect(log.split("\n").filter((l) => l.includes('"_retry"')).length).toBe(2);
     // 计数器到 3：runner 共运行 3 次（2 次重试 + 1 次成功）
     expect(Number(readFileSync(attemptFile, "utf8"))).toBe(3);
-    delete process.env.AGENT_FLOW_RETRY_BACKOFF_MS;
+    delete process.env.AGENT_EX_RETRY_BACKOFF_MS;
   }, 15_000);
 
   it("gives up after MAX_ATTEMPTS when 429 never recovers", async () => {
-    process.env.AGENT_FLOW_RETRY_BACKOFF_MS = "50,50";
+    process.env.AGENT_EX_RETRY_BACKOFF_MS = "50,50";
     const attemptFile = join(home, "attempt.txt");
     setupHome({ FAKE_MODE: "transient", FAKE_ATTEMPT_FILE: attemptFile, FAKE_FAIL_TIMES: "99" });
     const r = await submit({ prompt: "do work", project_path: home });
@@ -344,6 +344,6 @@ suite("integration: transient API error retry (P0)", () => {
     // MAX_ATTEMPTS=3 → 仅 2 次重试（第 3 次失败即终态 failed）
     expect(log.split("\n").filter((l) => l.includes('"_retry"')).length).toBe(2);
     expect(Number(readFileSync(attemptFile, "utf8"))).toBe(3);
-    delete process.env.AGENT_FLOW_RETRY_BACKOFF_MS;
+    delete process.env.AGENT_EX_RETRY_BACKOFF_MS;
   }, 15_000);
 });
