@@ -18,6 +18,7 @@ import { join, dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentExHome, ensureRuntimeDirs } from "./paths.js";
 import { loadConfig } from "./config.js";
+import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
 
 type RL = ReturnType<typeof createInterface>;
 
@@ -284,6 +285,11 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
       if (secret) envUpdates[tokenVar] = secret;
     } else {
       console.log("opencode: provider 由 opencode 自己的配置管理（opencode auth login / opencode.json），agent-ex 只负责拉起；如需额外环境变量，稍后加到 config.json 的 profile.env。");
+      // zen free：零密钥、模型集会轮换 → 用 {model:zen-free} 占位符让 runner 每次 spawn 时动态解析。
+      const zen = (await ask(rl, "Use opencode zen free model (auto-resolving, no key needed)", "Y")).trim();
+      if (zen === "" || /^y(es)?$/i.test(zen)) {
+        env = { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: ZEN_FREE_PLACEHOLDER, small_model: ZEN_FREE_PLACEHOLDER }) };
+      }
     }
 
     const feishuSecret = await collectSecret(rl, { label: "Feishu webhook URL", varName: "FEISHU_WEBHOOK_URL", detect: true });

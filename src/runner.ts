@@ -11,6 +11,7 @@ import { getExecutor } from "./executors/types.js";
 import { isFileMutatingTool } from "./executors/file-tools.js";
 import { buildAgentEnv } from "./agent-env.js";
 import { wrapInitialPrompt, wrapContinuePrompt, extractNeedsInput } from "./prompt.js";
+import { resolveZenFreeEnv } from "./zen-free.js";
 import { sendFeishuCard, buildFeishuCard } from "./notifier.js";
 import { dbPath } from "./paths.js";
 import { killTree } from "./proc-tree.js";
@@ -110,7 +111,8 @@ async function main(): Promise<void> {
   // 单次 agent 运行：spawn → 逐行解析事件/落库/写日志 → 终态时 resolve 出本次运行结果。
   // 不设 detached：agent 继承 runner 的进程组（runner 自己是 leader），便于 cancel 时组杀级联到 agent。
   // 注意：agent 的 Bash 工具可能派生出逃出该组的子进程（见 proc-tree.ts），cancel/timeout 用 killTree 兜底。
-  function runAgent(attempt: number): Promise<RunOutcome> {
+  // agentEnv 由调用方（重试循环）在每次 attempt 前构建：zen-free 占位符的动态解析结果随 attempt 变化（撞限换模）。
+  function runAgent(attempt: number, agentEnv: NodeJS.ProcessEnv): Promise<RunOutcome> {
     return new Promise((resolve) => {
       const files = new Set<string>(task.files_changed ?? []);
       const log = createWriteStream(task.log_path, { flags: "a" });
@@ -129,7 +131,7 @@ async function main(): Promise<void> {
       }
       const child: ChildProcess = spawn(executorCfg.bin, argv, {
         cwd: task.project_path,
-        env: buildAgentEnv(executorCfg.bin, profileEnv),
+        env: agentEnv,
         stdio: ["pipe", "pipe", "pipe"],
       });
       log.write(JSON.stringify({ type: "_runner", event: "spawn", argv: fullArgv, round: task.rounds, attempt, child_pid: child.pid }) + "\n");
@@ -193,17 +195,25 @@ async function main(): Promise<void> {
 
   // 重试循环：仅对瞬时错误（429/529/5xx/连接重置/配额临时不可用）重试；
   // timeout（真超时）、needs_input（等人工）、硬失败不重试。第 MAX_ATTEMPTS 次仍失败即终态 failed。
+  // zen-free 动态模型：占位符在**每次 attempt 前**解析（实时列表可能已轮换）；撞瞬时错误的模型
+  // 进排除集 → 下一 attempt 自动路由到另一个 free 模型。非 zen profile 是零成本旁路（原样返回）。
   let outcome: RunOutcome | null = null;
   let attempt = 0;
+  const zenExcluded = new Set<string>();
   while (attempt < MAX_ATTEMPTS) {
     attempt++;
-    outcome = await runAgent(attempt);
+    const resolved = await resolveZenFreeEnv(profileEnv, zenExcluded);
+    if (resolved.model) {
+      appendFileSync(task.log_path, JSON.stringify({ type: "_runner", event: "zen_model", attempt, model: resolved.model, excluded: [...zenExcluded] }) + "\n");
+    }
+    outcome = await runAgent(attempt, buildAgentEnv(executorCfg.bin, resolved.env));
     const finalText = (outcome.resultText ?? outcome.lastAssistantText ?? "").trim();
     if (outcome.timedOut) break;           // 真超时，不是 API 瞬时错误
     if (outcome.question) break;           // 等人工，交给 dispatcher 代答/续跑
     if (outcome.resultIsError || outcome.code !== 0) {
       const errText = outcome.stderrTail || finalText || "";
       if (isTransientError(errText) && attempt < MAX_ATTEMPTS) {
+        if (resolved.model) zenExcluded.add(resolved.model);
         appendFileSync(task.log_path, JSON.stringify({ type: "_retry", attempt, reason: trunc(errText, 200) }) + "\n");
         await sleep(RETRY_BACKOFF_MS[attempt - 1] ?? 60000);
         continue;
