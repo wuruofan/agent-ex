@@ -194,13 +194,12 @@ cd agent-ex
 git remote set-url origin git@github.com:wuruofan/agent-ex.git
 ```
 
-**GitHub 仓库改名**（Settings → General → Repository name → Rename）——**本次不做，推送前再做**（2026-10-12 定，见 §9）：
-- GitHub 会给旧 URL 建 **301 重定向**，`git clone` 老地址仍可用；
-- 但 **Actions / Dependabot / 其他集成不被重定向覆盖**，需手动更新（⚠️ 当前仓库**没有** `.github/workflows`，暂无实际受影响项）。
+**GitHub 仓库改名**（Settings → General → Repository name → Rename）—— ✅ **已完成**（2026-10-12 用 `gh repo rename agent-ex` 执行，见 §10 E-1）：
+- GitHub 给旧 URL 建了 **301 重定向**（`agent-flow-ex` → `agent-ex` 已实测 301），老 clone 的 `git pull` 不受影响；
+- **Actions / Dependabot / 其他集成不被重定向覆盖**（⚠️ 当前仓库**没有** `.github/workflows`，暂无实际受影响项）；
+- `gh repo rename` 已自动把本地 remote 更新为新地址，所以下面脚本里的 `set-url` 属于**幂等重复**（保留是为了让脚本自洽、也能修复 remote 被意外改回的情况）。
 
-⚠️ **两条副作用**：
-1. **远端尚未存在**：`set-url` 指向的 `wuruofan/agent-ex` 在 GitHub 改名完成前是 404 ⇒ 这期间任何 `push` / `fetch` / `git pull` 都会失败。**改名完成前不要 push**（本步只是把本地 remote 指向最终地址，省掉以后再改一次）。
-2. **Trae CN 的工作区会失效**：`mv` 之后 IDE 里打开的还是旧路径，文件面板会变空。**重新打开 `agent-ex` 文件夹**再继续（Trae SOLO / WorkBuddy 若也开着这个目录，同样重开）。
+⚠️ **一条副作用**：`mv` 之后 IDE 里打开的还是旧路径，文件面板会变空。**重新打开 `agent-ex` 文件夹**再继续（Trae CN / SOLO / WorkBuddy 若也开着这个目录，同样重开）。
 
 ### Step 4 · skill 软链修复
 
@@ -225,15 +224,14 @@ ls -la ~/.agents/skills/agent-ex-dispatch ~/.workbuddy/skills/agent-ex-dispatch 
 npm run build     # 必须：dist 里还是旧工具名
 ```
 
-⚠️ **本步是整个 spec 唯一需要人操作的地方**。
+⚠️ **本步需要人操作**（MCP 面板的重连按钮）。
 
-本机共 **3 个宿主**注册了这个 MCP server（2026-10-12 逐一读文件确认，非推测），**每个文件都是同样的三处要改**：
+本机需要改的是 **2 个配置文件**（2026-10-12 调整，原为 3 处——Trae CN 的项目级 `.trae/mcp.json` 已删除，见下方说明）：
 
 | # | 宿主 | 配置文件 | 备注 |
 | :--- | :--- | :--- | :--- |
 | 1 | WorkBuddy | `~/.workbuddy/mcp.json` | 已确认真实路径 |
 | 2 | Trae SOLO CN（traework） | `~/Library/Application Support/TRAE SOLO CN/User/mcp.json` | **全局**配置，2026-10-12 14:22 已配好并生效 |
-| 3 | Trae CN（IDE） | `<repo>/.trae/mcp.json` | **项目级**，受 `trae.mcp.enableWorkspaceMcp` 开关控制（本机已开：`true`） |
 
 每个文件里改这三处（键名 / 路径 / env）：
 
@@ -247,18 +245,15 @@ npm run build     # 必须：dist 里还是旧工具名
 
 - `~/.workbuddy/mcp.json` —— 有 `mcpServers` + `type: "stdio"`。
 - `TRAE SOLO CN/User/mcp.json` —— **没有 `type` 字段也能正常工作**，照原样保留其余结构即可，只改上面三处。
-- `<repo>/.trae/mcp.json` —— **untracked**（`git status` 显示 `?? .trae/mcp.json`，`.gitignore` 里没有 `.trae`）⇒ 目录改名不会带走它，但**改名后它会指向已不存在的旧路径**；且因为不在 git 里，§4 Step 1 的 `git grep` 验证**扫不到它**，必须靠验收 #9 单独查。
 
-⚠️ 改名后 `.trae/` 会跟着目录一起搬到 `agent-ex` 下（它在仓库内），所以这个文件改的是**内容里的路径**，不是它的位置。
+**关于 Trae CN（IDE）**：原先它在用项目级 `<repo>/.trae/mcp.json`，**2026-10-12 已删除**（用户决定：这个含绝对路径的 untracked 文件每次改名都要跟着改，不如不要；Trae CN 不需要这个 MCP）。删除后 Trae CN 的 `User/` 目录里本来就没有全局 `mcp.json`，因此它现在**不持有这个 server**，改名与重连都与它无关。若日后要在 Trae CN 里用，需在 `~/Library/Application Support/Trae CN/User/mcp.json` 新建一份（该路径已验证与 SOLO 同构，但**未找到官方文档确认** Trae CN 一定读它，配置后须实测）。
 
-1. 在 MCP 面板 **disable → re-enable**（或重启 IDE）迫使客户端重连。三个宿主各自独立，**WorkBuddy / SOLO / Trae CN 都要各自重连一次**。
+1. 在 MCP 面板 **disable → re-enable**（或重启 IDE）迫使客户端重连。两个宿主各自独立，**WorkBuddy 与 SOLO 都要各自重连一次**。
 2. 调 `agent_ex_version` 验证 —— 若还报「无此工具」，说明客户端仍连着旧 server，需再 disable/re-enable 一次。
 
-> **为什么 SOLO 用全局、Trae CN 用项目级**（2026-10-12 逐 bundle 比对，非推测）：两个版本的 MCP 实现代码**逐字符相同**，都读两处 —— 全局 `joinPath(userSettingsResource,"..","mcp.json")` 与项目级 `joinPath(workspaceUri,".trae","mcp.json")`；开关默认值也相同（`getValue("trae.mcp.enableWorkspaceMcp") ?? false`）。**差别只在本机配置**：Trae CN 的 `settings.json` 里该开关为 `true` ⇒ 走项目级；SOLO 未设置该键 ⇒ 取默认 `false` ⇒ 项目级被 gate 掉，只剩全局 `User/mcp.json` 生效（已实测连通）。
+> **为什么 SOLO 用全局**（2026-10-12 逐 bundle 比对，非推测）：两个版本的 MCP 实现代码**逐字符相同**，都读两处 —— 全局 `joinPath(userSettingsResource,"..","mcp.json")` 与项目级 `joinPath(workspaceUri,".trae","mcp.json")`；开关默认值也相同（`getValue("trae.mcp.enableWorkspaceMcp") ?? false`）。本机 SOLO 的 `User/` 目录里有 `mcp.json` ⇒ 走全局（已实测连通）；Trae CN 的 `User/` 目录里**没有** `mcp.json`，其 `settings.json` 里开关为 `true`，两者相加才使项目级成为它当时的唯一入口——现已删除该文件。
 >
-> ⇒ **不需要升级 Trae/SOLO 来"支持"全局路径**，当前版本已支持；也别以为项目级路径是新版才有。两条路都覆盖到了，改名时三处配置都要改。
->
-> 可选收敛（不在本次改名范围内）：把 Trae CN 也改成全局 `User/mcp.json`，可让 `<repo>/.trae/mcp.json` 这个 untracked 文件彻底不再影响改名。
+> ⇒ **不需要升级 Trae/SOLO 来"支持"全局路径**，当前版本已支持。
 
 > 为什么不直接用 `agent_ex_restart`：该工具让 server 退出，注释里假设「host 会在 stdin/stdout 关闭后 respawn」（`src/tools/restart.ts:6-8`）。**这个假设在 Trae 下不成立**（客户端不自愈），所以在 Trae 上用它等于自杀。必须走 UI 面板重连。
 >
@@ -300,11 +295,10 @@ npm run build     # 必须：dist 里还是旧工具名
 **验收 #9 的验证命令**（不能只用 `git grep`——`<repo>/.trae/mcp.json` 是 untracked，另两处在仓库外）：
 
 ```bash
-# 1) 三个已知宿主逐个查（注意：grep -c 在 0 命中时输出 0 且退出码 1，
+# 1) 两个已知宿主逐个查（注意：grep -c 在 0 命中时输出 0 且退出码 1，
 #    直接 `|| echo 缺文件` 会把「正确」误报成「缺文件」；先判文件存在，再 || true 兜住退出码）
 for f in ~/.workbuddy/mcp.json \
-         "$HOME/Library/Application Support/TRAE SOLO CN/User/mcp.json" \
-         /Users/wuruofan/mine/rfw/agent-ex/.trae/mcp.json; do
+         "$HOME/Library/Application Support/TRAE SOLO CN/User/mcp.json"; do
   if [ -f "$f" ]; then
     n=$(grep -c 'agent-flow' "$f" || true)     # 期望 0
     printf '%-72s %s\n' "$f" "$([ "$n" = 0 ] && echo OK || echo "残留 $n 处！")"
@@ -313,7 +307,8 @@ for f in ~/.workbuddy/mcp.json \
   fi
 done
 
-# 2) 兜底：全机扫一遍 mcp.json，确认没有第 4 处（2026-10-12 实测恰好 3 处）
+# 2) 兜底：全机扫一遍 mcp.json，确认没有第 3 处（2026-10-12 实测：原本 3 处，
+#    Trae CN 的项目级 .trae/mcp.json 已删除后只剩这 2 处）
 find ~ -name mcp.json -not -path "*/node_modules/*" -not -path "*/.git/*" \
   -exec grep -l "agent-flow" {} \; 2>/dev/null
 ```
@@ -387,7 +382,7 @@ cd /Users/wuruofan/mine/rfw/agent-flow-ex
 ## 9. 待确认
 
 - [x] 名字 `agent-ex` 是否最终确认？→ **已确认**（2026-10-12，`ex` = external，作者本意）。注意：**先改 `agent_ex_` 工具名会留下已发布版本的兼容负担**——包未发布前改是零成本，发布后就难了
-- [x] GitHub 仓库是否本次一起改名？→ **推送前再改**（2026-10-12 定）。先只做本地 `git remote set-url`（Step 3 已留此路径），推送前去 GitHub Settings 改名
+- [x] GitHub 仓库是否本次一起改名？→ **已改名**（2026-10-12 执行 `gh repo rename agent-ex`，见 §10 E-1）。301 已验证，本地 remote 已自动更新
 - [x] 是否需要在 README 顶部加一段「旧名 → 新名」迁移说明？→ **不加**（2026-10-12 定）。无存量用户（0 star / 0 fork / 0 watcher，npm 未发布，2026-10-12 查证）；GitHub 改名自带 301；README 安装命令在 Step 1 一并改掉，改完自洽
 - [x] **环境变量 / 驼峰标识符是否一并改名？→ 是**（2026-10-12 复核定）。目标 2 是"不留混用"，而 `AGENT_FLOW_HOME` 同时出现在 README 与本机 MCP 配置里，只改代码会造成读写两套名。改动零成本：包未发布、本机 `~/.zshrc` / `~/.zprofile` 都没有依赖它（已查）
 - [x] **`project_path` 是否迁移？→ 否**（2026-10-12 实测 0 行含旧名，旧 SQL 是空操作）
@@ -436,3 +431,11 @@ cd /Users/wuruofan/mine/rfw/agent-flow-ex
 | R-7 (P2) | 数据目录 `~/.agent-flow-ex/config.json` 漏了：`notify.keyword = "agent-flow-ex"` 是 **live config**（非历史），不改则飞书通知继续带旧 keyword，与目标 2「不留混用」矛盾 | Step 2 补改法（含 `.bak` 备份 + 验证 grep）；§8 回滚补 `mv config.json.bak` 还原 |
 | R-8 (P2) | Step 3 `mv` 后 **Trae CN 打开的工作区路径失效**，spec 只写了 MCP 重连 | Step 3 补「重新打开 `agent-ex` 文件夹」 |
 | R-9 (P2) | Step 3 `set-url` 指向尚不存在的 `wuruofan/agent-ex` ⇒ 到 GitHub Rename 前 push/fetch 全 404，§9 只说「推送前再改仓库名」 | Step 3 明确「改名完成前不要 push」 |
+
+### 执行期变更（2026-10-12 晚，改名开始前落地）
+
+| # | 变更 | 说明 |
+| :--- | :--- | :--- |
+| E-1 | **GitHub 仓库已提前改名** | `gh repo rename agent-ex` 已执行（admin 权限），`wuruofan/agent-ex` → 200、旧地址 `wuruofan/agent-flow-ex` → **301**，本地 remote 已自动更新为 `git@github.com:wuruofan/agent-ex.git`。⇒ Step 3 的「远端 404 / 改名完成前禁 push」已失效，本段随之删除 |
+| E-2 | **Trae CN 的项目级 `.trae/mcp.json` 已删除** | 用户决定不要（每改名一次就要跟着改，且含本机绝对路径）。⇒ Step 5 与验收 #9 从 3 处收敛为 **2 处**；Trae CN 当前不持有此 server。若日后要在 Trae CN 用，需新建 `Trae CN/User/mcp.json`（路径同构已验证，但无官方文档确认，配置后须实测） |
+| E-3 | Step 1 的 `-uno` 与 §3 的 `.trae/` 说明作废 | `.trae/` 已随文件删除，`git status` 现在本就干净，`-uno` 不再必要（保留也无害） |
