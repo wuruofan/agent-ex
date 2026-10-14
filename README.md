@@ -481,6 +481,7 @@ node dist/server.js init    # 即 `agent-ex init`
 |---|---|---|
 | `bin` | `dist/server.js` | 全局安装后 `agent-ex` 可直接跑 server |
 | `files` | `dist` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包 |
+| `publishConfig.registry` | `https://registry.npmjs.org` | 锁定发布目标为官方源（见下） |
 | `prepublishOnly` | `build` + `test` | 发布前自动构建并跑全量测试，测试红则发布中止 |
 | `engines.node` | `>=22.5` | 依赖 `node:sqlite`（server 与 runner 都要用） |
 
@@ -489,7 +490,19 @@ npm run build && npm test      # prepublishOnly 也会跑，但建议先手动�
 npm publish --access public
 ```
 
-发布者需自备 npm 账号并 `npm login`（包名当前在公共 registry 上未被占用）。
+> ⚠️ **必须显式带 `--registry https://registry.npmjs.org`**（或确保 `publishConfig.registry` 生效）。
+> 国内常见的 `registry.npmmirror.com`（淘宝镜像）是**只读**的，不支持 `npm publish`，也不提供注册/登录端点；
+> 带着它发布会在客户端就报 `ENEEDAUTH`。开发者若用镜像装依赖，请在 `~/.npmrc` 之外单独配置发布源。
+
+发布者需自备 npm 账号并 `npm login --registry=https://registry.npmjs.org`。
+
+**关于 token**（npm 现行策略）：经典 automation token 已于 2025-12 被彻底吊销，`npm login` 现在只签发**约 2 小时的会话凭据**。
+个人手动发布推荐直接用交互式 2FA（`npm login` → `npm publish` 时输 OTP），该方式不受 2027-01 的
+「bypass-2FA 令牌直接发布」弃用影响。若要用无人值守的自动化令牌，务必选 **Read and write (stage only)**
+（`npm stage publish` → 网页/CLI approve），**不要**勾选 *Bypass 2FA*——直接发布能力将于 2027 年 1 月移除。
+
+若要接 CI，推荐 [Trusted Publisher（OIDC）](https://docs.npmjs.com/trusted-publishers)（无需长期密钥）。
+注意它**无法创建新包**：必须先手动发布至少一个版本、包已存在后才能配置。
 
 > ⚠️ **npm 包不含 dispatch skill**：`skills/` 与 `scripts/` 不在 `files` 白名单里。
 > 但这已不再是分发缺口——skill 走 [Agent Skills](https://github.com/agentskills) 规范，
