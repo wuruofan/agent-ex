@@ -2,7 +2,10 @@
 
 **Dispatch and review with *external* agents.** 一个把 AI 编程 Agent（Claude Code / OpenCode）当作「外部执行者」来协作的 **MCP Server**——既能派发后台任务，也能让外部 agent 独立出方案、相互 review。
 
-通过 MCP 工具 `submit` / `status` / `cancel` 提交任务：server 以 detached 子进程拉起**真实** agent CLI，用 SQLite 记录任务状态机，支持 `NEEDS_INPUT` 续跑、超时、取消，并在任务结束时推送飞书通知。
+通过 MCP 工具 `agent_ex_submit` / `agent_ex_status` / `agent_ex_cancel` 提交任务：server 以 detached 子进程拉起**真实** agent CLI，用 SQLite 记录任务状态机，支持 `NEEDS_INPUT` 续跑、瞬时错误重试、超时、取消，并在任务结束时推送飞书通知。
+
+> 下文的 `submit` / `status` / `cancel` / `version` / `restart` 均指 `agent_ex_*` 全名；
+> 部分 MCP 宿主会再加一层前缀（如 `mcp__agent-ex__agent_ex_submit`）。
 
 三种典型协作形态（都只是 `submit` 的不同 prompt，**不需要任何新工具**）：
 
@@ -18,8 +21,10 @@
 - **状态机**：`queued → running → (needs_input → running → …) → completed | failed | cancelled`，最多 5 轮续跑。
 - **多 Agent / 多 Provider**：内置 `claude` 与 `opencode` 两个 executor，可配置不同 profile（如 MiniMax、DeepSeek 网关）。
 - **NEEDS_INPUT 续跑**：agent 反问时任务进入 `needs_input`，用 `submit(continue_of=…)` 把答案喂回去继续跑。
-- **飞书通知**：任务终态（完成 / 失败 / 取消）推送飞书，支持 `dry_run` 调试。
+- **瞬时错误自动重试**：429 / 529 / 5xx / 连接重置等可恢复错误自动重试（共 3 次尝试，退避 30s → 60s），超时与硬失败不重试。
+- **飞书通知**：任务终态（完成 / 失败 / 取消）推送飞书，支持 `dry_run` 调试；配额告警也会实时推送。
 - **密钥零落盘（config）**：`config.json` 只含 `{env:ENV_VAR}` 占位符；真实密钥落在 `$AGENT_EX_HOME/.env`（chmod 600，server 启动自动加载），不进 git、不被同步。
+- **自更新 / 自诊断**：`version` 回报 `gitSha` 确认新代码已生效，`restart` 让 server 自行退出并由宿主 respawn 加载新 `dist`——不必手动重启 MCP 宿主，在跑任务不受影响。
 
 ## 架构
 
@@ -192,7 +197,8 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
   },
   "notify": {
     "feishu_webhook_url": "{env:FEISHU_WEBHOOK_URL}",
-    "dry_run": true
+    "dry_run": true,
+    "keyword": "agent-ex"
   },
   "defaults": { "profile": "minimax-3", "timeout_sec": 3600 }
 }
@@ -206,8 +212,37 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
 | `profiles.<name>.env` | 传给 agent 子进程的环境变量；支持 `{env:VAR}` 占位符（见下）。**opencode 一般留空**（provider 由 opencode 自己的 `auth.json`/`opencode.json` 管理）；要给某个 profile 单独指定模型，写 `OPENCODE_CONFIG_CONTENT: "{\"model\":\"provider/model\"}"`——`extra_flags` 是 executor 级，多 profile 无法用它区分模型。另注意 `buildAgentEnv` 只给极简 `PATH`，worker 里的 shell 用不到 `/opt/homebrew/bin` 等，需要时在此显式补 `PATH`。 |
 | `notify.feishu_webhook_url` | 飞书机器人 webhook；支持 `{env:FEISHU_WEBHOOK_URL}` 占位符。 |
 | `notify.dry_run` | `true`（缺省）→ 只打印通知内容不真发；`false` → 真发。 |
+| `notify.keyword` | 可选。附加在卡片末尾的「关键词」安全闸门，便于机器人放行你的消息（缺省不加）。 |
 | `defaults.profile` | `submit` 不指定 profile 时用的默认 profile（必须在 `profiles` 中存在）。 |
 | `defaults.timeout_sec` | 单轮超时（秒），超时 SIGTERM 杀掉 agent。 |
+
+### 免费模型动态解析：`{model:zen-free}`
+
+opencode zen 的 free 模型集会**轮换**（`mimo-v2.5-free` → `mimo-v2.6-flash-free` 已发生过，`glm-4.7-free` 已整体消失），硬编码模型名很快就会失效。
+把 `{model:zen-free}` 写进 profile 的 env，即可在**每次 spawn 前**动态解析出当前可用的 free 模型：
+
+```jsonc
+{
+  "profiles": {
+    "opencode-zen-free": {
+      "executor": "opencode",
+      "env": {
+        "OPENCODE_CONFIG_CONTENT": "{\"model\":\"{model:zen-free}\",\"small_model\":\"{model:zen-free}\"}",
+        "ZEN_FREE_PREFER": "mimo,nemotron,ling"   // 可选：家族前缀软偏好，逗号分隔、按序匹配
+      }
+    }
+  }
+}
+```
+
+- **事实来源 = spawn 时的实时清单**（`https://opencode.ai/zen/v1/models`，免鉴权），因此配置里**零硬引用**模型名。
+- `ZEN_FREE_PREFER` 只是「口味」：前缀过期不会导致失败，只会退化为「不挑食」（按 id 稳定排序取第一个可用的 `-free` 模型）。
+- 清单拉取失败 → 退回内置回退常量，**绝不阻塞任务启动**。
+- free 模型撞限流会 429；配合下面的重试机制，已撞限的模型会被加入排除集，下一次尝试自动路由到另一个 free 模型。
+- 非 zen profile 走零成本旁路（env 原样透传，不发任何请求）。
+
+> 为何不做「报错后换模」自愈：模型下线时 opencode 报的 `UnknownError: "Unexpected server error..."`（且 exit=0）与真实服务端故障无法区分，
+> 所以坚持 **spawn 前主动解析**，不做错误驱动的猜测。
 
 ### 上下文压缩：`[1m]` + `AUTO_COMPACT_WINDOW` + `PCT_OVERRIDE`
 
@@ -316,7 +351,7 @@ npm run runner <task_id>     # = tsx src/runner.ts <task_id>
 ### 跑测试
 
 ```bash
-npm run build && npm test            # 单元 + 集成 = 127 全绿
+npm run build && npm test            # 单元 + 集成 = 139 全绿
 npm run test:integration            # 只跑集成（会自动先build）
 npm run typecheck                   # 仅类型检查
 ```
@@ -354,7 +389,17 @@ npm run typecheck                   # 仅类型检查
 |---|---|---|
 | `task_id` | ✅ | 取消指定任务。 |
 
-对终态任务幂等（返回当前状态，不改写）；对 `running` 任务会 SIGTERM 级联杀掉 agent 进程。
+对终态任务幂等（返回当前状态，不改写）；对 `running` 任务会 SIGTERM 级联杀掉 agent 进程树。
+若返回带 `warning`，说明进程树快照不可用（沙箱拒绝 setuid `/bin/ps`），组外逃逸的 agent 子进程可能残留。
+
+### `version`
+
+无参数。返回构建元数据 `{ version, gitSha, buildTime }`，用于确认重启后新代码已生效；`dist/build-meta.json` 缺失时返回 `{ unknown: true, note }`。
+
+### `restart`
+
+无参数。主动退出当前 MCP server 进程，由宿主自动 respawn 并加载当前 `dist`。
+server 无状态（状态全在 `tasks.db`），在跑 worker 位于独立进程组，**重启不影响在跑任务**，也不影响其他存活的 server 实例。
 
 ## 状态机
 
@@ -383,6 +428,11 @@ npm run typecheck                   # 仅类型检查
 2. `status({ task_id })` 看到 `status: "needs_input"`、`question: "用哪种数据库？"`。
 3. `submit({ continue_of: task_id, prompt: "PostgreSQL" })` → 继续跑。
 
+两个上限，别把它们混为一谈：
+
+- **续跑轮数 ≤ 5**（`MAX_ROUNDS`）：第 5 轮仍有 pending question → 终态 `failed`，`error` 为 `rounds limit (5) reached with pending question`。
+- **单轮瞬时重试 ≤ 3 次尝试**（`MAX_ATTEMPTS`）：仅对 429 / 529 / 5xx / 连接重置等**可恢复**错误生效，退避 30s → 60s（可用 `AGENT_EX_RETRY_BACKOFF_MS` 覆盖，逗号分隔毫秒）。真超时、`needs_input`、硬失败**不重试**。重试与续跑轮数是两个独立计数，任务在单轮内即可重试 3 次。
+
 ## 排错
 
 - **`executor "claude" bin "…" not found or not executable`**：`bin` 路径不对或没 `+x`。写裸命令名时按 `process.env.PATH` 解析（见「`executors.<name>.bin`」），解析不到就写绝对路径。
@@ -390,6 +440,8 @@ npm run typecheck                   # 仅类型检查
 - **飞书不推送**：检查 `dry_run` 是否还是 `true`；检查 `.env` 里 `FEISHU_WEBHOOK_URL` 是否存在（或 server 进程环境是否已 `export`）。
 - **`{env:VAR}` 报错 `not found in process environment`**：对应密钥不在 `.env` 里，也没 `export` 到 server 进程环境。加到 `$AGENT_EX_HOME/.env` 后重启 server。
 - **任务频繁超时，且日志里反复出现 `ran out of context`**：上下文被反复压缩，agent 丢失状态后重复劳动。查压缩阈值配置（见上「上下文压缩」）——若 `ANTHROPIC_MODEL` 没带 `[1m]`，窗口会被锁在 200k；工单过大（工具调用 ≫150 次）也会撞阈值，应先拆单。
+- **改了代码但行为没变**：MCP host 会复用常驻 server 进程。`npm run build` 后调 `restart`，再用 `version` 核对 `gitSha`。
+- **opencode 报 `UnknownError: "Unexpected server error..."`（且 exit=0）**：多半是配置里的模型已被下线。这个报错与真实服务端故障**无法区分**，别靠报错自愈——改用 `{model:zen-free}` 让模型在 spawn 前动态解析（见「免费模型动态解析」）。
 
 ## 快速初始化（`init` 命令）
 
