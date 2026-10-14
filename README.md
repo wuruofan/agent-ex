@@ -2,6 +2,8 @@
 
 **Dispatch and review with *external* agents.** 一个把 AI 编程 Agent（Claude Code / OpenCode）当作「外部执行者」来协作的 **MCP Server**——既能派发后台任务，也能让外部 agent 独立出方案、相互 review。
 
+> 本文标题与命令名是 `agent-ex`，npm 包名是 [`agent-ex-mcp`](https://www.npmjs.com/package/agent-ex-mcp)（原因见「快速开始」下方说明）。
+
 通过 MCP 工具 `agent_ex_submit` / `agent_ex_status` / `agent_ex_cancel` 提交任务：server 以 detached 子进程拉起**真实** agent CLI，用 SQLite 记录任务状态机，支持 `NEEDS_INPUT` 续跑、瞬时错误重试、超时、取消，并在任务结束时推送飞书通知。
 
 > 下文的 `submit` / `status` / `cancel` / `version` / `restart` 均指 `agent_ex_*` 全名；
@@ -54,12 +56,14 @@ worker 以 agent CLI 的「跳过权限确认」模式运行（claude：`--dange
 ## 快速开始
 
 ```bash
-npm i -g agent-ex    # 或免安装：npx -y agent-ex@latest init
+npm i -g agent-ex-mcp    # 或免安装：npx -y agent-ex-mcp@latest init
 agent-ex init        # 交互式配置：探测 CLI、收集密钥、生成 config + .env
 ```
 
-> 未发布到公共 registry 前请用源码路线（见下方「安装（从源码，开发者路线）」）；`npx -y agent-ex@latest`
-> 只有在 `npm publish` 之后才可用。
+> 包已发布到公共 registry（`agent-ex-mcp@0.1.0`）。
+> **包名带 `-mcp` 后缀、命令名不带**：npm 上 `agent-ex` 与已被他人占用的 `agentex` 过于相似，
+> 触发 registry 的包名相似度保护而无法发布，故加限定词规避；`bin` 仍为 `agent-ex`，
+> 所以安装后命令是 `agent-ex init`（不是 `agent-ex-mcp init`）。数据目录 `~/.agent-ex` 同理保持不变。
 
 `init` 结束时会**直接打印**可直接粘贴的 MCP 注册片段（用**绝对路径**，理由见下方注意事项），把它拷进你的 MCP 客户端配置即可（Trae：`TRAE SOLO CN/User/mcp.json`；WorkBuddy：`~/.workbuddy/mcp.json`）：
 
@@ -116,7 +120,7 @@ MCP 工具是「底层能力」，dispatch skill 是叠加在上面的**派发�
 ### 路线 A：`npx skills`（推荐给使用者，不依赖本地仓库）
 
 本仓库的 skill 遵循 [Agent Skills](https://github.com/agentskills) 开放规范（`SKILL.md` + `scripts/` + `references/`），
-因此可以直接用 Vercel 的 [`skills` CLI](https://www.npmjs.com/package/skills) 从 GitHub 装——**无需 clone、无需 `npm i -g agent-ex`**：
+因此可以直接用 Vercel 的 [`skills` CLI](https://www.npmjs.com/package/skills) 从 GitHub 装——**无需 clone、无需 `npm i -g agent-ex-mcp`**：
 
 ```bash
 # 先看这个仓库里有哪些 skill（dry-run，不落盘）
@@ -475,11 +479,12 @@ node dist/server.js init    # 即 `agent-ex init`
 
 ## 发布（npm）
 
-包名 `agent-ex`，MIT。发布配置已在 `package.json` 就位：
+包名 `agent-ex-mcp`，MIT。发布配置已在 `package.json` 就位：
 
 | 字段 | 值 | 说明 |
 |---|---|---|
-| `bin` | `dist/server.js` | 全局安装后 `agent-ex` 可直接跑 server |
+| `name` | `agent-ex-mcp` | 带 `-mcp` 规避 registry 包名相似度保护（`agent-ex` 撞已占用的 `agentex`），见「快速开始」下的说明 |
+| `bin` | `agent-ex` → `dist/server.js` | **命令名不带 `-mcp`**：全局安装后 `agent-ex` 可直接跑 server |
 | `files` | `dist` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包 |
 | `publishConfig.registry` | `https://registry.npmjs.org` | 锁定发布目标为官方源（见下） |
 | `prepublishOnly` | `build` + `test` | 发布前自动构建并跑全量测试，测试红则发布中止 |
@@ -494,15 +499,17 @@ npm publish --access public
 > 国内常见的 `registry.npmmirror.com`（淘宝镜像）是**只读**的，不支持 `npm publish`，也不提供注册/登录端点；
 > 带着它发布会在客户端就报 `ENEEDAUTH`。开发者若用镜像装依赖，请在 `~/.npmrc` 之外单独配置发布源。
 
-发布者需自备 npm 账号并 `npm login --registry=https://registry.npmjs.org`。
+发布者需自备 npm 账号，并开启 2FA：`npm profile enable-2fa auth-and-writes`。
 
-**关于 token**（npm 现行策略）：经典 automation token 已于 2025-12 被彻底吊销，`npm login` 现在只签发**约 2 小时的会话凭据**。
-个人手动发布推荐直接用交互式 2FA（`npm login` → `npm publish` 时输 OTP），该方式不受 2027-01 的
-「bypass-2FA 令牌直接发布」弃用影响。若要用无人值守的自动化令牌，务必选 **Read and write (stage only)**
-（`npm stage publish` → 网页/CLI approve），**不要**勾选 *Bypass 2FA*——直接发布能力将于 2027 年 1 月移除。
+**关于 token（npm 现行策略）**：发布必须满足二者之一——账号已开 2FA（`npm publish` 时用配置的验证器/安全密钥认证），
+或使用**带 bypass 2FA 权限的 granular access token**。实测（2026-10-14）：账号未开 2FA 时，
+`npm login` 拿到的会话凭据无法完成发布，registry 直接返回 `E403 … Two-factor authentication or granular
+access token with bypass 2fa enabled is required`（此错**不会**提示要 OTP，容易误判为「已登录却仍被拒」）。
+命令行创建方式：`npm token create --bypass-2fa --expires 90 --packages-all --packages-and-scopes-permission read-write`。
+若要走无人值守的 CI，优先用下方的 Trusted Publisher（OIDC），无需长期密钥。
 
-若要接 CI，推荐 [Trusted Publisher（OIDC）](https://docs.npmjs.com/trusted-publishers)（无需长期密钥）。
-注意它**无法创建新包**：必须先手动发布至少一个版本、包已存在后才能配置。
+若要接 CI，推荐 [Trusted Publisher（OIDC）](https://docs.npmjs.com/trusted-publishers)（无需长期密钥），
+它需要 npm CLI ≥ 11.5.1、Node ≥ 22.14，且**无法创建新包**：必须先手动发布至少一个版本、包已存在后才能配置。
 
 > ⚠️ **npm 包不含 dispatch skill**：`skills/` 与 `scripts/` 不在 `files` 白名单里。
 > 但这已不再是分发缺口——skill 走 [Agent Skills](https://github.com/agentskills) 规范，

@@ -1,6 +1,6 @@
 # 全量改名：agent-flow-ex → agent-ex
 
-**状态**：📋 **待执行**（draft，2026-10-11；2026-10-12 名字复评改定 `agent-ex`；**2026-10-12 两轮执行细节复核修正**，修正清单见 §10）
+**状态**：✅ **已执行完毕**（2026-10-13 执行完毕；执行期偏差见 §10 X-1…X-5）。**2026-10-14 发布时受阻：npm 包名被迫加限定词改 `agent-ex-mcp`，见 §11**
 **触发**：想把产品定位从「派发 worker」扩到「多 agent 协作（独立起草 / 相互review / spec-plan 讨论）」，现有名字只覆盖了前半。
 **前置约束**：⚠️ **执行者必须坐在机器前**。本 spec 的 **Step 0 就会 disable MCP server**，Step 5 才 re-enable；Trae 的 MCP 客户端在 server 进程退出后**不会自动重连**（见 `2026-08-29-trae-mcp-visibility.md` §11），无人值守时会把 MCP 变成永久不可用。**人不在机器边就不要开始。**
 
@@ -43,6 +43,13 @@
 **遗留可读性成本**（接受，用文案兜底）：`ex` 是不透明缩写，陌生人不会自动展开成 external；GitHub 搜 `agent-ex` 有大量 `agent-example` / `agent-exchange` 噪声。缓解：README 首行标语显式写出 external（如 "agent-ex: dispatch & review with *external* agents"），§4 Step 6 的定位文案一并覆盖。
 
 **结论**：采用 `agent-ex`。包名 `agent-ex`，目录 `agent-ex`，数据目录 `~/.agent-ex`，skill 名 `agent-ex-dispatch`，工具前缀 `agent_ex_*`，环境变量前缀 `AGENT_EX_*`。
+
+> ⚠️ **2026-10-14 修订（发布时受阻，结论部分已被现实推翻）** —— 详见 §11。
+> npm 上的 `agent-ex` **无法发布**：registry 判定它与已被他人占用的 `agentex`（scale.com 的占位包）过于相似，
+> 直接返回 `E403 … Package name too similar to existing package agentex`。npm 自己给出的建议是改用 scope
+> （`@demonsimon/agent-ex`）。**最终采用 `agent-ex-mcp`**（保留 `agent-ex` 主体 + 加限定词），
+> 而 **bin / 数据目录 / skill 名 / 环境变量 / MCP server 名全部保持 `agent-ex` 不变**。
+> 即：本节「全量统一」的原则在**分发标识**这一项上被 registry 策略局部打破，属被迫妥协而非主动决策。
 
 ---
 
@@ -291,6 +298,7 @@ npm run build     # 必须：dist 里还是旧工具名
 | 7 | README/skill 定位覆盖三种协作形态 | 人工核对 §4 Step 6 表格 |
 | 8 | 包元数据自洽 | `package.json` 的 `name`/`bin`/`repository.url` 与 `package-lock.json` 三处同名新名（由 #1 覆盖，此处人工再确认一眼） |
 | 9 | **机器上 3 处 MCP 配置都改了**（#1 的 `git grep` 覆盖不到） | 见下方命令块，期望 0 命中 |
+| 10 | **npm 包名与 bin 名自洽**（§11 修订后新增） | `npm view agent-ex-mcp version` 可查；`npm view agent-ex-mcp bin` 应为 `{ 'agent-ex': 'dist/server.js' }`——即**包名带 `-mcp`、命令名不带** |
 
 **验收 #9 的验证命令**（不能只用 `git grep`——`<repo>/.trae/mcp.json` 是 untracked，另两处在仓库外）：
 
@@ -381,7 +389,7 @@ cd /Users/wuruofan/mine/rfw/agent-flow-ex
 
 ## 9. 待确认
 
-- [x] 名字 `agent-ex` 是否最终确认？→ **已确认**（2026-10-12，`ex` = external，作者本意）。注意：**先改 `agent_ex_` 工具名会留下已发布版本的兼容负担**——包未发布前改是零成本，发布后就难了
+- [x] 名字 `agent-ex` 是否最终确认？→ **已确认**（2026-10-12，`ex` = external，作者本意）。注意：**先改 `agent_ex_` 工具名会留下已发布版本的兼容负担**——包未发布前改是零成本，发布后就难了。**⚠️ 2026-10-14 补充：包名部分后来被迫改为 `agent-ex-mcp`（工具名未动），见 §11**
 - [x] GitHub 仓库是否本次一起改名？→ **已改名**（2026-10-12 执行 `gh repo rename agent-ex`，见 §10 E-1）。301 已验证，本地 remote 已自动更新
 - [x] 是否需要在 README 顶部加一段「旧名 → 新名」迁移说明？→ **不加**（2026-10-12 定）。无存量用户（0 star / 0 fork / 0 watcher，npm 未发布，2026-10-12 查证）；GitHub 改名自带 301；README 安装命令在 Step 1 一并改掉，改完自洽
 - [x] **环境变量 / 驼峰标识符是否一并改名？→ 是**（2026-10-12 复核定）。目标 2 是"不留混用"，而 `AGENT_FLOW_HOME` 同时出现在 README 与本机 MCP 配置里，只改代码会造成读写两套名。改动零成本：包未发布、本机 `~/.zshrc` / `~/.zprofile` 都没有依赖它（已查）
@@ -449,3 +457,57 @@ cd /Users/wuruofan/mine/rfw/agent-flow-ex
 | X-3 | **沙箱会拦写用户级目录**。`install-skill.sh` 与两份 `mcp.json` 都在 `~/.agents/skills`、`~/.workbuddy`、`~/Library/Application Support/TRAE SOLO CN/User` 下，会话沙箱直接报 `Operation not permitted`，即使开「需批准」也过不去 | 这三处由用户在终端执行（已完成）。⇒ 改名 spec 应写明「哪些步骤必然需要人在终端」，否则执行到一半才发现被拦 |
 | X-4 | **目录改名会让 agent 会话的 cwd 失效**，后续工具调用报 `cwd does not exist`（工具无法自建终端，继承旧 cwd） | 用户在 IDE 里重新指定工作区后恢复。⇒ Step 3 之后应显式提示「重新打开工作区」，且执行顺序上更稳的做法是先提交再改名 |
 | X-5 | `disabled: true` 是用户执行 Step 0 时由客户端写入的（两份 `.bak` 里本来就有），不是本次改名引入的 | 记录在案，避免日后误以为是残留字段 |
+
+---
+
+## 11. 2026-10-14 发布受阻：npm 包名被迫加限定词
+
+改名执行完毕（§10 X-1…X-5），但到 `npm publish` 才发现 §2 的「包名 `agent-ex`」**在 registry 层面根本不可用**。本节记录事实、决策与理由。
+
+### 11.1 事实链（均实测，非推断）
+
+| # | 事实 | 证据 |
+| :--- | :--- | :--- |
+| P-1 | `https://registry.npmjs.org/agent-ex` → `404` | 名字**未被占用**，不是抢注问题 |
+| P-2 | 但 `npm publish` 返回 `E403 … Package name too similar to existing package agentex` | registry 的**包名相似度保护**；npm 建议改用 `@demonsimon/agent-ex` |
+| P-3 | `agentex` 已被占用，且是个占位包 | `npm view agentex` → `0.0.0` / `"TODO: reserving this package name"` / maintainer `charlotte-scale <…@scale.com>` |
+| P-4 | 发布认证已解决，与包名无关 | `npm profile get` → `two-factor auth: auth-and-writes`；403 报错内容已从 2FA 变为包名策略 |
+| P-5 | 候选名实测全部 `404` 未被占用 | `agent-ex-mcp` / `agent-exo` / `agent-ex-kit` / `agentex-mcp` / `mcp-agent-ex` / `claude-agent-ex` / `agents-ex` |
+| P-6 | `agent-ex-mcp` **发布成功** | `npm view agent-ex-mcp` → `0.1.0`，`bin = { 'agent-ex': 'dist/server.js' }` |
+
+### 11.2 决策
+
+**包名改 `agent-ex-mcp`，其余一律不动。**
+
+| 标识 | 最终值 | 是否受 `-mcp` 影响 |
+| :--- | :--- | :--- |
+| npm 包名 | `agent-ex-mcp` | ✅ 唯一变动项 |
+| `bin` / CLI 命令 | `agent-ex` | ❌ 不变（`agent-ex init`） |
+| 数据目录 | `~/.agent-ex` | ❌ 不变 |
+| 环境变量 | `AGENT_EX_*` | ❌ 不变 |
+| skill 名 | `agent-ex-dispatch` | ❌ 不变 |
+| MCP server 名 | `agent-ex` | ❌ 不变 |
+| 仓库 / 目录名 | `agent-ex` | ❌ 不变 |
+
+实际改动仅 3 个文件：`package.json`（`name`）、`package-lock.json`（两处 `name` 同步）、`README.md`（安装命令 + 说明）。
+
+### 11.3 为什么不让 `-mcp` 扩散（曾考虑过全量改名，否决）
+
+否决的方案是「按 §2 的全量统一原则，连 bin / 数据目录 / skill / env 一起改成 `agent-ex-mcp`」。理由：
+
+1. **只改数据目录是最差解**：付出全部迁移成本（`mv ~/.agent-ex` + DB `log_path` UPDATE + 本机 MCP 配置重指向 + 面板重连），却换不到任何收益 —— 命令仍是 `agent-ex`，用户看不出差别。半程方案严格劣于两个极端。
+2. **扩散的收益是负的**：`-mcp` 是 registry 策略下的**被迫妥协**，不是产品改名。让它扩散等于把一个外部约束升格成产品决策，日后想收回要再做一次全量改名。
+3. **分界线是「用户可见性」**：`bin`、数据目录、skill 名是用户直接接触的界面；包名是 registry 里的分发标识。业界惯例（如各种 `-cli`、`-mcp` 后缀包）普遍是**分发标识带限定词、用户界面标识保持稳定**。当前形态（包名 `agent-ex-mcp` + 命令 `agent-ex`）正是这个惯例的典型样子。
+4. **时机**：0.1.0、零外部用户、无存量安装。为一个尚未确立的「永久名」做第二次全量改名，属给自己加活。
+
+### 11.4 顺带修正：README 里两处不可核实的断言
+
+发布过程中发现 README「发布（npm）」一节有两处**凭记忆写的年份声明**，已删除并换成可核实内容：
+
+- 原：「经典 automation token 已于 2025-12 被彻底吊销」「bypass 直接发布将于 2027 年 1 月移除」→ 无官方文档佐证，改为引用 npm 官方文档的**硬规则**（发布须满足「账号已开 2FA」**或**「带 bypass 2FA 的 granular token」二者之一）+ 本次实测到的真实报错行为。
+- 原：「个人手动发布推荐输 OTP」→ **对本次场景不成立**：npm 网页端的 2FA 配置只剩 Security key（Mac 指纹），CLI 拿不到 6 位 TOTP 码，`--otp` 无从填写 ⇒ publish 必须走浏览器 WebAuthn。已在 README 写明。
+
+### 11.5 留给后人的两条硬约束
+
+1. **不要再跑 `npm login`**：npm 11 的已知行为是 login/adduser 会**清掉** `~/.npmrc` 里已配置的 granular token。
+2. **registry 相似度保护是隐形的**：`npm view <name>` 返回 404 **不代表可发布**。判断一个 unscoped 名能否发布，只能实发一次（403 是原子拒绝，不占用名字，试错零成本）。
