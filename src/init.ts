@@ -18,6 +18,7 @@ import { join, dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentExHome, ensureRuntimeDirs } from "./paths.js";
 import { loadConfig } from "./config.js";
+import { BRAND } from "./brand.js";
 import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
 
 type RL = ReturnType<typeof createInterface>;
@@ -159,7 +160,7 @@ export interface InitAnswers {
   bin: string;
   profile: string;
   env: Record<string, string>;
-  notify: { feishu_webhook_url: string; dry_run?: boolean };
+  notify: { feishu_webhook_url: string; dry_run?: boolean; keyword?: string };
   timeout_sec: number;
 }
 
@@ -202,7 +203,7 @@ export function nodeExecPath(): string {
  */
 export function mcpServerSnippet(serverEntry: string): string {
   return JSON.stringify(
-    { mcpServers: { "agent-ex": { command: nodeExecPath(), args: [serverEntry] } } },
+    { mcpServers: { [BRAND]: { command: nodeExecPath(), args: [serverEntry] } } },
     null,
     2,
   );
@@ -294,7 +295,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
 
     const feishuSecret = await collectSecret(rl, { label: "Feishu webhook URL", varName: "FEISHU_WEBHOOK_URL", detect: true });
     if (feishuSecret) envUpdates.FEISHU_WEBHOOK_URL = feishuSecret;
-    const notify = { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true };
+    const notify = { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: BRAND };
 
     const timeoutRaw = (await ask(rl, "Default timeout (seconds)", "3600")).trim();
     const timeout = Number.parseInt(timeoutRaw, 10) || 3600;

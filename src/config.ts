@@ -1,5 +1,6 @@
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { BRAND } from "./brand.js";
 import { agentExHome, ensureRuntimeDirs } from "./paths.js";
 
 export interface ExecutorConfig {
@@ -13,7 +14,8 @@ export interface ProfileConfig {
 export interface Config {
   executors: Record<string, ExecutorConfig>;
   profiles: Record<string, ProfileConfig>;
-  notify: { feishu_webhook_url: string; dry_run?: boolean; keyword?: string };
+  /** keyword 读入后一定已归一化（缺省填 BRAND），下游不再需要判空 */
+  notify: { feishu_webhook_url: string; dry_run?: boolean; keyword: string };
   defaults: { profile: string; timeout_sec: number };
 }
 
@@ -40,6 +42,7 @@ export function loadConfig(home?: string): Config {
   ensureRuntimeDirs();
   const cfgPath = join(home ?? agentExHome(), "config.json");
   const cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Config;
+  cfg.notify.keyword ??= BRAND;
   validate(cfg);
   return cfg;
 }

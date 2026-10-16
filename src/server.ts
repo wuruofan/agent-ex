@@ -10,6 +10,7 @@ import { restart } from "./tools/restart.js";
 import { setStartedAt, isTestMode } from "./tools/test-helpers.js";
 import { ensureRuntimeDirs } from "./paths.js";
 import { loadEnvFile } from "./env-file.js";
+import { BRAND } from "./brand.js";
 
 const json = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }] });
 
@@ -17,7 +18,7 @@ async function main(): Promise<void> {
   // 先灌 $AGENT_EX_HOME/.env（真实密钥所在）→ runner 子进程自动继承，任务期占位符可解析。
   loadEnvFile();
   ensureRuntimeDirs();
-  const server = new McpServer({ name: "agent-ex", version: "0.1.0" });
+  const server = new McpServer({ name: BRAND, version: "0.1.0" });
 
   server.tool(
     "agent_ex_submit",

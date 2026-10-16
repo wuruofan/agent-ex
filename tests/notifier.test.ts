@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildFeishuCard, sendFeishuText } from "../src/notifier.js";
+import { BRAND } from "../src/brand.js";
 
 function mockFetch(sequence: Array<{ ok: boolean; status?: number; code?: number }>) {
   let i = 0;
@@ -110,10 +111,10 @@ describe("buildFeishuCard", () => {
     expect(md.content).toContain("429");
   });
   it("appends keyword as notation-sized markdown when configured (keyword gate; v2 has no note component)", () => {
-    const card = buildFeishuCard("completed", "task_abc", "done", "agent-ex") as Record<string, any>;
+    const card = buildFeishuCard("completed", "task_abc", "done", BRAND) as Record<string, any>;
     const kws = card.body.elements.filter((e: Record<string, any>) => e.tag === "markdown" && e.text_size === "notation");
     expect(kws).toHaveLength(1);
-    expect(kws[0].content).toBe("agent-ex");
+    expect(kws[0].content).toBe(BRAND);
   });
   it("omits the keyword element when keyword is absent", () => {
     const card = buildFeishuCard("failed", "task_abc", "boom") as Record<string, any>;
