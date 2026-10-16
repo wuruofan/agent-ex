@@ -18,8 +18,10 @@ type FeishuPayload = Record<string, unknown>;
 /**
  * 通用发送任意飞书消息负载。
  * 成功判定要求 HTTP 200 且 body.code===0——飞书即便出错也返回 HTTP 200，
- * 失败信息只在响应体 code 字段（如 19021 bot 不在群、19024 关键词缺失、19031 webhook 失效），
+ * 失败信息只在响应体 code 字段（关键词校验失败 19024、签名校验失败 19021、
+ * IP 校验失败 19022、请求体格式错误 9499、限流 11232），
  * 只看 res.ok 会把"被拒收"误判为成功、消息静默丢失。
+ * 各码的完整排查表见 README「飞书通知配置」。
  *
  * 每次尝试带 AbortController 超时（默认 10s）：飞书 webhook 偶发慢响应/半开时，
  * 若无超时单次请求会无限挂起直到 OS TCP 层超时（分钟级），表现就是任务已终态、
@@ -79,7 +81,13 @@ export async function sendFeishuCard(webhookUrl: string, card: Record<string, un
  * 视觉保持与 1.0 一致：无 header 大色块横幅（太抢眼），首行「emoji + 加粗状态」引导
  * （emoji 自带颜色：✅绿/❌红/❓蓝），下方接任务ID与 markdown 详情（worker 返回原文）。
  * keyword 进「关键词」安全闸门：2.0 组件清单已移除 1.0 的 note 组件，改用 markdown 组件
- * text_size=notation（12px 辅助信息灰字）置于正文后，效果等价；缺省时不加。
+ * text_size=notation（12px 辅助信息灰字）置于正文后，效果等价；缺省时由 loadConfig
+ * 填入 BRAND（见 brand.ts），只有显式配成空串才真的不加。
+ *
+ * ⚠️ 飞书对**整张卡片**做关键词子串匹配，不只匹配这一行 ⇒ worker 的报告正文里
+ * 只要偶然出现该词，卡也能过闸。2026-10-16 实测：live config 留着旧名 `agent-flow-ex`
+ * 连续 23 个任务 0 通知，却因某张卡的正文提到新名而误判为"已恢复"。
+ * 验证通知必须用正文不含产品名的自检卡，别拿真实任务报告当探针。
  *
  * 注：2.0 卡片要求飞书客户端 ≥7.20（低版本展示升级提示兜底文案）；config 不再支持
  * 1.0 的 wide_screen_mode，宽度由 width_mode 控制（默认即 600px 宽版），故省略 config。

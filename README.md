@@ -216,7 +216,7 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
 | `profiles.<name>.env` | 传给 agent 子进程的环境变量；支持 `{env:VAR}` 占位符（见下）。**opencode 一般留空**（provider 由 opencode 自己的 `auth.json`/`opencode.json` 管理）；要给某个 profile 单独指定模型，写 `OPENCODE_CONFIG_CONTENT: "{\"model\":\"provider/model\"}"`——`extra_flags` 是 executor 级，多 profile 无法用它区分模型。另注意 `buildAgentEnv` 只给极简 `PATH`，worker 里的 shell 用不到 `/opt/homebrew/bin` 等，需要时在此显式补 `PATH`。 |
 | `notify.feishu_webhook_url` | 飞书机器人 webhook；支持 `{env:FEISHU_WEBHOOK_URL}` 占位符。 |
 | `notify.dry_run` | `true`（缺省）→ 只打印通知内容不真发；`false` → 真发。 |
-| `notify.keyword` | 可选。附加在卡片末尾的「关键词」安全闸门，便于机器人放行你的消息（缺省不加）。 |
+| `notify.keyword` | 附加在卡片末尾的「关键词」安全闸门。**缺省 = `agent-ex`（`src/brand.ts` 的 `BRAND`，`loadConfig` 自动填入）**，一般无需手写。详见「飞书通知配置」。 |
 | `defaults.profile` | `submit` 不指定 profile 时用的默认 profile（必须在 `profiles` 中存在）。 |
 | `defaults.timeout_sec` | 单轮超时（秒），超时 SIGTERM 杀掉 agent。 |
 
@@ -310,9 +310,78 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
 - 占位符在运行时缺失 → 加载/解析直接报错（避免明文密钥意外落盘）。
 - 想让 `.env` 生效，重启 server 进程即可。
 
-### 飞书 dry_run
+### 飞书通知配置
 
-调试期把 `notify.dry_run` 设为 `true`（也是缺省值），通知内容只打到 stderr，不会真正 POST。确认链路无误后再改为 `false`。
+飞书通知走**群自定义机器人 webhook**。整条链路分四段，每段都能单独验证——出问题先定位到段，再按段排查。
+
+#### 1. 建机器人、拿 webhook
+
+在目标群里：群设置 → 群机器人 → 添加机器人 → **自定义机器人**（不是应用机器人）。创建后复制形如
+
+```
+https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+的地址。这串地址**本身就是凭证**（谁拿到都能往群里发消息），不要贴进公开仓库或 issue。放进 `.env`：
+
+```bash
+FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+```
+
+`config.json` 里只写占位符 `"{env:FEISHU_WEBHOOK_URL}"`，真实值永不进 config。
+
+#### 2. 安全设置：与本工具的匹配关系
+
+自定义机器人有三种安全设置，**本工具只支持「自定义关键词」这一种**：
+
+| 安全设置 | agent-ex 是否支持 | 说明 |
+| :--- | :--- | :--- |
+| **自定义关键词** | ✅ 支持 | 消息里必须包含登记的词，否则被拒收。缺省词 = `agent-ex`。 |
+| **加签**（secret） | ❌ **不支持** | 需要在请求里带 `timestamp` + `sign`，本工具不发送（`src/notifier.ts` 的 `post()` 只发裸 payload）⇒ 勾选后必然收不到。 |
+| **IP 白名单** | ❌ 不支持 | 需要登记调用方出口 IP，且各家 webhook 服务商规则不同，本工具不校验。 |
+
+> ⚠️ **别勾选加签**。它是最常见的误配：卡片一律被拒，但日志里的报错不指向加签，很难自查（见 §4）。需要更严格的保护时，用关键词 + 不把 webhook 外泄即可。
+
+配置关键词时，**填的词必须与卡片正文里出现的词一致**。本工具缺省把 `agent-ex` 追加到卡片末尾的一行小字（`notifier.ts` 的 `buildFeishuCard`，`text_size: "notation"`），因此机器人侧的关键词填 `agent-ex` 即可。若你在 `config.json` 里自定义了 `notify.keyword`，**两边都要跟着改**。
+
+#### 3. 打开真实发送
+
+`notify.dry_run` **缺省是 `true`**（只把卡片打到 stderr，不 POST）。链路验证通过后改成 `false` 才会真发。
+
+#### 4. 验证（别拿真实任务报告当探针）
+
+```bash
+# 发一张正文刻意不含产品名的自检卡，看飞书返回的 code
+node -e '
+(async () => {
+  const {loadEnvFile} = await import("./dist/env-file.js");
+  const {loadConfig, resolveEnvPlaceholders} = await import("./dist/config.js");
+  const {buildFeishuCard, sendFeishuCard} = await import("./dist/notifier.js");
+  loadEnvFile();
+  const cfg = loadConfig();
+  const url = resolveEnvPlaceholders({url: cfg.notify.feishu_webhook_url}).url;
+  const card = buildFeishuCard("completed", "task_selfcheck", "自检卡片：正文不含产品名", cfg.notify.keyword);
+  console.log("SENT_OK =", await sendFeishuCard(url, card, {dryRun: cfg.notify.dry_run}));
+})();'
+```
+
+`SENT_OK = true` ⇒ 请求被飞书接受（**前提是 `dry_run` 已是 `false`**——dry-run 时 `post()` 直接返回 `true` 却不投递，见文末提示）。`false` 时看 stderr 的 `code`：
+
+| `code` | 含义 | 处置 |
+| :--- | :--- | :--- |
+| `0` | 已投递（注意飞书出错也返 HTTP 200，**判定必须看 `code`，不能看 HTTP 状态码**） | — |
+| `19024` | 关键词校验失败 | 机器人侧的关键词与 `notify.keyword` 不一致。⚠️ **闸门是对整张卡片做子串匹配**——worker 的报告正文里只要偶然出现该词，卡也能过。配置错了却可能长期"看起来正常"，所以**只认上面这张正文干净的自检卡**。 |
+| `19021` | **签名校验失败**（或时间戳距今超过 1 小时） | 机器人勾选了「加签」而本工具不发送 `timestamp`/`sign` ⇒ **去机器人安全设置里取消勾选加签**。 |
+| `19022` | IP 校验失败 | 机器人勾选了「IP 白名单」而本机出口 IP 不在其中 ⇒ 取消勾选，或把出口 IP 加进白名单。 |
+| `9499` | 请求体格式错误 | 卡片 JSON 不合 schema。注意官方限制：**请求体不得超过 20 KB**。 |
+| `11232` | 触发限流 | 单机器人 **100 次/分钟、5 次/秒**；密集派发会撞上，尽量避开整点/半点发送。 |
+| 其他 / 无 `code` | 网络或服务端问题 | 检查出口网络与代理。 |
+
+> 本工具每次失败会重试 3 次（退避 1s / 4s），所以日志里出现 3 行同样的 `code` 是正常的。
+>
+> **机器人不在群**没有专属错误码——webhook 地址与群绑定，飞书通常**静默丢弃**。要换群必须重建机器人并换新地址。
+
+> 上面的自检卡用的是**当前配置里的 `dry_run`**——`dry_run=true` 时它只打印不投递（这是安全默认值）。要真正验证投递，先把 `notify.dry_run` 改成 `false`。
 
 ## 运行
 
@@ -441,7 +510,7 @@ server 无状态（状态全在 `tasks.db`），在跑 worker 位于独立进程
 
 - **`executor "claude" bin "…" not found or not executable`**：`bin` 路径不对或没 `+x`。写裸命令名时按 `process.env.PATH` 解析（见「`executors.<name>.bin`」），解析不到就写绝对路径。
 - **任务 `failed`，`error: failed to spawn runner: … ENOENT`**：多因`bin` 指向的位置下没有可执行文件。注意 worker 子进程的 `PATH` 只由 `dirname(bin)` + 系统目录组成（见「`profiles.<name>.env`」），`/opt/homebrew/bin` 等不在其中——裸名建议先 `which` 确认解析结果。
-- **飞书不推送**：检查 `dry_run` 是否还是 `true`；检查 `.env` 里 `FEISHU_WEBHOOK_URL` 是否存在（或 server 进程环境是否已 `export`）。
+- **飞书不推送**：检查 `dry_run` 是否还是 `true`；检查 `.env` 里 `FEISHU_WEBHOOK_URL` 是否存在（或 server 进程环境是否已 `export`）。若日志里有 `code=19024`（关键词不匹配）或卡片**一律**收不到，**先确认机器人没有勾选「加签」**——本工具不发送签名，勾选后必然全被拒。完整排查见「飞书通知配置」。
 - **`{env:VAR}` 报错 `not found in process environment`**：对应密钥不在 `.env` 里，也没 `export` 到 server 进程环境。加到 `$AGENT_EX_HOME/.env` 后重启 server。
 - **任务频繁超时，且日志里反复出现 `ran out of context`**：上下文被反复压缩，agent 丢失状态后重复劳动。查压缩阈值配置（见上「上下文压缩」）——若 `ANTHROPIC_MODEL` 没带 `[1m]`，窗口会被锁在 200k；工单过大（工具调用 ≫150 次）也会撞阈值，应先拆单。
 - **改了代码但行为没变**：MCP host 会复用常驻 server 进程。`npm run build` 后调 `restart`，再用 `version` 核对 `gitSha`。
