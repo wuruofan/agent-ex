@@ -70,8 +70,47 @@ export class Store {
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSyncCtor(dbPath);
-    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+    // busy_timeout 必须先设：下面的 journal_mode 切换要拿独占锁，撞上其他连接时靠它重试
+    // （后设的话切换会直接 SQLITE_BUSY 失败，且没有任何等待）。
+    this.db.exec("PRAGMA busy_timeout=5000;");
+    this.useRollbackJournal();
     this.db.exec(SCHEMA);
+  }
+  /**
+   * 刻意**不用 WAL**（2026-10-16 实测后改）。
+   *
+   * WAL 库对"只读打开者"要写权限 —— 不是写数据，而是 WAL recovery：最后一个连接 clean close 时
+   * `-wal` 与 `-shm` 双双被删，此后任何只读连接都必须自建 wal-index（可能还要重写 `-wal`）才能读。
+   * 在只读文件系统里（Trae shell sandbox：`filesystem.default="read_only"`）这一步必然失败，报
+   * `unable to open database file` —— 于是「没有活写者」这个**静止态**下，沙箱里任何读都拿不到任务状态。
+   * 实测对照：同一份库，`-shm` 有效时禁写整个目录也能正常读；`-shm` 缺失时立刻失败。
+   *
+   * TRUNCATE 让静止态只剩 `tasks.db` 一个文件（外加一个 0 字节 `-journal`，非热日志不需回滚），
+   * 只读沙箱天然可读，且不依赖"恰好有写者活着"。
+   * 代价：失去 WAL 的「一写多读」并发，写者之间互斥。本场景写入都是单条短 UPDATE + 已有
+   * busy_timeout=5000 兜底，代价可忽略（见 docs/diagnostics/2026-10-16-readonly-sandbox.md）。
+   *
+   * 切换需要独占锁 ⇒ 其他连接正在读写时会失败。**绝不能因此阻断工具调用**（不能让一次 status
+   * 把 server 打死），故容忍失败、保持当前模式继续跑，下一个空闲窗口再切。
+   *
+   * ⚠️ 只有 WAL 是**持久化**的（写在库头），DELETE/TRUNCATE/PERSIST/… 都是连接级设置。所以：
+   *   - 一次成功切换就永久摆脱 WAL 文件格式，之后每个连接在构造时各自设 TRUNCATE；
+   *   - 反过来说，**别的客户端**（sqlite3 CLI、临时脚本）不改 PRAGMA 时用的是 DELETE —— 没问题，
+   *     两者同属 rollback journal 格式，静止态同样不留 `-wal`/`-shm`。
+   * 真正要守住的是「库头不能再被置回 WAL」，这也是 store.test.ts 里那条断言的落点。
+   */
+  private useRollbackJournal(): void {
+    try {
+      const r = this.db.prepare("PRAGMA journal_mode=TRUNCATE").get() as { journal_mode?: string } | undefined;
+      if (r?.journal_mode !== "truncate") {
+        console.error(
+          `[store] journal_mode is "${r?.journal_mode}", not "truncate" (another connection holds the db); ` +
+            `retrying on a later open — restart the MCP server to convert while idle`,
+        );
+      }
+    } catch (e) {
+      console.error(`[store] journal_mode switch skipped: ${(e as Error).message}`);
+    }
   }
   createTask(t: NewTask): void {
     this.db

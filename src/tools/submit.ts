@@ -28,18 +28,29 @@ export type SubmitResult =
  */
 const SPAWN_ERROR_GRACE_MS = 80;
 
+/**
+ * spawn detached runner 并捕获异步 spawn 错误。
+ *
+ * ⚠️ 回调**自己开/关一次库**，不复用 submit 的连接：child.on('error') 不受 80ms 宽限窗口约束，
+ * 完全可能晚于 submit 返回（那时连接已 close）触发 —— 复用它方连接就是"写到已关闭的库上"。
+ * 这条路径本身罕见（spawn 失败），每次多开一次库是划算的。
+ */
 function spawnRunnerWithAsyncErrorCapture(
   id: string,
   currentStatus: "queued" | "running",
-  store: ReturnType<typeof openStore>,
 ): { pid: number | null; spawnError: Promise<string | null> } {
   let errMsg: string | null = null;
   const { child } = spawnDetachedRunner(id, (e) => {
     errMsg = e.message;
-    store.transition(id, [currentStatus], "failed", {
-      error: `failed to spawn runner: ${e.message}`,
-      ended_at: Math.floor(Date.now() / 1000),
-    });
+    const s = openStore(dbPath());
+    try {
+      s.transition(id, [currentStatus], "failed", {
+        error: `failed to spawn runner: ${e.message}`,
+        ended_at: Math.floor(Date.now() / 1000),
+      });
+    } finally {
+      s.close();
+    }
   });
   const spawnError = new Promise<string | null>((resolve) => {
     setTimeout(() => resolve(errMsg), SPAWN_ERROR_GRACE_MS);
@@ -51,58 +62,64 @@ export async function submit(args: SubmitArgs): Promise<SubmitResult> {
   if (!args.prompt?.trim()) return { error: "prompt is required" };
   const cfg = loadConfig();
   const store = openStore(dbPath());
-
-  // ---- 续跑：needs_input 任务答疑 ----
-  if (args.continue_of) {
-    const t = store.getTask(args.continue_of);
-    if (!t) return { error: `task ${args.continue_of} not found` };
-    if (t.status !== "needs_input") return { error: `task ${args.continue_of} is "${t.status}", expected "needs_input"` };
-    const rounds = t.rounds + 1;
-    const ok = store.transition(args.continue_of, ["needs_input"], "running", { rounds });
-    if (!ok) return { error: `task ${args.continue_of} state changed concurrently (now "${store.getTask(args.continue_of)?.status}")` };
-    appendFileSync(t.log_path, JSON.stringify({ type: "user_prompt", round: rounds, text: args.prompt }) + "\n");
-    const { pid, spawnError } = spawnRunnerWithAsyncErrorCapture(args.continue_of, "running", store);
-    if (pid !== null) store.patch(args.continue_of, { pid });
-    const err = await spawnError;
-    if (err) return { error: `failed to spawn runner for ${args.continue_of}: ${err}` };
-    return { task_id: args.continue_of, status: "running", rounds };
-  }
-
-  // ---- 新任务 ----
-  const profileName = args.profile ?? cfg.defaults.profile;
-  const profile = cfg.profiles[profileName];
-  if (!profile) return { error: `unknown profile "${profileName}"` };
-  if (!cfg.executors[profile.executor]) return { error: `profile "${profileName}" references unknown executor` };
-
-  const timeout_sec = args.timeout_sec ?? cfg.defaults.timeout_sec;
-  if (!Number.isInteger(timeout_sec) || timeout_sec <= 0) return { error: "timeout_sec must be a positive integer" };
-
-  const project_path = args.project_path ?? process.cwd();
+  // 连接必须显式 close：server 是长跑进程，按需开库却不关，只能等 GC 回收（实测 2026-10-16：
+  // 存活 1d18h 的 server 仍持有 6 个未释放的 tasks.db 连接），而迟迟不回收的连接会把
+  // `-wal`/`-shm` 一并钉在磁盘上。见 store.ts 的 useRollbackJournal()。
   try {
-    if (!statSync(project_path).isDirectory()) return { error: `project_path "${project_path}" is not a directory` };
-  } catch {
-    return { error: `project_path "${project_path}" not accessible` };
+    // ---- 续跑：needs_input 任务答疑 ----
+    if (args.continue_of) {
+      const t = store.getTask(args.continue_of);
+      if (!t) return { error: `task ${args.continue_of} not found` };
+      if (t.status !== "needs_input") return { error: `task ${args.continue_of} is "${t.status}", expected "needs_input"` };
+      const rounds = t.rounds + 1;
+      const ok = store.transition(args.continue_of, ["needs_input"], "running", { rounds });
+      if (!ok) return { error: `task ${args.continue_of} state changed concurrently (now "${store.getTask(args.continue_of)?.status}")` };
+      appendFileSync(t.log_path, JSON.stringify({ type: "user_prompt", round: rounds, text: args.prompt }) + "\n");
+      const { pid, spawnError } = spawnRunnerWithAsyncErrorCapture(args.continue_of, "running");
+      if (pid !== null) store.patch(args.continue_of, { pid });
+      const err = await spawnError;
+      if (err) return { error: `failed to spawn runner for ${args.continue_of}: ${err}` };
+      return { task_id: args.continue_of, status: "running", rounds };
+    }
+
+    // ---- 新任务 ----
+    const profileName = args.profile ?? cfg.defaults.profile;
+    const profile = cfg.profiles[profileName];
+    if (!profile) return { error: `unknown profile "${profileName}"` };
+    if (!cfg.executors[profile.executor]) return { error: `profile "${profileName}" references unknown executor` };
+
+    const timeout_sec = args.timeout_sec ?? cfg.defaults.timeout_sec;
+    if (!Number.isInteger(timeout_sec) || timeout_sec <= 0) return { error: "timeout_sec must be a positive integer" };
+
+    const project_path = args.project_path ?? process.cwd();
+    try {
+      if (!statSync(project_path).isDirectory()) return { error: `project_path "${project_path}" is not a directory` };
+    } catch {
+      return { error: `project_path "${project_path}" not accessible` };
+    }
+
+    // ---- 同目录活跃任务警告：把"同目录禁止并发"从纪律变成被检查的事实 ----
+    // 不阻断（合法场景由调度方判断，如刻意接续工作），只随结果带出 warning 让调度方看见。
+    const sameDirActive = store.listActive().filter((t) => t.project_path === project_path);
+    const warning = sameDirActive.length
+      ? `project_path "${project_path}" already has ${sameDirActive.length} active task(s), e.g. ` +
+        `${sameDirActive[0].id} (${sameDirActive[0].status}); same-directory tasks share one working tree and can clobber each other`
+      : undefined;
+
+    const id = `task_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
+    store.createTask({
+      id, prompt: args.prompt, project_path, executor: profile.executor, profile: profileName,
+      timeout_sec, log_path: join(logsDir(), `${id}.jsonl`), role: "worker",
+      created_at: Math.floor(Date.now() / 1000),
+    });
+    const { pid, spawnError } = spawnRunnerWithAsyncErrorCapture(id, "queued");
+    if (pid !== null) store.patch(id, { pid });
+    const err = await spawnError;
+    if (err) return { error: `failed to spawn runner for ${id}: ${err}` };
+    return warning
+      ? { task_id: id, status: "queued", rounds: 1, warning }
+      : { task_id: id, status: "queued", rounds: 1 };
+  } finally {
+    store.close();
   }
-
-  // ---- 同目录活跃任务警告：把"同目录禁止并发"从纪律变成被检查的事实 ----
-  // 不阻断（合法场景由调度方判断，如刻意接续工作），只随结果带出 warning 让调度方看见。
-  const sameDirActive = store.listActive().filter((t) => t.project_path === project_path);
-  const warning = sameDirActive.length
-    ? `project_path "${project_path}" already has ${sameDirActive.length} active task(s), e.g. ` +
-      `${sameDirActive[0].id} (${sameDirActive[0].status}); same-directory tasks share one working tree and can clobber each other`
-    : undefined;
-
-  const id = `task_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
-  store.createTask({
-    id, prompt: args.prompt, project_path, executor: profile.executor, profile: profileName,
-    timeout_sec, log_path: join(logsDir(), `${id}.jsonl`), role: "worker",
-    created_at: Math.floor(Date.now() / 1000),
-  });
-  const { pid, spawnError } = spawnRunnerWithAsyncErrorCapture(id, "queued", store);
-  if (pid !== null) store.patch(id, { pid });
-  const err = await spawnError;
-  if (err) return { error: `failed to spawn runner for ${id}: ${err}` };
-  return warning
-    ? { task_id: id, status: "queued", rounds: 1, warning }
-    : { task_id: id, status: "queued", rounds: 1 };
 }

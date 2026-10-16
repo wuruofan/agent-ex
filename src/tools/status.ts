@@ -38,10 +38,15 @@ function view(t: Task): TaskView {
 
 export function status(args: StatusArgs): TaskView | TaskView[] | { error: string } {
   const store = openStore(dbPath());
-  if (args.task_id) {
-    const t = store.getTask(args.task_id);
-    if (!t) return { error: `task ${args.task_id} not found` };
-    return view(t);
+  // 显式关闭：server 长跑，靠 GC 回收连接会把 -wal/-shm 一直钉在磁盘上（见 store.ts）。
+  try {
+    if (args.task_id) {
+      const t = store.getTask(args.task_id);
+      if (!t) return { error: `task ${args.task_id} not found` };
+      return view(t);
+    }
+    return store.listActive().map(view);
+  } finally {
+    store.close();
   }
-  return store.listActive().map(view);
 }

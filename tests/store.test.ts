@@ -1,8 +1,18 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { openStore, type NewTask } from "../src/store.js";
+
+// 同 src/store.ts：vitest 的 vite resolver 会剥掉 "node:" 前缀导致加载失败，用 createRequire 绕过。
+const require = createRequire(import.meta.url);
+const { DatabaseSync } = require("node:sqlite") as {
+  DatabaseSync: new (path: string, opts?: { readOnly?: boolean }) => {
+    prepare(sql: string): { get(...a: unknown[]): Record<string, unknown> };
+    close(): void;
+  };
+};
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "afex-")); });
@@ -69,5 +79,44 @@ describe("store", () => {
     s.transition("task_a", ["queued"], "completed", { ended_at: 1 });
     s.transition("task_b", ["queued"], "failed", { error: "x", ended_at: 1 });
     expect(s.listActive().map((t) => t.id).sort()).toEqual(["task_c"]);
+  });
+
+  // 下面两条钉的是同一个不变量：**静止态必须能被一个没有写权限的读者读到**。
+  // 背景（2026-10-16 实测）：WAL 库在最后一个连接 close 后会删掉 -wal/-shm，此后只读连接必须自己
+  // 建 wal-index（写操作）才能读；Trae shell sandbox 是 filesystem.default="read_only"，于是
+  // 「任务已完成但调度方读不到状态」。换成 TRUNCATE 后静止态没有 -wal/-shm，只读沙箱天然可读。
+  it("uses a rollback journal: resting state has no -wal/-shm", () => {
+    const dbFile = join(dir, "t.db");
+    const s = openStore(dbFile);
+    s.createTask(newTask());
+    s.close();
+
+    const raw = new DatabaseSync(dbFile, { readOnly: true });
+    const mode = raw.prepare("PRAGMA journal_mode").get() as { journal_mode: string };
+    raw.close();
+
+    // 只读连接报 'delete' 本身就是结论：journal_mode 里**只有 WAL 是持久化在库头的**，
+    // 其余模式是连接级设置 —— 只读连接改不了 PRAGMA，于是看到默认的 delete。
+    // 若库头仍是 WAL，这里必然报 'wal' —— 那正是只读沙箱读不开的库。
+    expect(mode.journal_mode).not.toBe("wal");
+    // 静止态允许留 0 字节的 -journal（TRUNCATE 的正常形态，非热日志不需回滚），但不许有 -wal/-shm。
+    expect(readdirSync(dir).filter((f) => f === "t.db-wal" || f === "t.db-shm")).toEqual([]);
+  });
+
+  it("a write-denied reader still reads the db (read-only sandbox)", () => {
+    const dbFile = join(dir, "t.db");
+    const s = openStore(dbFile);
+    s.createTask(newTask());
+    s.close();
+
+    chmodSync(dir, 0o555); // 沙箱：读放行、写拒绝
+    try {
+      const raw = new DatabaseSync(dbFile, { readOnly: true });
+      const row = raw.prepare("SELECT count(*) AS c FROM tasks").get();
+      raw.close();
+      expect(Number(row.c)).toBe(1);
+    } finally {
+      chmodSync(dir, 0o755);
+    }
   });
 });

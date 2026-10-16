@@ -65,6 +65,9 @@ async function main(): Promise<void> {
   const taskId = process.argv[2];
   if (!taskId) { console.error("usage: runner.ts <task_id>"); process.exit(2); }
 
+  // 这里刻意**不** close：runner 是任务级短命进程（分钟级），整个生命周期就用这一个连接，
+  // 进程退出即由内核释放 —— 这本来就是 SQLite 设计的正常关机路径，且不会有连接累积。
+  // 需要显式 close 的是 server 侧的按需开库（submit/status/cancel），见 store.ts。
   const store = openStore(dbPath());
   const task = store.getTask(taskId)!; // 非空断言仅供闭包内类型窄化；下一行运行时 guard 兜底
   if (!task) { console.error(`task ${taskId} not found`); process.exit(2); }

@@ -34,6 +34,8 @@
  *                       own timeout_sec (see "How long can this wait?" below)
  *   --report-out PATH   where to extract the report
  *                       (default <tmpdir>/<task_id>.report.md)
+ *   --copy-dir PATH     writable directory for the fallback copy when the database
+ *                       directory itself is read-only (default: the system temp dir)
  *   --once              query once and exit; no waiting
  *   --verbose           heartbeat to stderr on each poll
  *   --no-digest         omit the digest fields (see "Token economy" above)
@@ -71,7 +73,11 @@
  *   WAIT=needs_input exit 5   worker is blocked on a question — answer via continue_of,
  *                             then re-run this script on the same task id
  *   WAIT=timeout     exit 2   still running/queued when max-wait elapsed (or --once)
- *   WAIT=not_found   exit 3   no such task, or tasks.db unreadable
+ *   WAIT=not_found   exit 3   no such task
+ *   WAIT=db_unreadable exit 6 tasks.db could not be read — neither in place nor as a copy;
+ *                             this is an *environment* problem (sandbox/permissions), never
+ *                             evidence about the task. Distinct from not_found on purpose:
+ *                             conflating them sends the caller hunting for a mistyped id.
  *                    exit 4   usage error
  *
  * Report extraction rule (this is the part that bites)
@@ -101,6 +107,28 @@
  *
  * Read-only by design: the DB is opened with readOnly:true so this can never interfere
  * with the MCP server or a live runner.
+ *
+ * A read-only *filesystem* is the harder half (verified 2026-10-16)
+ * ----------------------------------------------------------------
+ * A read-only connection does not write `-wal`/`-shm` — as long as a valid `-shm` is already
+ * there. When it is not, SQLite must run WAL recovery (build the wal-index, possibly rewrite
+ * the `-wal`), and a sandbox that denies writes to the database directory (Trae's shell
+ * sandbox: `filesystem.default="read_only"`, `readWrite: []`) turns that into
+ * "unable to open database file".
+ *
+ * That state is not exotic — it is the *resting* state. The last connection to close cleanly
+ * checkpoints and deletes both `-wal` and `-shm`, so "no live writer" means "no `-shm`" means
+ * "a reader needs write access it does not have". Measured on a WAL db: an intact `-shm`
+ * reads fine with the whole directory write-denied; the same db with the `-shm` missing fails,
+ * and a read-only directory can never rebuild it.
+ *
+ * Hence the fallback: when the direct open fails, copy `tasks.db` (+ `tasks.db-wal` if present)
+ * into a *writable* directory and open the copy read-only. The copy's directory is writable,
+ * so SQLite can rebuild its own wal-index there. Verified 2026-10-16: the copy reports the
+ * same rows, including rows that live only in the un-checkpointed `-wal`. The copy is
+ * re-made only when the source files change and is removed on exit. (agent-ex itself now
+ * avoids WAL — see src/store.ts — so this fallback is for pre-existing WAL databases and for
+ * sandboxes that also deny the temp directory; `--copy-dir` points it at somewhere writable.)
  *
  * Token economy
  * -------------
@@ -136,7 +164,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -151,7 +179,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const USAGE =
   "usage: node wait-task.mjs <task_id> [--interval-sec N] [--max-wait-sec N] " +
-  "[--report-out PATH] [--once] [--verbose] [--no-digest] [--home PATH]";
+  "[--report-out PATH] [--copy-dir PATH] [--once] [--verbose] [--no-digest] [--home PATH]";
 
 function usage(msg) {
   if (msg) console.error(`wait-task: ${msg}`);
@@ -165,6 +193,7 @@ const opts = {
   intervalSec: 20,
   maxWaitSec: null,   // null = derive from the task row; 0 = never give up
   reportOut: null,
+  copyDir: tmpdir(),  // 降级副本的落点：必须可写（见文件头 "read-only filesystem"）
   once: false,
   verbose: false,
   noDigest: false,
@@ -183,6 +212,7 @@ for (let i = 0; i < argv.length; i++) {
   if (a === "--interval-sec") opts.intervalSec = Number(takeValue());
   else if (a === "--max-wait-sec") opts.maxWaitSec = Number(takeValue());
   else if (a === "--report-out") opts.reportOut = takeValue();
+  else if (a === "--copy-dir") opts.copyDir = takeValue();
   else if (a === "--home") opts.home = takeValue();
   else if (a === "--once") opts.once = true;
   else if (a === "--verbose") opts.verbose = true;
@@ -221,19 +251,99 @@ function deriveMaxWait(timeoutSec) {
 // ---------------------------------------------------------------- db
 
 let db = null;
-let dbError = null;
+let dbSource = "direct";
+let copyDir = null;     // 降级副本目录（跨轮复用；exit 时删）
+let copiedSig = null;   // 上次复制的源文件签名；未变则不重复复制
+let fallbackNoted = false;
+
+/** 源库及其 wal 的签名（大小 + mtime）。任一侧变化 ⇒ 副本过期。 */
+function sourceSig(srcDb) {
+  return [srcDb, `${srcDb}-wal`]
+    .map((f) => {
+      try {
+        const s = statSync(f);
+        return `${s.size}:${s.mtimeMs}`;
+      } catch {
+        return "gone";
+      }
+    })
+    .join("|");
+}
+
+/**
+ * 把 db(+wal) 复制到可写目录，返回副本库路径。副本目录可写 ⇒ SQLite 能自行建 shm、做 recovery。
+ *
+ * wal 的存在性必须一并对齐：源侧已 checkpoint/关闭（`-wal` 消失）时若把旧 wal 留在副本里，
+ * 就是把过期帧叠到新库上 —— 所以不存在时要主动删掉副本的 wal，不能只是"不复制"。
+ */
+function copyForRead(srcDb) {
+  if (!copyDir) {
+    mkdirSync(opts.copyDir, { recursive: true });
+    copyDir = mkdtempSync(join(opts.copyDir, "agent-ex-wait-"));
+  }
+  const dstDb = join(copyDir, "tasks.db");
+  const dstWal = `${dstDb}-wal`;
+  const sig = sourceSig(srcDb);
+  if (sig !== copiedSig) {
+    copyFileSync(srcDb, dstDb);
+    if (existsSync(`${srcDb}-wal`)) copyFileSync(`${srcDb}-wal`, dstWal);
+    else rmSync(dstWal, { force: true });
+    copiedSig = sig;
+  }
+  return dstDb;
+}
+
+/**
+ * 打开并做一次真实读。wal-index 不可用要在这一步就抛出来 —— 否则错误会伪装成
+ * "任务不存在"（查询返回空集）而不是"库打不开"，而这两者的处置完全不同。
+ */
+function openAndProbe(makePath) {
+  const d = new DatabaseSync(makePath(), { readOnly: true });
+  d.prepare(SELECT).get(taskId);
+  return d;
+}
+
+/**
+ * 取一个可用连接：先直接只读打开；失败则降级读副本（见文件头 "read-only filesystem"）。
+ * 副本最多重试一次 —— 复制 db 与复制 wal 之间源侧可能刚好 checkpoint，二者不同步；
+ * 丢掉签名重来一次即可，两次都失败就如实报"库不可读"。
+ */
+function ensureDb() {
+  if (db) return db;
+  const srcDb = join(opts.home, "tasks.db");
+  let directErr;
+  try {
+    db = openAndProbe(() => srcDb);
+    return db;
+  } catch (e) {
+    directErr = e;
+  }
+  let copyErr = directErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      db = openAndProbe(() => copyForRead(srcDb));
+      dbSource = "copy";
+      if (!fallbackNoted) {
+        fallbackNoted = true;
+        console.error(
+          `wait-task: cannot read ${srcDb} in place (${oneLine(directErr.message)}) — ` +
+            `reading a copy under ${copyDir}; pass --copy-dir to choose a different writable directory`,
+        );
+      }
+      return db;
+    } catch (e) {
+      copyErr = e;
+      copiedSig = null;
+    }
+  }
+  throw new Error(
+    `cannot open ${srcDb}: ${directErr.message}; the copy fallback failed too: ${copyErr.message}`,
+  );
+}
 
 /** Returns a row object, null when the task does not exist, or throws on an unreadable DB. */
 function readTask() {
-  if (!db && !dbError) {
-    try {
-      db = new DatabaseSync(join(opts.home, "tasks.db"), { readOnly: true });
-    } catch (e) {
-      dbError = e.message;
-    }
-  }
-  if (dbError) throw new Error(`cannot open ${join(opts.home, "tasks.db")}: ${dbError}`);
-  return db.prepare(SELECT).get(taskId) ?? null;
+  return ensureDb().prepare(SELECT).get(taskId) ?? null;
 }
 
 // ---------------------------------------------------------------- report extraction
@@ -317,6 +427,9 @@ function emit(row, wait) {
     `WAIT=${wait}`,
     `MAX_WAIT_SEC=${effectiveMaxWait === 0 ? "never" : effectiveMaxWait ?? DEFAULT_MAX_WAIT_SEC}`,
   ];
+  // Only the noteworthy case is printed: a copy read means the direct open was denied, which the
+  // caller should know when interpreting a stale-by-a-beat status.
+  if (dbSource === "copy") lines.push("DB_SOURCE=copy");
 
   const end = row.ended_at ?? Math.floor(Date.now() / 1000);
   if (row.started_at) lines.push(`ELAPSED_SEC=${end - row.started_at}`);
@@ -385,9 +498,15 @@ async function main() {
     try {
       row = readTask();
     } catch (e) {
+      // 库读不了 ≠ 任务不存在。曾经两者共用 exit 3 + WAIT=not_found，把「沙箱禁写」伪装成
+      // 「是不是我手抄 id 抄错了」—— 排查方向直接跑偏。分开报，并明确指路。
       console.error(`wait-task: ${e.message}`);
-      console.log(`TASK_ID=${taskId}\nSTATUS=unknown\nWAIT=not_found`);
-      return 3;
+      console.error(
+        "wait-task: this is an environment problem (sandbox / file permissions), not evidence about the task. " +
+          "In a read-only sandbox, retry with --copy-dir <a writable dir>, or run the wait outside the sandbox.",
+      );
+      console.log(`TASK_ID=${taskId}\nSTATUS=unknown\nWAIT=db_unreadable`);
+      return 6;
     }
 
     if (row === null) {
@@ -445,6 +564,13 @@ try {
     db?.close();
   } catch {
     /* already gone */
+  }
+  if (copyDir) {
+    try {
+      rmSync(copyDir, { recursive: true, force: true });
+    } catch {
+      /* best effort: tmpdir gets swept anyway */
+    }
   }
 }
 process.exitCode = code;

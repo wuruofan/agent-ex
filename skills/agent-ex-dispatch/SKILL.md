@@ -238,6 +238,12 @@ node --disable-warning=ExperimentalWarning \
 
 ⚠️ `--disable-warning` 是 **node 自己的 flag，必须放在脚本路径之前**。放到脚本后面会被参数解析器当成未知选项、以 exit 4 退出（9/23 实测踩到）。
 
+> 🛡️ **只读沙箱里也能用（10/16 起）**：宿主 shell 沙箱若禁止写 `~/.agent-ex`（Trae 的默认策略就是：
+> `filesystem.default="read_only"`、`readWrite` 为空、`commandRules` 白名单里没有 `node`），直接读库会失败
+> —— 脚本会自动改为读「可写目录里的副本」并输出 `DB_SOURCE=copy`；若连副本目录也不可写，用
+> `--copy-dir <你工作区里的目录>`。**`WAIT=db_unreadable`（exit 6）是环境问题，不是「任务不存在」**
+> （后者是 `WAIT=not_found` / exit 3），两者别混。见 `docs/diagnostics/2026-10-16-readonly-sandbox.md`。
+
 以 `run_in_background` 方式启动，**不要**前台跑。
 
 **为什么这样可行（已实测）**：
@@ -314,8 +320,10 @@ cancelled ← 任意非终态可取消
 | 工具不存在 / MCP 未连 | 检查 `~/.workbuddy/mcp.json` 与 `dist/server.js` 是否 build；重启后重试 |
 | **刚 submit 完，wait-task 就报 `WAIT=not_found` / `agent_ex_status` 报 `not found`**（`task_muxhq896_247f77` 这种 14+ 字符 id） | **先怀疑自己打错了 id，不要怀疑任务没提交**。submit 的返回是权威，但它是一串长得像随机的字符，**手抄进 `wait-task.mjs` / `agent_ex_status` 极易漏一个字符**（10/07 实测：把 `…hq896…` 抄成 `…h896…`，两个入口都报 `not found`，白白以为派发失败）。处置：**从 submit 的返回里复制粘贴**，别凭记忆敲；已报 not found 时用**不带参数的** `agent_ex_status`（列全部活跃任务）取回真实 id，再用它重起 wait-task。 |
 | `agent_ex_submit` 返回带 `warning` 字段 | 同 `project_path` 已有活跃任务（铁律 2 的被检查版）——停下等前序终态或向用户确认，别无视。 |
+| **`wait-task` 报 `WAIT=db_unreadable`（exit 6）**，或报 `WAIT=not_found` 但 `agent_ex_status` 说任务在 | **这是环境问题，不是任务问题**（10/16 实测定案）。最常见成因：宿主 shell 沙箱禁止写数据目录，SQLite 做 WAL recovery 需写 `-wal`/`-shm` 时被拒。脚本已内置降级（复制 `tasks.db(+wal)` 到可写目录再读，输出 `DB_SOURCE=copy`）；降级也失败时 `--copy-dir <可写目录>` 指到工作区，或让该命令在沙箱外跑。**判据：`STATUS`/`WAIT` 是权威字段，退出码不是**——沙箱拒绝会让宿主把退出码报成 1，而任务本身可能已经 completed。根治见 `docs/diagnostics/2026-10-16-readonly-sandbox.md`（库不再用 WAL；转换需一个「所有连接都退出」的窗口 ⇒ 重启 MCP server 即完成，重启前降级路径一直兜着）。 |
 | 任务 `failed`，`error: failed to spawn runner … ENOENT` | executor `bin` 解析失败（裸名 + PATH 找不到）→ 改 `config.json` 为绝对路径 |
 | 飞书不推送 | `notify.dry_run` 还是 `true`；或 `FEISHU_WEBHOOK_URL` 不在 `.env` / server 环境 |
+| **飞书不推送，但 `dry_run=false`、URL 也在**（任务照常终态，人什么都没收到） | 先看 `~/.agent-ex/logs/runner-<task_id>.log`（runner 的 stdout/stderr 重定向在这里，**排查通知的唯一证据面**；`tasks.db` 只给一个布尔 `notify_failed`，分不清「拒收」和「网络不通」）。若见 `[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found` ⇒ **关键词闸门**：终态卡里会带一个 `notify.keyword` 的元素（`notifier.ts` 的 `buildFeishuCard` 把它塞进 markdown 元素），飞书要求消息**包含**机器人在「安全设置 → 自定义关键词」里登记的任一词。**两处必须一致**：改 `config.json` 的 `notify.keyword` 而没同步改机器人侧 = 此后每张卡都被拒收，**任务状态不受影响所以完全静默**（10/13 09:25 把 keyword 由 `agent-flow-ex` 改成 `agent-ex`、机器人侧没改 ⇒ 直到 10/15 才发现，期间 14 个任务 0 通知）。判定用 `code` 不用 `res.ok`（飞书出错也返 HTTP 200）。**验证手段**：`node -e` 直接 import `dist/notifier.js` 的 `buildFeishuCard`/`sendFeishuCard` + `dist/env-file.js` 的 `loadEnvFile()`，拿候选关键词发一张自检卡看 `code`（`19024`=不匹配且**不投递**，`0`=匹配且**已投递** ⇒ 只有猜对那一次才真的发出去）。改 `config.json` **不需要重启 MCP server**：runner 是独立进程、每次 `loadConfig()` 新读。 |
 | `{env:VAR}` 报 not found | 对应密钥缺在 `$HOME/.agent-ex/.env`，补上后重启 MCP server |
 | **`agent_ex_status` 的 `result` 只给到一半**（长报告在句子中间断掉、承诺的小节没出现） | **不要重派、不要据此猜结论**。全文落在 `$AGENT_EX_HOME/logs/`（默认 `~/.agent-ex/logs/`）下的 `task_<id>_<hash>.jsonl`（每行一个 JSON；注意文件名带一段 hash 后缀，用 `ls`/`find` 定位，别假设只有 id）。抽法：逐行 `json.loads` → 递归收集 `{"type":"text"}` 的 `text`，**且只收 `role == "assistant"` 的块** → **先打印每块的字符数**，最终报告是其中最长的那块（**别盲取最后一块**：实测 T0 报告是第 2 块、阶段 2 是第 18 块）。**按 role 过滤是必须的，不是可选的**：被压缩（compact）过的任务日志里**最长的文本块是 compaction 摘要，不是报告** —— `task_mu9jj2zd_9b3341` 实测：摘要 12 936 字符（内容以 `This session is being continued from a previous conversation…` 开头）挂在 **`role: "user"`** 上，而 23 个 `role: "assistant"` 文本块才是 worker 自己的叙述与终报（终报 3 322 字符 = **最后一块**，条数比 23∶1）。⇒ 不按 role 过滤，就会把"继续上次工作"的摘要当成交付报告来复核（本会话真踩到过）。9/20 一天踩了三次（11 088 字符的报告 MCP 只回一半）。**最省事的做法：`"$SKILL_DIR/scripts/wait-task.mjs" <task_id> --once --report-out <path>`** —— 已内置同一套提取，且覆盖 claude / opencode 两种日志形状，见「会话内定时等待」。若要手写，用**当前解释器**（`python3 -c` 即可，不要硬编码任何机器上的 python 绝对路径），把最长块写到 `/tmp/t<stage>_report.md` 再 `Read`。|
 | **要回读「工单正文」而不是报告**（核对某阶段当初派了什么 / 查 task_id ↔ 阶段的对应） | 工单是 JSONL 的**第一条**记录，形状 `{"type":"user_prompt","round":…,"text":"…"}` —— **顶层 `text` 字段**，**不是** `message.content`（后者是 assistant 侧文本块的形状）。字段用错会**静默拿到空串**：9/20 实测按 `type=="user"` + `message.content` 抽 12 个文件全空，差点误判成"日志没存工单"。另：`task_id` 带随机后缀 + 阶段号只写在工单正文里 ⇒ 想知道「阶段 N 是哪个 task_id」只能这样回读，不要凭记忆写进 spec。|
@@ -323,7 +331,7 @@ cancelled ← 任意非终态可取消
 
 ## Resources
 
-- `scripts/wait-task.mjs` — 等待任务到终态**或需要我（needs_input）**并提取完整报告（后台运行，不受单次 Bash 600s 上限约束）；退出码 0/2/3/4/5。用法与唤醒后的复核流程见「会话内定时等待」。
-- `scripts/wait-task.test.mjs` — 上者的隔离验证（33 项断言，自建合成 `AGENT_EX_HOME`，不碰真实 tasks.db、不发飞书）。**改过 `wait-task.mjs` 就重跑它**：`node skills/agent-ex-dispatch/scripts/wait-task.test.mjs`。每条断言都编码了一个真实踩过的错：needs_input 被当成"继续等"（时钟等满才退、报无用 timeout）／取最长文本块会拿到 compaction 摘要而非报告／digest 阈值低于脚本自身固定开销时反而比原报告更贵。已做变异验证：清空 `ACTIONABLE` 后该测试 9 项转红。
+- `scripts/wait-task.mjs` — 等待任务到终态**或需要我（needs_input）**并提取完整报告（后台运行，不受单次 Bash 600s 上限约束）；退出码 **0**=terminal / **5**=needs_input / **2**=timeout / **3**=not_found / **6**=db_unreadable（环境/沙箱）/ **4**=usage。`--copy-dir` 指定「库目录只读」时的降级副本落点。用法与唤醒后的复核流程见「会话内定时等待」。
+- `scripts/wait-task.test.mjs` — 上者的隔离验证（43 项断言，自建合成 `AGENT_EX_HOME`，不碰真实 tasks.db、不发飞书）。**改过 `wait-task.mjs` 就重跑它**：`node skills/agent-ex-dispatch/scripts/wait-task.test.mjs`。每条断言都编码了一个真实踩过的错：needs_input 被当成"继续等"（时钟等满才退、报无用 timeout）／取最长文本块会拿到 compaction 摘要而非报告／digest 阈值低于脚本自身固定开销时反而比原报告更贵／**只读文件系统被当成只读数据库**（WAL 库的 `-shm` 一旦不在，无写权限的读者就读不了 —— 旧代码报 `WAIT=not_found`，把环境问题指向了「id 抄错」这个完全错的方向）。已做变异验证：清空 `ACTIONABLE` 后该测试 9 项转红。
 - `references/prompt-templates.md` — 派发工单 / needs_input 答复 / 只读评审 三类提示词模板。
 - `references/confidence-check.md` — 收到 worker 终态报告后的防假阳性 5 问 + 置信度三档分级 + 采信前的十个机械核对（git 数改动 / 重量行为断言 / 检查 plan 是否偏离消费方 / 测试结论先对齐沙箱 / 「无输出」类验收自己重跑 / 接口字段逐条对测试 / 「0 fail」必须附非零测试数 / 「结构上不可能」类断言用探针走完整路径 / plan 断言表与测试名对表 / 计数先定口径、按结构字段数）+ 把交付按 Task 边界落成 commit 时的文件重叠规则 + 「这条断言在旧代码上会失败」要自己用最小 mutation 跑出来（含基线测量的文件级 cp 法）+「plan 步骤本身不可满足时先修 plan，不要改 worker 已正确的代码」。

@@ -26,12 +26,18 @@
  *      keyed on type=="assistant" + message.content[] returns "" for every opencode task and
  *      still exits 0 — "no report" indistinguishable from "empty report". Group 7 feeds the
  *      same report text in both shapes; before the fix the opencode case was 0 chars.
+ *   5. A read-only *filesystem* mistaken for a read-only *database* (group 8). A WAL database
+ *      whose -shm is gone cannot be read by a connection that may not write, and "no live
+ *      writer" is exactly when the -shm is gone. Before the fix the script reported
+ *      WAIT=not_found/exit 3 — the same signal as a mistyped id — pointing the caller at the
+ *      wrong problem entirely. Now: copy the db beside a writable dir and read that, and keep
+ *      db_unreadable distinct from not_found.
  *
  * Exit code is the script's contract, so it is asserted directly:
- *   0 terminal / 5 needs_input / 2 timeout / 3 not_found / 4 usage.
+ *   0 terminal / 5 needs_input / 2 timeout / 3 not_found / 4 usage / 6 db_unreadable.
  */
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,12 +52,13 @@ function check(name, cond, detail = "") {
 }
 
 const HOME = mkdtempSync(join(tmpdir(), "af-wait-test-"));
-const db = new DatabaseSync(join(HOME, "tasks.db"));
-db.exec(`CREATE TABLE tasks (
+const SCHEMA = `CREATE TABLE tasks (
   id TEXT PRIMARY KEY, status TEXT, prompt TEXT, project_path TEXT, executor TEXT, profile TEXT,
   timeout_sec INTEGER, session_id TEXT, rounds INTEGER, result TEXT, question TEXT, progress TEXT,
   files_changed TEXT, pid INTEGER, error TEXT, log_path TEXT, role TEXT, created_at INTEGER,
-  started_at INTEGER, ended_at INTEGER, notify_failed INTEGER)`);
+  started_at INTEGER, ended_at INTEGER, notify_failed INTEGER)`;
+const db = new DatabaseSync(join(HOME, "tasks.db"));
+db.exec(SCHEMA);
 
 const asst = (text) => JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
 const compact = (text) => JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
@@ -69,11 +76,11 @@ function insert(t) {
       null, JSON.stringify(t.files ?? []), null, t.error ?? null, t.log_path, "worker", 1000, 1000, t.ended_at ?? null, 0);
 }
 
-function run(args) {
+function run(args, extraEnv = {}) {
   const t0 = Date.now();
   return new Promise((resolve) => {
     const p = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", SCRIPT, ...args],
-      { env: { ...process.env, AGENT_EX_HOME: HOME } });
+      { env: { ...process.env, AGENT_EX_HOME: HOME, ...extraEnv } });
     let out = "", err = "";
     p.stdout.on("data", (d) => (out += d));
     p.stderr.on("data", (d) => (err += d));
@@ -247,6 +254,73 @@ console.log("=== 7. executor log shapes: claude and opencode must both yield the
   const clWrote = readMaybe(join(HOME, "cl.report.md")) ?? "";
   check("claude shape unchanged by the opencode branch",
     clWrote === REPORT && !clWrote.includes("continued from a previous"), `len=${clWrote.length}`);
+}
+
+// ------------------------------------------------- 8. read-only db dir (sandbox)
+//
+// A WAL database at rest (last connection closed cleanly) has no -wal and no -shm. A read-only
+// connection then needs to *create* the wal-index, which a write-denying sandbox refuses. That
+// is the state Trae's shell sandbox puts every wait-task run in. The script must still deliver
+// the terminal state — via a copy in a writable directory — and, when even that is impossible,
+// say "db unreadable" instead of the misleading "no such task".
+
+console.log("=== 8. read-only db dir: copy fallback, and db_unreadable != not_found ===");
+{
+  const RO = mkdtempSync(join(tmpdir(), "af-wait-ro-"));
+  const WAL_HOME = join(RO, "home");     // holds the WAL db; will be made write-denying
+  const COPY = join(RO, "copy");         // writable directory for the fallback copy
+  const NOCOPY = join(RO, "nocopy");     // deliberately not writable
+  mkdirSync(WAL_HOME); mkdirSync(COPY); mkdirSync(NOCOPY);
+  const logPath = join(RO, "ro.jsonl");
+  const REPORT = "## 报告\n沙箱里也要能读到终态。";
+  writeFileSync(logPath, asst(REPORT) + "\n");
+
+  const RO_ID = "task_mock_ro_0001";
+  const w = new DatabaseSync(join(WAL_HOME, "tasks.db"));
+  w.exec(SCHEMA);
+  w.exec("PRAGMA journal_mode=WAL");
+  w.prepare("INSERT INTO tasks (id,status,prompt,project_path,executor,profile,timeout_sec,session_id,rounds," +
+    "result,question,progress,files_changed,pid,error,log_path,role,created_at,started_at,ended_at,notify_failed)" +
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    .run(RO_ID, "completed", "p", "/tmp/proj", "claude", null, 3600, null, 1, REPORT, null, null,
+      JSON.stringify(["a.ts"]), null, null, logPath, "worker", 1000, 1000, now, 0);
+  w.close(); // clean close checkpoints and deletes -wal/-shm — the resting state
+
+  const restFiles = readdirSync(WAL_HOME);
+  check("precondition: WAL db at rest keeps only tasks.db (no -wal/-shm to hand a reader)",
+    restFiles.length === 1 && restFiles[0] === "tasks.db", restFiles.join(","));
+
+  chmodSync(NOCOPY, 0o555);
+  chmodSync(WAL_HOME, 0o555); // the sandbox: reads allowed, writes denied
+  try {
+    const fallback = await run([RO_ID, "--once", "--copy-dir", COPY,
+      "--report-out", join(COPY, "ro.report.md")], { AGENT_EX_HOME: WAL_HOME });
+    check("write-denied db dir: still exit 0 / WAIT=terminal",
+      fallback.code === 0 && /^WAIT=terminal$/m.test(fallback.out),
+      `code=${fallback.code} out=${fallback.out} err=${fallback.err}`);
+    check("write-denied db dir: STATUS read from the copy, not a phantom not_found",
+      /^STATUS=completed$/m.test(fallback.out) && /^FILES_CHANGED=1$/m.test(fallback.out), fallback.out);
+    check("write-denied db dir: DB_SOURCE=copy disclosed", /^DB_SOURCE=copy$/m.test(fallback.out), fallback.out);
+    check("write-denied db dir: stderr says why and where",
+      /cannot read .*in place/.test(fallback.err) && /reading a copy under/.test(fallback.err), fallback.err);
+    check("write-denied db dir: report extracted through the copy path",
+      (readMaybe(join(COPY, "ro.report.md")) ?? "").includes("沙箱里也要能读到终态"),
+      JSON.stringify(readMaybe(join(COPY, "ro.report.md"))));
+    check("write-denied db dir: copy directory removed on exit",
+      readdirSync(COPY).every((f) => !f.startsWith("agent-ex-wait-")), readdirSync(COPY).join(","));
+
+    const stuck = await run([RO_ID, "--once", "--copy-dir", NOCOPY], { AGENT_EX_HOME: WAL_HOME });
+    check("both paths denied: exit 6 / WAIT=db_unreadable",
+      stuck.code === 6 && /^WAIT=db_unreadable$/m.test(stuck.out), `code=${stuck.code} out=${stuck.out}`);
+    check("both paths denied: never reported as not_found (the old lie)",
+      !/^WAIT=not_found$/m.test(stuck.out) && !/^STATUS=completed$/m.test(stuck.out), stuck.out);
+    check("both paths denied: names it an environment problem + the way out",
+      /environment problem/.test(stuck.err) && /--copy-dir/.test(stuck.err), stuck.err);
+  } finally {
+    chmodSync(WAL_HOME, 0o755);
+    chmodSync(NOCOPY, 0o755);
+  }
+  rmSync(RO, { recursive: true, force: true });
 }
 
 db.close();
