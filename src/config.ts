@@ -47,6 +47,17 @@ export function loadConfig(home?: string): Config {
   return cfg;
 }
 
+/**
+ * 校验一份 config（**不读盘**）。
+ *
+ * 单独导出是为了让 `init` 能在**写盘前**校验内存里的候选配置：原先 init 是先写盘再校验，
+ * 校验失败时坏 config 已落盘、旧 config 已被覆盖且无法恢复（实测：bin 路径不存在时报
+ * "config written but self-check failed" 并 exit 1，用户手里只剩一个坏文件）。
+ */
+export function validateConfig(cfg: Config): void {
+  validate(cfg);
+}
+
 function validate(cfg: Config): void {
   if (!cfg.executors || Object.keys(cfg.executors).length === 0) throw new Error("config.executors is empty");
   if (!cfg.profiles || Object.keys(cfg.profiles).length === 0) throw new Error("config.profiles is empty");

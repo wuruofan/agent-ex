@@ -39,31 +39,51 @@ export interface Task {
 export type NewTask = Pick<Task, "id" | "prompt" | "project_path" | "executor" | "profile" | "timeout_sec" | "log_path" | "role" | "created_at">;
 export type TaskPatch = Partial<Omit<Task, "id" | "status" | "created_at">>;
 
+/**
+ * 目标列定义 —— 建表与迁移共用同一份真相。
+ *
+ * 为什么不能只留 `CREATE TABLE IF NOT EXISTS`：表已存在时整句被跳过，**新增的列一个都不会出现**
+ * （2026-10-16 实测：旧库只有 id/status，跑新版 SCHEMA 后 `note`/`score` 列仍然不存在，
+ * 写它们时报 `table tasks has no column named ...`）。也就是说 `IF NOT EXISTS` 只防"表不存在"，
+ * 不防"表存在但列过时"—— 而后者才是升级时真正会发生的事。
+ *
+ * 由此把列定义抽成数据，迁移时按 `pragma table_info` 求差集、用 `ALTER TABLE ADD COLUMN` 补齐。
+ * 注意 SQLite 的三条限制（实测）：
+ *   - 不能加 `PRIMARY KEY` 列 → 主键恒为 `id`，本就不该改；
+ *   - 不能加无默认值的 `NOT NULL` 列（表非空时报错）→ 所以每个 NOT NULL 列都必须带 DEFAULT；
+ *   - `ADD COLUMN` 不能改类型/约束，想改只能重建表 —— 见 docs/diagnostics 记录的取舍。
+ */
+const COLUMNS: Record<string, string> = {
+  id: "id TEXT PRIMARY KEY",
+  status: "status TEXT NOT NULL DEFAULT 'queued'",
+  prompt: "prompt TEXT NOT NULL DEFAULT ''",
+  project_path: "project_path TEXT NOT NULL DEFAULT ''",
+  executor: "executor TEXT NOT NULL DEFAULT ''",
+  profile: "profile TEXT NOT NULL DEFAULT ''",
+  timeout_sec: "timeout_sec INTEGER NOT NULL DEFAULT 0",
+  session_id: "session_id TEXT",
+  rounds: "rounds INTEGER NOT NULL DEFAULT 1",
+  result: "result TEXT",
+  question: "question TEXT",
+  progress: "progress TEXT",
+  files_changed: "files_changed TEXT NOT NULL DEFAULT '[]'",
+  pid: "pid INTEGER",
+  error: "error TEXT",
+  log_path: "log_path TEXT NOT NULL DEFAULT ''",
+  role: "role TEXT NOT NULL DEFAULT 'worker'",
+  created_at: "created_at INTEGER NOT NULL DEFAULT 0",
+  started_at: "started_at INTEGER",
+  ended_at: "ended_at INTEGER",
+  notify_failed: "notify_failed INTEGER NOT NULL DEFAULT 0",
+};
+
+const TABLE = "tasks";
+
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS tasks (
-  id TEXT PRIMARY KEY,
-  status TEXT NOT NULL DEFAULT 'queued',
-  prompt TEXT NOT NULL,
-  project_path TEXT NOT NULL,
-  executor TEXT NOT NULL,
-  profile TEXT NOT NULL,
-  timeout_sec INTEGER NOT NULL,
-  session_id TEXT,
-  rounds INTEGER NOT NULL DEFAULT 1,
-  result TEXT,
-  question TEXT,
-  progress TEXT,
-  files_changed TEXT NOT NULL DEFAULT '[]',
-  pid INTEGER,
-  error TEXT,
-  log_path TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'worker',
-  created_at INTEGER NOT NULL,
-  started_at INTEGER,
-  ended_at INTEGER,
-  notify_failed INTEGER NOT NULL DEFAULT 0
+CREATE TABLE IF NOT EXISTS ${TABLE} (
+${Object.values(COLUMNS).map((c) => `  ${c}`).join(",\n")}
 );
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);`;
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON ${TABLE}(status);`;
 
 export class Store {
   private db: DatabaseSync;
@@ -75,6 +95,34 @@ export class Store {
     this.db.exec("PRAGMA busy_timeout=5000;");
     this.useRollbackJournal();
     this.db.exec(SCHEMA);
+    this.migrateColumns();
+  }
+  /**
+   * 补齐旧库缺失的列。
+   *
+   * 逐列一条 `ALTER TABLE ... ADD COLUMN`：SQLite 的 `ADD COLUMN` 只支持"追加一列"这种最小变更，
+   * 恰好匹配"新版本只增列不改列"的演进方式；一条一执行，某列被占用/改过类型时只跳过它，
+   * 不至于让整次迁移回滚（缺列会在后续查询处明确报 `no such column`，不会静默丢数据）。
+   *
+   * 只在真有缺口时才动表 —— 绝大多数 open 是 no-op，不产生写、不拿排他锁。
+   * 刻意不做"重建表以改列类型/约束"：那要先搬 45 行数据、且失败窗口更大，
+   * 收益只在真要改已有列时才出现（届时再说，别预先付这个复杂度）。
+   */
+  private migrateColumns(): void {
+    const present = new Set(
+      (this.db.prepare(`PRAGMA table_info(${TABLE})`).all() as Array<{ name: string }>).map((r) => r.name),
+    );
+    if (present.size === 0) return; // 表刚由 SCHEMA 建好，无需迁移
+    const missing = Object.keys(COLUMNS).filter((c) => !present.has(c));
+    if (missing.length === 0) return;
+    for (const col of missing) {
+      try {
+        this.db.exec(`ALTER TABLE ${TABLE} ADD COLUMN ${COLUMNS[col]}`);
+        console.error(`[store] migrated: added column "${col}" to ${TABLE}`);
+      } catch (e) {
+        console.error(`[store] could not add column "${col}": ${(e as Error).message}`);
+      }
+    }
   }
   /**
    * 刻意**不用 WAL**（2026-10-16 实测后改）。

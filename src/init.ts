@@ -17,9 +17,10 @@ import { createInterface } from "node:readline/promises";
 import { join, dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentExHome, ensureRuntimeDirs } from "./paths.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, validateConfig, type Config } from "./config.js";
 import { BRAND } from "./brand.js";
 import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
+import { diffConfigs, renderChangeWarning } from "./init-changes.js";
 
 type RL = ReturnType<typeof createInterface>;
 
@@ -209,7 +210,13 @@ export function mcpServerSnippet(serverEntry: string): string {
   );
 }
 
-/** init 末尾的收尾指引：MCP 注册 + skill 安装 + 宿主差异提示。 */
+/**
+ * init 结束后打印"下一步"，含飞书通知的自检提示。
+ *
+ * 为什么要专门提示 dry_run：init 写出的 config 一律 `dry_run: true`（安全默认），
+ * 于是"配好了却没收到通知"是最常见的第一手困惑 —— 卡片只打到 stderr。
+ * 这里把这一句和它的修复命令直接摆出来。
+ */
 export function nextSteps(home: string, serverEntry: string): string {
   return [
     "",
@@ -233,8 +240,40 @@ export function nextSteps(home: string, serverEntry: string): string {
     "   Skill dirs differ per host; if the load does not take effect, find yours with:",
     "     find ~ -maxdepth 4 -type d -name skills -path '*<host>*' 2>/dev/null",
     "",
-    "4) Optional: edit " + join(home, "config.json") + " to tune model aliases / env.",
+    "4) Feishu notifications are in dry-run mode (nothing is delivered yet).",
+    "   When the bot's keyword matches, turn delivery on:",
+    "     agent-ex config set notify.dry_run false",
+    "   Then verify with a clean self-check card (body must not contain the",
+    "   product name, or the keyword gate may pass by accident):",
+    "     agent-ex doctor --send",
+    "",
+    "5) Optional: edit " + join(home, "config.json") + " to tune model aliases / env.",
   ].join("\n");
+}
+
+/**
+ * 读既有 config（宽容解析）。
+ *
+ * 宽容是刻意的：config 可能已经坏了（手改出错 / 迁移写坏），而 init 的职责是**修复**它，
+ * 不能因为 JSON 解析失败就崩在门口——那种情况下用户看到的是"init 报了个语法错误"，
+ * 而不是"你的 config 坏了，init 会重写它"。因此解析失败按 null 处理（=当成没有旧 config），
+ * 但把警告留给变更预告那一段去说。
+ */
+function readExistingConfig(cfgPath: string): Config | null {
+  if (!existsSync(cfgPath)) return null;
+  try {
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Config;
+    return cfg && typeof cfg === "object" ? cfg : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 备份文件后缀：20261016-142530（本地时间，排序友好）。 */
+function timestampSuffix(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
 export async function runInit(input: NodeJS.ReadableStream = process.stdin): Promise<void> {
@@ -245,7 +284,12 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
 
   try {
     if (existsSync(cfgPath)) {
-      const ow = (await ask(rl, `${cfgPath} already exists. Overwrite?`, "N")).toLowerCase();
+      // 这里只做"廉价退出"，不做"知情同意"：此刻还不知道新 config 长什么样（问答还没开始），
+      // 所以问"要不要覆盖"是在让用户对一个未知后果点头。知情同意放在写盘前那一刻
+      // （那时新旧两份都在手上，能逐项列出差异）。
+      const ow = (await ask(rl,
+        `${cfgPath} already exists. Re-running init REWRITES it (you will see exactly what changes before anything is written). Continue?`,
+        "N")).toLowerCase();
       if (ow !== "y" && ow !== "yes") { console.log("aborted."); return; }
     }
 
@@ -301,6 +345,39 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
     const timeout = Number.parseInt(timeoutRaw, 10) || 3600;
 
     const config = buildConfig({ executor, bin, profile, env, notify, timeout_sec: timeout });
+
+    // ---- 覆盖前的变更预告：让用户知道"要放弃什么"再决定 ----
+    // 位置在这里（而不是流程开头）是因为"要变成什么"必须等问答结束才知道；
+    // 而"现在有什么"在读旧 config 时就有了。两份信息齐了才谈得上预告。
+    const oldCfg = readExistingConfig(cfgPath);
+    const changes = diffConfigs(oldCfg, config as Config);
+    if (changes.length > 0) {
+      console.log(renderChangeWarning(changes));
+      const proceed = (await ask(rl, "Apply these changes?", "N")).toLowerCase();
+      if (proceed !== "y" && proceed !== "yes") { console.log("aborted."); return; }
+    }
+
+    // ---- 先校验、后落盘 ----
+    // 原先是"先写盘再校验"，校验失败时坏 config 已落盘、旧 config 已被覆盖且无法恢复
+    // （实测：bin 路径不存在 → "config written but self-check failed" + exit 1，
+    //   用户手里只剩一个坏文件）。改成写前校验，失败则旧 config 原封不动。
+    try {
+      validateConfig(config as Config);
+    } catch (e) {
+      console.error(`config is invalid, nothing written: ${(e as Error).message}`);
+      process.exit(1);
+    }
+
+    // 备份旧 config（覆盖是不可逆的，留一份回退路径）
+    if (oldCfg) {
+      const bak = `${cfgPath}.bak.${timestampSuffix()}`;
+      try {
+        writeFileSync(bak, readFileSync(cfgPath));
+        console.log(`backed up existing config → ${bak}`);
+      } catch (e) {
+        console.error(`could not back up existing config: ${(e as Error).message}`);
+      }
+    }
 
     writeFileSync(cfgPath, JSON.stringify(config, null, 2) + "\n");
     console.log(`\nwrote ${cfgPath}`);

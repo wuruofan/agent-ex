@@ -120,3 +120,91 @@ describe("store", () => {
     }
   });
 });
+
+/**
+ * 旧库升级：表已存在但列过时。
+ *
+ * 为什么这组测试必须有：SQLite 的 `CREATE TABLE IF NOT EXISTS` 在表存在时**整句跳过**，
+ * 新增的列一个都不会出现（2026-10-16 实测）。也就是说升级过的用户会直接撞
+ * `table tasks has no column named X`，且报错发生在运行期而不是启动期。
+ *
+ * 每条用例都从"手搓一个残缺旧库"开始，而不是复用当前 SCHEMA 造一个近似形状 ——
+ * 后者会把待测的迁移代码自己也带进夹具，出现"代码和夹具互相掩护"的假通过。
+ */
+describe("旧库迁移（列差集补齐）", () => {
+  const MINIMAL = "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'queued');";
+
+  function makeOldDb(withRows: boolean): string {
+    const dbFile = join(dir, "old.db");
+    const raw = new DatabaseSync(dbFile);
+    raw.exec(MINIMAL);
+    if (withRows) raw.exec("INSERT INTO tasks (id, status) VALUES ('task_old_1', 'completed');");
+    raw.close();
+    return dbFile;
+  }
+
+  function columnsOf(dbFile: string): string[] {
+    const raw = new DatabaseSync(dbFile, { readOnly: true });
+    const cols = (raw.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((r) => r.name);
+    raw.close();
+    return cols;
+  }
+
+  it("给缺列的旧库补齐全部列（有数据也不丢行）", () => {
+    const dbFile = makeOldDb(true);
+    const s = openStore(dbFile);
+    const cols = columnsOf(dbFile);
+    for (const c of ["prompt", "project_path", "executor", "profile", "timeout_sec",
+                     "session_id", "rounds", "result", "question", "progress",
+                     "files_changed", "pid", "error", "log_path", "role",
+                     "created_at", "started_at", "ended_at", "notify_failed"]) {
+      expect(cols).toContain(c);
+    }
+    // 关键：迁移不能动既有数据
+    expect(s.listActive().length).toBe(0); // 旧行是 completed，不在活跃集合
+    s.close();
+    const raw = new DatabaseSync(dbFile, { readOnly: true });
+    expect(Number((raw.prepare("SELECT count(*) AS c FROM tasks").get() as { c: number }).c)).toBe(1);
+    raw.close();
+  });
+
+  it("补齐后 Store 的正常读写可用（这正是升级后用户要走的路）", () => {
+    const dbFile = makeOldDb(true);
+    const s = openStore(dbFile);
+    s.createTask(newTask({ id: "task_new_1" }));
+    const t = s.getTask("task_new_1");
+    expect(t?.status).toBe("queued");
+    expect(t?.rounds).toBe(1);
+    expect(t?.files_changed).toEqual([]);
+    s.close();
+  });
+
+  it("NOT NULL 列靠 DEFAULT 补齐（SQLite 不允许无默认值的 NOT NULL）", () => {
+    // rounds / role / files_changed / notify_failed 都是 NOT NULL DEFAULT …
+    const dbFile = makeOldDb(true);
+    openStore(dbFile).close();
+    const raw = new DatabaseSync(dbFile, { readOnly: true });
+    const row = raw.prepare("SELECT rounds, role, files_changed, notify_failed FROM tasks WHERE id = ?").get("task_old_1");
+    raw.close();
+    expect(Number((row as Record<string, unknown>).rounds)).toBe(1);
+    expect((row as Record<string, unknown>).role).toBe("worker");
+    expect((row as Record<string, unknown>).files_changed).toBe("[]");
+    expect(Number((row as Record<string, unknown>).notify_failed)).toBe(0);
+  });
+
+  it("已是最新的库不产生迁移写入（幂等，且不拿排他锁）", () => {
+    const dbFile = makeOldDb(true);
+    openStore(dbFile).close();
+    const before = columnsOf(dbFile);
+    openStore(dbFile).close(); // 第二次 open：列已齐
+    expect(columnsOf(dbFile)).toEqual(before);
+  });
+
+  it("空的旧库（无任何行）同样能补齐", () => {
+    const dbFile = makeOldDb(false);
+    const s = openStore(dbFile);
+    s.createTask(newTask({ id: "task_fresh_1" }));
+    expect(s.getTask("task_fresh_1")?.status).toBe("queued");
+    s.close();
+  });
+});

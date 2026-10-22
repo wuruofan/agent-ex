@@ -7,6 +7,7 @@ import { status } from "./tools/status.js";
 import { cancel } from "./tools/cancel.js";
 import { version } from "./tools/version.js";
 import { restart } from "./tools/restart.js";
+import { doctor } from "./doctor.js";
 import { setStartedAt, isTestMode } from "./tools/test-helpers.js";
 import { ensureRuntimeDirs } from "./paths.js";
 import { loadEnvFile } from "./env-file.js";
@@ -65,6 +66,19 @@ async function main(): Promise<void> {
   );
 
   server.tool(
+    "agent_ex_doctor",
+    ["体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。",
+      "查三类问题：config 本身（关键词/dry_run/webhook/默认profile）、executor 的 bin 是否可执行、",
+      "历史通知失败（扫 runner 日志里的飞书拒收记录，按 code 聚合）。",
+      "send=true 会额外实发一张正文不含产品名的自检卡——验证通知必须用它，",
+      "因为飞书关键词闸门匹配整张卡片，拿真实任务报告当探针会假通过。"].join("\n"),
+    {
+      send: z.boolean().optional().describe("是否实发自检卡（默认 false，只读体检）"),
+    },
+    async (args) => json(await doctor({ send: args.send ?? false })),
+  );
+
+  server.tool(
     "agent_ex_restart",
     ["主动重启当前 MCP server 进程（process.exit，由 host 自动 respawn 并加载当前 dist）。",
       "server 无状态、in-flight worker 在独立进程组，重启安全；只重启调用方这条连接，不影响其他 live server 或在跑任务。"].join("\n"),
@@ -101,6 +115,11 @@ if (sub === "init") {
   runInit()
     .then(() => process.exit(0))
     .catch((e) => { console.error("[agent-ex] init failed:", e); process.exit(1); });
+} else if (sub === "doctor" || sub === "config") {
+  // CLI 子命令：doctor（体检）/ config（改配置）。动态 import 避免 MCP 启动时拉入这些模块。
+  const { runDoctor, runConfig } = await import("./cli.js");
+  const code = sub === "doctor" ? await runDoctor(process.argv.slice(3)) : runConfig(process.argv.slice(3));
+  process.exit(code);
 } else {
   main().catch((e) => { console.error("[agent-ex] fatal:", e); process.exit(1); });
 }

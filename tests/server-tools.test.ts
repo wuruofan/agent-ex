@@ -54,10 +54,11 @@ function listTools(extra: Record<string, string>): Promise<string[]> {
 }
 
 describe("MCP server tool registration", () => {
-  it("registers the 5 production tools and no test helper", async () => {
+  it("registers the 6 production tools and no test helper", async () => {
     const names = (await listTools({ AGENT_EX_TEST_MODE: "0" })).sort();
     expect(names).toEqual([
       "agent_ex_cancel",
+      "agent_ex_doctor",
       "agent_ex_restart",
       "agent_ex_status",
       "agent_ex_submit",
@@ -69,6 +70,6 @@ describe("MCP server tool registration", () => {
     const names = await listTools({ AGENT_EX_TEST_MODE: "1" });
     expect(names.filter((n) => n === "agent_ex_set_started_at")).toHaveLength(1);
     expect(new Set(names).size).toBe(names.length);
-    expect(names).toHaveLength(6);
+    expect(names).toHaveLength(7);
   }, 30000);
 });

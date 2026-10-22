@@ -351,28 +351,21 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
 #### 4. 验证（别拿真实任务报告当探针）
 
 ```bash
-# 发一张正文刻意不含产品名的自检卡，看飞书返回的 code
-node -e '
-(async () => {
-  const {loadEnvFile} = await import("./dist/env-file.js");
-  const {loadConfig, resolveEnvPlaceholders} = await import("./dist/config.js");
-  const {buildFeishuCard, sendFeishuCard} = await import("./dist/notifier.js");
-  loadEnvFile();
-  const cfg = loadConfig();
-  const url = resolveEnvPlaceholders({url: cfg.notify.feishu_webhook_url}).url;
-  const card = buildFeishuCard("completed", "task_selfcheck", "自检卡片：正文不含产品名", cfg.notify.keyword);
-  console.log("SENT_OK =", await sendFeishuCard(url, card, {dryRun: cfg.notify.dry_run}));
-})();'
+agent-ex doctor --send
 ```
 
-`SENT_OK = true` ⇒ 请求被飞书接受（**前提是 `dry_run` 已是 `false`**——dry-run 时 `post()` 直接返回 `true` 却不投递，见文末提示）。`false` 时看 stderr 的 `code`：
+这条命令会发一张**正文刻意不含产品名**的自检卡，并打印飞书返回的 `code` 与含义。
+（想先看配置体检而不真发消息，跑 `agent-ex doctor` —— 它只读，不改任何东西。）
+
+失败时看 stderr 的 `code`：
 
 | `code` | 含义 | 处置 |
 | :--- | :--- | :--- |
 | `0` | 已投递（注意飞书出错也返 HTTP 200，**判定必须看 `code`，不能看 HTTP 状态码**） | — |
-| `19024` | 关键词校验失败 | 机器人侧的关键词与 `notify.keyword` 不一致。⚠️ **闸门是对整张卡片做子串匹配**——worker 的报告正文里只要偶然出现该词，卡也能过。配置错了却可能长期"看起来正常"，所以**只认上面这张正文干净的自检卡**。 |
+| `19024` | 关键词校验失败 | 机器人侧的关键词与 `notify.keyword` 不一致。⚠️ **闸门是对整张卡片做子串匹配**——worker 的报告正文里只要偶然出现该词，卡也能过。配置错了却可能长期"看起来正常"，所以**只认自检卡**。 |
 | `19021` | **签名校验失败**（或时间戳距今超过 1 小时） | 机器人勾选了「加签」而本工具不发送 `timestamp`/`sign` ⇒ **去机器人安全设置里取消勾选加签**。 |
 | `19022` | IP 校验失败 | 机器人勾选了「IP 白名单」而本机出口 IP 不在其中 ⇒ 取消勾选，或把出口 IP 加进白名单。 |
+| `19001` | **webhook token 无效**（地址本身失效：机器人被删/重建/地址轮换） | ⚠️ 与 `19024` **修法完全不同**：这个要**换 webhook 地址**（去机器人后台重新复制，更新 `.env` 里的 `FEISHU_WEBHOOK_URL`），改关键词没用。 |
 | `9499` | 请求体格式错误 | 卡片 JSON 不合 schema。注意官方限制：**请求体不得超过 20 KB**。 |
 | `11232` | 触发限流 | 单机器人 **100 次/分钟、5 次/秒**；密集派发会撞上，尽量避开整点/半点发送。 |
 | 其他 / 无 `code` | 网络或服务端问题 | 检查出口网络与代理。 |
@@ -381,9 +374,25 @@ node -e '
 >
 > **机器人不在群**没有专属错误码——webhook 地址与群绑定，飞书通常**静默丢弃**。要换群必须重建机器人并换新地址。
 
-> 上面的自检卡用的是**当前配置里的 `dry_run`**——`dry_run=true` 时它只打印不投递（这是安全默认值）。要真正验证投递，先把 `notify.dry_run` 改成 `false`。
+> `doctor` 还会扫 `logs/runner-*.log` 里**历史上**的拒收记录并按 `code` 聚合 —— 2026-10-13→10-15 那次连续 23 个任务零通知，证据当时就已经躺在日志里，只是没人看。现在一条命令就能看到。
 
 ## 运行
+
+### 命令行工具
+
+`agent-ex` 既是 MCP server，也是几个运维子命令的入口：
+
+| 命令 | 作用 |
+| :--- | :--- |
+| `agent-ex init` | 首次安装向导（探测 CLI、生成 config.json + .env）。**重跑会重写 config.json**，覆盖前会逐项列出将要变化的设置并要求确认，旧文件自动备份成 `config.json.bak.<时间戳>`。 |
+| `agent-ex doctor` | 体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。**只读**，不改任何东西。 |
+| `agent-ex doctor --fix` | 自动修**确定性缺陷**（关键词缺失/陈旧、明文 webhook 落在 config.json）。**不动 `dry_run`** ——那是你的偏好，不是缺陷。 |
+| `agent-ex doctor --send` | 额外实发一张**正文不含产品名**的自检卡，验证真实投递。 |
+| `agent-ex config list` | 列出 profiles / executors / notify / defaults 现状。 |
+| `agent-ex config set <key> <value>` | 改单个字段（白名单：`notify.dry_run`、`notify.keyword`、`defaults.profile`、`defaults.timeout_sec`）。 |
+| `agent-ex config use <profile>` | 切默认 profile。内置 `opencode-zen-free` 在不存在时会**自动创建**（零密钥的 opencode 免费模型）。 |
+
+> `doctor` 也有对应的 MCP 工具 `agent_ex_doctor`，让 agent 自己就能排错，不用手抄命令。
 
 ### 作为 MCP Server（stdio）
 
@@ -424,7 +433,7 @@ npm run runner <task_id>     # = tsx src/runner.ts <task_id>
 ### 跑测试
 
 ```bash
-npm run build && npm test            # 单元 + 集成 = 139 全绿
+npm run build && npm test            # 单元 + 集成 = 196 全绿
 npm run test:integration            # 只跑集成（会自动先build）
 npm run typecheck                   # 仅类型检查
 ```
@@ -468,6 +477,19 @@ npm run typecheck                   # 仅类型检查
 ### `version`
 
 无参数。返回构建元数据 `{ version, gitSha, buildTime }`，用于确认重启后新代码已生效；`dist/build-meta.json` 缺失时返回 `{ unknown: true, note }`。
+
+### `doctor`
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `send` | ❌ | 是否实发自检卡（默认 `false`，只读体检）。 |
+
+把「通知到底通不通」的证据聚合成结论：config 自身（关键词 / dry_run / webhook / 默认 profile）、
+executor 的 bin 是否可执行、以及**历史上**的通知失败（扫 `logs/runner-*.log` 里的飞书拒收记录，按 `code` 聚合）。
+每条 finding 带 `severity` / `detail` / `fix`（可复制的修复命令）。
+
+> `send=true` 发的是**正文不含产品名**的自检卡 —— 飞书关键词闸门匹配整张卡片，
+> 拿真实任务报告当探针会假通过。
 
 ### `restart`
 
@@ -541,10 +563,23 @@ node dist/server.js init    # 即 `agent-ex init`
 - 写 `config.json`（**只含 `{env:VAR}` 占位符**，零明文）并自动用 `loadConfig()` 自校验；
 - 把确认/粘贴到的密钥写进 `$AGENT_EX_HOME/.env`（**chmod 600**，幂等——同值不重写）；
 - 若密钥最终没进 `.env`，会打印 ⚠ 提醒「运行时必须有该变量，否则任务失败」；
-- 打印 4 步收尾指引：`AGENT_EX_HOME` 怎么设、**可直接粘贴的 MCP 注册片段（绝对路径）**、
-  dispatch skill 的安装方式与各宿主 skills 目录的 `find` 查法、以及调 `config.json` 的提示。
+- 打印收尾指引：`AGENT_EX_HOME` 怎么设、**可直接粘贴的 MCP 注册片段（绝对路径）**、
+  dispatch skill 的安装方式与各宿主 skills 目录的 `find` 查法、**以及怎么打开真实通知**（`config set notify.dry_run false` + `doctor --send`）。
 
-> 已有 `config.json` 时 `init` 会先确认是否覆盖。opencode executor 不询问 provider——它由opencode 自己的配置管理（`opencode auth login` / `opencode.json`），agent-ex 只负责拉起。
+> 已有 `config.json` 时 `init` 的行为：
+>
+> 1. 开头先问一次「要重写吗」（此时还不知道会改成什么样，只是给个廉价退出点）；
+> 2. **问答结束后、写盘前**，把新旧配置的差异逐项列出来（哪些 profile 会消失、哪些字段被改写），
+>    并解释后果（例：`notify.dry_run false → true` 意味着终态通知不再投递），让你**知情同意**；
+> 3. 你同意后：先校验新配置（**校验不过就不写盘**，旧 config 原封不动），
+>    再把旧 config 备份成 `config.json.bak.<时间戳>`，最后才写入。
+>
+> `.env` 是**增量合并**（只补/更新采集到的 key），所以重跑 `init` **不会丢密钥**。
+>
+> ⚠️ 但 `init` 是**全量覆盖**的：只想改一个字段（比如开通知）请用 `agent-ex config set`，
+> 别重跑 `init` —— 那会把其它 profile 一起刷掉。
+>
+> opencode executor 不询问 provider——它由 opencode 自己的配置管理（`opencode auth login` / `opencode.json`），agent-ex 只负责拉起。
 
 ## 发布（npm）
 
