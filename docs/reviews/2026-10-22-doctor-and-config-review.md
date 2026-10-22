@@ -279,3 +279,15 @@ AGENT_EX_HOME="$T" npx tsx -e "import {loadConfig} from './src/config.ts'; conso
 
 # 4) 迁移 no-op 与旧库补齐：见 §已验证 的两次实测（复制库比对 hash / 构造两列旧库）
 ```
+
+---
+
+## 处置结论（2026-10-22）
+
+本评审提出的 P0-1 / P1-2 / P1-3 / P2-4 已全部修复，Q1-Q6 的裁决与逐条处置见
+[`docs/specs/2026-10-16-doctor-and-config.md`](../specs/2026-10-16-doctor-and-config.md) §8 与 §11。
+
+其中 **P1-2 的修法比本评审的建议更窄**，理由是评审自己给的证据链指向更窄的结论：
+`loadConfig` 的 `??= BRAND` 意味着 **keyword 字段缺失时运行时是填 BRAND 的**（评审 §P2-7 的实测 J 已证明），
+所以"缺失 ⇒ 必然拒收"不成立；而**显式空串**才是唯一能证明投递不了的配置态（`??=` 不替换空串）。
+最终落地为四态判定（见 spec §3.1 的表格）。

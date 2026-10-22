@@ -117,6 +117,16 @@ if (sub === "init") {
     .catch((e) => { console.error("[agent-ex] init failed:", e); process.exit(1); });
 } else if (sub === "doctor" || sub === "config") {
   // CLI 子命令：doctor（体检）/ config（改配置）。动态 import 避免 MCP 启动时拉入这些模块。
+  //
+  // ⚠️ 必须先加载 $AGENT_EX_HOME/.env：
+  // MCP 路径的 loadEnvFile() 在 main() 里，而这个分支**根本不会走到 main()**（模块顶层直接分派）。
+  // 于是 CLI 侧解析 {env:VAR} 占位符必然失败——2026-10-22 实测：同一轮体检里
+  // 前半句说"✓ webhook 地址已配置（在 .env 里）"、后半句说"✗ env placeholder not found"，
+  // 自相矛盾，且 `doctor --send` 在 init 默认产出的配置形态下**必然失败**。
+  //
+  // init 不在这里加载：它自己就是 .env 的写入方（writeEnvFile 负责合并），
+  // 预先把 .env 灌进进程环境会让"检测到的值"与"本次采集的值"混为一谈。
+  loadEnvFile();
   const { runDoctor, runConfig } = await import("./cli.js");
   const code = sub === "doctor" ? await runDoctor(process.argv.slice(3)) : runConfig(process.argv.slice(3));
   process.exit(code);

@@ -386,7 +386,7 @@ agent-ex doctor --send
 | :--- | :--- |
 | `agent-ex init` | 首次安装向导（探测 CLI、生成 config.json + .env）。**重跑会重写 config.json**，覆盖前会逐项列出将要变化的设置并要求确认，旧文件自动备份成 `config.json.bak.<时间戳>`。 |
 | `agent-ex doctor` | 体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。**只读**，不改任何东西。 |
-| `agent-ex doctor --fix` | 自动修**确定性缺陷**（关键词缺失/陈旧、明文 webhook 落在 config.json）。**不动 `dry_run`** ——那是你的偏好，不是缺陷。 |
+| `agent-ex doctor --fix` | 自动修**确定性缺陷**（显式空串关键词、改名前的旧产品名、明文 webhook 落在 config.json）。**不动 `dry_run`** ——那是你的偏好，不是缺陷；**也不动自定义关键词** ——机器人登记什么词是用户的界面。 |
 | `agent-ex doctor --send` | 额外实发一张**正文不含产品名**的自检卡，验证真实投递。 |
 | `agent-ex config list` | 列出 profiles / executors / notify / defaults 现状。 |
 | `agent-ex config set <key> <value>` | 改单个字段（白名单：`notify.dry_run`、`notify.keyword`、`defaults.profile`、`defaults.timeout_sec`）。 |
@@ -490,6 +490,8 @@ executor 的 bin 是否可执行、以及**历史上**的通知失败（扫 `log
 
 > `send=true` 发的是**正文不含产品名**的自检卡 —— 飞书关键词闸门匹配整张卡片，
 > 拿真实任务报告当探针会假通过。
+> 被拒收时，**飞书返回的 `code` 与 `msg` 会直接写进结论**（不是只留在 stderr）——
+> agent 据此就能区分"改关键词"（19024）与"换 webhook 地址"（19001），不必去翻日志。
 
 ### `restart`
 

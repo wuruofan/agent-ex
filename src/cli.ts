@@ -32,10 +32,11 @@ export async function runDoctor(args: string[]): Promise<number> {
   const home = agentExHome();
   const report = await doctor({ send, home });
   if (fix) {
-    const r = applyFixes(home, report);
+    const r = applyFixes(home);
     console.log("\n--fix:");
     for (const a of r.applied) console.log(`  ✓ ${a}`);
     for (const s of r.skipped) console.log(`  · ${s}`);
+    for (const n of r.notes) console.log(`  ! ${n}`);
     if (r.applied.length === 0 && r.skipped.length === 0) console.log("  · 没有可自动修复的问题");
     console.log("");
     // 修完再体检一次，让用户看到修后的状态
@@ -57,7 +58,8 @@ export function runConfig(args: string[]): number {
     console.log("profiles:");
     for (const p of l.profiles) {
       const mark = p.is_default ? " ← default" : "";
-      console.log(`  ${p.name}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${mark}`);
+      const env = p.env.length > 0 ? `  env=${p.env.join(",")}` : "";
+      console.log(`  ${p.name}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${env}${mark}`);
     }
     console.log("\nexecutors:");
     for (const e of l.executors) console.log(`  ${e.name}  bin=${e.bin}`);

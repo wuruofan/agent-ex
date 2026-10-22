@@ -261,7 +261,7 @@ function finalize(
   const webhook = dryRun ? cfg.notify.feishu_webhook_url
     : resolveEnvPlaceholders({ url: cfg.notify.feishu_webhook_url }).url;
   pendingNotify = sendFeishuCard(webhook, buildFeishuCard(to, task.id, detail, cfg.notify.keyword), { dryRun })
-    .then((sent) => { if (!sent) store.patch(task.id, { notify_failed: true }); })
+    .then((r) => { if (!r.ok) store.patch(task.id, { notify_failed: true }); })
     .catch((e) => { console.error("[notifier] unexpected:", e); store.patch(task.id, { notify_failed: true }); })
     .finally(() => { pendingNotify = null; });
 }

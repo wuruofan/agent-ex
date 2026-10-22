@@ -13,7 +13,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { agentExHome } from "./paths.js";
 import { BRAND } from "./brand.js";
-import { validateConfig, type Config } from "./config.js";
+import { validateConfig, resolveBinPath, type Config } from "./config.js";
 import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
 
 /** 可写的字段白名单：key → 类型 + 说明。 */
@@ -25,7 +25,7 @@ export const WRITABLE: Record<string, { type: "boolean" | "string" | "integer"; 
 };
 
 export interface ConfigListResult {
-  profiles: Array<{ name: string; executor: string; model: string; is_default: boolean }>;
+  profiles: Array<{ name: string; executor: string; model: string; is_default: boolean; env: string[] }>;
   executors: Array<{ name: string; bin: string; bin_ok: boolean }>;
   notify: { dry_run: boolean; keyword: string; webhook: string };
   defaults: { profile: string; timeout_sec: number };
@@ -56,8 +56,17 @@ export function listConfig(home: string = agentExHome()): ConfigListResult {
       executor: p.executor,
       model: p.env?.ANTHROPIC_MODEL ?? p.env?.OPENCODE_CONFIG_CONTENT ?? "",
       is_default: c.defaults?.profile === name,
+      // 只列环境变量**名字**（不列值）：值可能是大段配置内容，名字才回答
+      // "这个 profile 会注入哪些变量"（如内置 profile 的 ZEN_FREE_PREFER）
+      env: Object.keys(p.env ?? {}),
     })),
-    executors: Object.entries(c.executors ?? {}).map(([name, e]) => ({ name, bin: e.bin, bin_ok: true })),
+    // bin_ok 必须是真的探测结果：恒为 true 的字段是在骗人
+    // （与 doctor 的 resolveBinPath 判定同源，见 config.ts）
+    executors: Object.entries(c.executors ?? {}).map(([name, e]) => ({
+      name,
+      bin: e.bin,
+      bin_ok: resolveBinPath(e.bin) !== null,
+    })),
     notify: {
       dry_run: c.notify?.dry_run ?? true,
       keyword: c.notify?.keyword ?? BRAND,
@@ -88,7 +97,17 @@ export function setConfigValue(home: string, key: string, rawValue: string): { k
     if (!Number.isInteger(n) || n <= 0) throw new Error(`"${key}" expects a positive integer, got "${rawValue}"`);
     value = n;
   } else {
-    value = rawValue;
+    value = rawValue.trim();
+    // 非空校验：空串不是"没填"，而是一个能造出必然失败的配置态——
+    // notify.keyword = "" 会让卡片不带关键词元素 ⇒ 飞书必然拒收（19024）。
+    // 空白字符同理（写进去等于把闸门关死）。
+    if (value === "") {
+      throw new Error(
+        key === "notify.keyword"
+          ? `"${key}" expects a non-empty string — 空串会让卡片不带关键词，飞书必然拒收（19024）`
+          : `"${key}" expects a non-empty string, got ""`,
+      );
+    }
   }
   // 按 key 前缀写回（只允许已知的两段路径）
   const [group, field] = key.split(".");

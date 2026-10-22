@@ -1,6 +1,6 @@
 # doctor / config：把「通知通不通」变成一条命令能回答的问题
 
-**状态**：🟡 **待评审**（实现已先行落地，见 §9「实现现状与本 spec 的关系」）
+**状态**：✅ **已评审**（评审记录见 [`docs/reviews/2026-10-22-doctor-and-config-review.md`](../reviews/2026-10-22-doctor-and-config-review.md)；评审提出的 P0/P1 已修复并回填本 spec，Q1-Q6 结论见 §8）
 **触发**：2026-10-13 → 10-15 连续 23 个任务零通知，事后复盘发现**证据早就存在，只是散在三处没人看**：
 - `tasks.db` 的 `notify_failed`：布尔值，只知道"失败了"，分不清「关键词拒收」和「网络不通」；
 - `~/.agent-ex/logs/runner-*.log`：`[notifier] feishu rejected: code=19024` —— 唯一能定位病因的证据面，但要手工翻 N 个文件；
@@ -51,8 +51,15 @@
 
 **(a) config 自身**
 - `notify.dry_run`：true → warn（附 `config set notify.dry_run false`）；false → ok
-- `notify.keyword`：缺失 → error（可 `--fix`）；≠ `BRAND` → error（可 `--fix`）；= `BRAND` → ok
-  - ⚠️ 「≠ BRAND」判 error 的理由：2026-10-13→10-15 的 23 个零通知，根因就是 live config 一直留着旧名 `agent-flow-ex`
+- `notify.keyword`：**四态判定**（`classifyKeyword()`，doctor 与 `--fix` 共用同一份规则）
+  | 状态 | 判定 | severity | 可 `--fix` |
+  | :--- | :--- | :--- | :--- |
+  | 字段缺失 | 运行时由 `loadConfig` 填 `BRAND`（`config.ts` 的 `??= BRAND`），卡片**是带关键词元素的** | **info** | ❌ 不动 |
+  | 显式空串 | `??=` 不替换空串 ⇒ 卡片**没有关键词元素** ⇒ 只要机器人开了闸门就必然拒收（19024） | **error** | ✅ |
+  | 本工具的旧产品名（`agent-flow` / `agent-flow-ex`） | 改名前的遗留（2026-10-13→10-15 零通知的根因） | **error** | ✅ |
+  | 其它自定义值 | **机器人登记什么词本地无从得知**，那是用户的界面（`brand.ts`） | **warn** | ❌ 不动 |
+  - = `BRAND` → ok，并提示"是否与机器人登记词一致只有自检卡能验证"
+  - ⚠️ **事实边界**：飞书机器人登记了什么词，本地无从得知。doctor 只能判「配置是否自洽」与「是否可证明投递不了」；**「与登记词是否一致」只有 `doctor --send` 能判定**（闸门匹配整卡，必须用正文干净的探针卡）
 - `notify.feishu_webhook_url`：明文（非 `{env:VAR}`）→ error（凭证泄露风险，可 `--fix`）；占位符但变量不在 `.env` 也不在进程环境 → error
 - `defaults.profile` 指向不存在的 profile → error（会导致每次派发都失败）
 - `executors.<name>.bin` 不可执行 → error
@@ -83,22 +90,30 @@
 
 | 修什么 | 怎么做 | 为什么算缺陷 |
 | :--- | :--- | :--- |
-| `notify.keyword` 缺失 | 写 `BRAND` | 缺省值本就该由代码派生（`brand.ts` 是唯一真相源） |
-| `notify.keyword` ≠ `BRAND` | 改回 `BRAND` | 产品改名后的遗留 |
+| `notify.keyword` 是**显式空串** | 写 `BRAND` | 空串让卡片不带关键词元素 ⇒ 只要机器人开了闸门就必然 19024（唯一能证明"投递不了"的配置态） |
+| `notify.keyword` 是**本工具的旧产品名** | 改回 `BRAND` | 改名遗留（2026-10-13→10-15 的 23 个零通知就是它造成的） |
 | 明文 webhook 在 config.json | 原值写入 `.env`（`chmod 600`），config 改回 `{env:FEISHU_WEBHOOK_URL}` | config 可能被提交/同步，webhook 地址本身就是凭证 |
 
-**不修的**：`dry_run`（D3）、`19024` 关键词与机器人侧不匹配（**不知道对方登记了什么**，只能提示）、`19001` webhook 地址失效（**要人去机器人后台换地址**）、`defaults.profile` 指向不存在（不知道该指向哪个）。
+**不修的**：`dry_run`（D3）、`19024` 关键词与机器人侧不匹配（**不知道对方登记了什么**，只能提示）、`19001` webhook 地址失效（**要人去机器人后台换地址**）、`defaults.profile` 指向不存在（不知道该指向哪个）、**keyword 缺失**（运行时派生 `BRAND`，写死会冻结默认值、重新引入改名漂移）、**keyword 是自定义值**（用户的界面，`brand.ts`：「用户显式写 keyword 仍然优先」）。
 
 **边界**：
 - `.env` 里已有 `FEISHU_WEBHOOK_URL` 时**不覆盖**，只提示"请手工核对是否与 config 一致"（避免踩掉用户更晚改的值）
 - 修完**再体检一次**并展示，让用户看到修后状态
 - 写盘前走 `validateConfig()`，校验不过则不写
+- 写 `.env` 后显式 `chmod 600`：`writeFileSync` 的 `mode` **只在创建文件时生效**，而 `.env` 在 init 之后几乎总是已存在（沿用旧权限）⇒ 不 chmod 就等于把凭证从 644 的 config.json 挪进 644 的 `.env`，防护强度没变
+- 自动改了 keyword 时额外给一条**反悔路径**（"若你的机器人登记的就是旧名，请改回去"）
 
 ### 3.3 `agent-ex doctor --send`
 
 发一张**正文刻意不含产品名**的自检卡，把飞书返回的 `code` 纳入结论。
 
 ⚠️ **为什么正文必须干净**：飞书关键词闸门匹配的是**整张卡片**（不是那行小字），worker 报告正文里偶然出现产品名就能过闸。2026-10-16 实测：live config 留着旧名 `agent-flow-ex`，连续 23 个任务 0 通知，却因某张卡的正文提到新名而误判为"已恢复"。**拿真实任务报告当探针是无效验证。**
+
+**`code` 必须进结论**（不只是 stderr 日志）：MCP 侧 `agent_ex_doctor({send:true})` 的返回值里没有码，agent 就无法区分「改关键词」（19024）与「换 webhook 地址」（19001）——而这恰是 `FEISHU_ERRORS` 这张表存在的理由。
+
+**探针卡必须用**有效**关键词**：keyword 缺失时运行时填 `BRAND`（`config.ts` 的 `??= BRAND`），探针卡若用原始的 `undefined` 就会不含关键词元素 ⇒ 明明能投递却报"被拒收"。
+
+**CLI 路径必须先加载 `.env`**：`server.ts` 在模块顶层就分派了 `doctor`/`config` 子命令，**走不到 `main()` 里的 `loadEnvFile()`** ⇒ `{env:VAR}` 占位符解析不了、`--send` 在 init 默认产出的配置形态下**必然失败**（2026-10-22 实测：同一轮体检里前半句"✓ webhook 已配置（在 .env 里）"、后半句"✗ env placeholder not found"）。
 
 ### 3.4 `agent-ex config`
 
@@ -187,16 +202,18 @@
 
 ---
 
-## 8. 评审要问的问题
+## 8. 评审要问的问题（**已裁决**）
 
-| # | 问题 | 我的倾向 | 备选 |
+评审记录：[`docs/reviews/2026-10-22-doctor-and-config-review.md`](../reviews/2026-10-22-doctor-and-config-review.md)（2026-10-22）。下表是裁决后的结论与落地状态。
+
+| # | 问题 | 结论 | 依据 / 落地 |
 | :--- | :--- | :--- | :--- |
-| Q1 | `doctor` 的历史失败记 warn（D4）是否可接受？ | 记 warn | 记 error，但加"仅最近 N 天"窗口 |
-| Q2 | `--fix` 改 `keyword` 是否越权？ | 不越权——产品改名后的遗留 | 完全不碰 keyword，只提示 |
-| Q3 | `config set` 白名单（D5）是否够用？ | 够 | 加通用点路径（风险：手抖写坏） |
-| Q4 | doctor 是否该**默认**就发卡（省一步）？ | 不该——默认只读 | 默认发（风险：误扰群） |
-| Q5 | `opencode-zen-free` 内置 profile 的 `ZEN_FREE_PREFER` 默认值 | `mimo,nemotron,ling` | 空（不挑食，选稳定排序首个） |
-| Q6 | 迁移是否要支持"改已有列类型"（重建表）？ | 不做，等真需要时再说 | 现在就做 |
+| Q1 | `doctor` 的历史失败记 warn（D4）是否可接受？ | **接受，记 warn**，但必须修聚合文案 | 历史不会消失（记 error ⇒ doctor 永远红 ⇒ 用户学会无视）。文案已改：区分「受影响任务数」与「拒收次数」，并列出**每个码各自的修法**（19024 改关键词 / 19001 换地址互斥，只给次数最多的那个会把人引到无效动作） |
+| Q2 | `--fix` 改 `keyword` 是否越权？ | **越权，已收窄**为四态（见 §3.1） | 实测 `--fix` 曾把用户与机器人侧一致的 `my-bot-word` 覆写成 `agent-ex`，把能投递的配置改成不能投递；且与 `brand.ts`「用户显式写 keyword 仍然优先」冲突。19024 的 69 次证据只支持「**陈旧产品名**是错的」，推不出「任何 ≠BRAND 都错」。**缺失**也不是错（运行时 `??= BRAND`），**显式空串**才是（必然 19024） |
+| Q3 | `config set` 白名单（D5）是否够用？ | **够**，并已补非空校验 | 四个键覆盖了实测的所有需求；已补：`string` 类型拒绝空串/纯空白（否则 `config set notify.keyword ""` 能造出必然 19024 的状态） |
+| Q4 | doctor 是否该**默认**就发卡？ | **不默认**（保持 D2） | `--send` 会真实 POST 到群；MCP 侧 `agent_ex_doctor` 由 agent 自行调用，默认发送等于让 agent 有权刷群 |
+| Q5 | `opencode-zen-free` 内置 profile 的 `ZEN_FREE_PREFER` 默认值 | **保留 `mimo,nemotron,ling`** | 它是**软偏好**：命中前缀就用、未命中退回 `candidates[0]`，清单过期只会退化为"不挑食"，不可能导致失败。补的是可见性：`config list` 现在会列出 profile 的环境变量名 |
+| Q6 | 迁移是否要支持"改已有列类型"（重建表）？ | **不做**（保持现状） | 真实库打开前后逐字节不变；`ADD COLUMN` 天然只增不改，需要改类型时再引入重建表 + `user_version`（§10.2 已记为缺口） |
 
 ---
 
@@ -211,12 +228,16 @@
 | `tests/store.test.ts`（+5） | schema 迁移：补列、读写可用、NOT NULL 靠 DEFAULT、幂等、空库 |
 | `tests/init-changes.test.ts`（11） | diff 逻辑 + 警告文案的后果说明 |
 | `tests/init-e2e.test.ts`（4） | init 端到端：预告展示 / 拒绝则不写盘 / 同意则备份 / 非法则不写盘 |
-| `tests/doctor.test.ts`（18） | 各类 finding、历史扫描聚合、错误码含义、`--fix` 边界 |
-| `tests/config-cmd.test.ts`（12） | list / set 白名单与类型校验 / use 自动创建 |
+| `tests/doctor.test.ts`（28） | 各类 finding、keyword 四态、历史扫描聚合、错误码含义、`--fix` 边界、`--send` 的 code 回传 |
+| `tests/config-cmd.test.ts`（15） | list / set 白名单与类型校验 / 非空校验 / use 自动创建 |
+| `tests/cli-env.test.ts`（2） | **进程级**回归：CLI 子命令必须加载 `$AGENT_EX_HOME/.env`（P0-1） |
 
-全量：**196 passed / 20 files**，`tsc --noEmit` 0 error。
+全量：**212 passed / 21 files**，`tsc --noEmit` 0 error。
 
-**变异验证**（证明断言有判别力）：关掉迁移 → 4 红；关掉变更预告 → 2 红；改成先写盘后校验 → 2 红；doctor 不扫历史 → 1 红；`--fix` 改 `dry_run` → 1 红；`config set` 不校验白名单 → 1 红。
+**变异验证**（证明断言有判别力）：关掉迁移 → 4 红；关掉变更预告 → 2 红；改成先写盘后校验 → 2 红；doctor 不扫历史 → 1 红；`--fix` 改 `dry_run` → 1 红；`config set` 不校验白名单 → 1 红；
+**评审后新增**：撤掉 CLI 的 `loadEnvFile()` → 1 红；撤掉 `.env` 的 `chmodSync` → 1 红；`--fix` 覆写自定义 keyword → 2 红；`config set` 允许空串 → 1 红；notifier 不回传 `code` → 2 红。
+
+> ⚠️ **测试不再依赖开发机环境**：原先 `config use opencode-zen-free` 的两个用例要求本机装了 `opencode` 且在 `PATH` 上，否则必红——"全绿"曾经只是那台机器的巧合。现在用例显式给一个存在的 `bin`，与 `PATH` 无关。
 
 ---
 
@@ -227,3 +248,24 @@
 3. **`doctor` 不查飞书开放平台**——`19001`（地址失效）只能提示"去换地址"，无法自动确认地址是否还有效。
 4. **SKILL.md 仍保留了旧的手抄 `node -e` 自检脚本**（已改为指向 `doctor`，但未删除历史条目）——若需彻底清理，是独立的一次改动。
 5. **`19001` 之外的飞书错误码未穷举**：`FEISHU_ERRORS` 只收了实测见过的 6 个，未见过的码会原样显示 code 与 msg。
+6. **doctor 判不了"机器人登记的词是什么"**：这是飞书侧的私有状态，本地无从得知。doctor 的定位因此是"排除可证明的故障 + 汇总历史证据"，**最终的匹配判定只能靠 `doctor --send`**（自检卡正文干净 ⇒ 不会被偶然提及产品名蒙混过关）。
+7. **CLI 与 MCP 的环境加载路径曾经分叉**（已修）：MCP 侧 `main()` 里有 `loadEnvFile()`、CLI 侧没有 ⇒ 同一份配置，agent 查得通、命令行查不通。修复后两者共用同一套加载路径（`tests/cli-env.test.ts` 钉住）。
+
+---
+
+## 11. 评审处置（2026-10-22）
+
+评审：[`docs/reviews/2026-10-22-doctor-and-config-review.md`](../reviews/2026-10-22-doctor-and-config-review.md)。裁决如下——**接受为主，其中 P1-2 的修法比评审建议更收窄**（理由：评审自己给的证据链指向更窄的结论）。
+
+| # | 评审提出的问题 | 处置 | 说明 |
+| :--- | :--- | :--- | :--- |
+| P0-1 | CLI 子命令路径不加载 `.env`，`doctor --send` 必然失败 | **接受，已修** | `server.ts` 在子命令分派前 `loadEnvFile()`。新增**进程级**回归测试（`tests/cli-env.test.ts`）——单元测试测不出来，因为 `loadEnvFile()` 是另一个进程里做的事 |
+| P1-2 | `keyword ≠ BRAND ⇒ error` 过宽，`--fix` 会破坏能投递的配置 | **接受，并收得更窄** | 改成四态（§3.1）。与评审建议的差别：**缺失**不判 error 也不可修（运行时 `??= BRAND` ⇒ 卡片是带关键词元素的；写死会冻结默认值、重新引入改名漂移）；**显式空串**才是 error+可修（唯一能证明投递不了的态）。自定义词降为 warn、不动 |
+| P1-3 | `--fix` 写 `.env` 未 chmod，实测停在 644 | **接受，已修** | 补 `chmodSync(envPath, 0o600)`，与 `init.ts` 的 `writeEnvFile` 对齐（`mode` 只在创建文件时生效） |
+| P2-4 | `--send` 未把飞书 `code` 纳入结论 | **接受，已修** | `notifier.ts` 的 `post()` 改为返回 `FeishuResult{ok, code, msg, httpStatus}`，`code` 与 `msg` 直接写进 finding 的 `detail`，修法跟着 `code` 走（`FEISHU_ERRORS`）。MCP 侧同样受益 |
+| P2-5 | `listConfig` 的 `bin_ok` 恒为 true；`config list` 不显示 profile env | **接受，已修** | `bin_ok` 改用 `resolveBinPath()` 真实探测；`config list` 列出 profile 的环境变量**名**（值可能很大） |
+| P2-6 | `applyFixes(home, report)` 的 `report` 从未使用 | **接受，已修** | 删掉死参数：规则由 `classifyKeyword()` 统一提供，doctor 与 `--fix` 不可能漂移 |
+| P2-7 | `config set` 的 `as` 绕过类型；`keyword` 无非空校验 | **接受部分** | 已补**非空校验**（空串必然 19024）。`as never` 的类型逃逸保留但已由 `WRITABLE` 的 `spec.type` 兜底，未做大规模类型重构（收益不抵改动面） |
+| P2-8 | 历史失败聚合单位混用，且只给一个码的修法 | **接受，已修** | 标题区分「受影响任务数」与「拒收次数」；`fix` 列出**每个码各自的修法**（19024 改关键词 / 19001 换地址互斥） |
+
+**评审之外补的一条**：两个 `config use opencode-zen-free` 用例原本依赖本机装了 `opencode` 且在 `PATH` 上——"196 全绿"只是那台机器的巧合。已改为与 `PATH` 无关。

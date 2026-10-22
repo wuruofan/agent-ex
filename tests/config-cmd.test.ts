@@ -31,6 +31,19 @@ describe("config list", () => {
     expect(l.notify.keyword).toBe(BRAND);
     expect(l.defaults.timeout_sec).toBe(3600);
   });
+
+  it("bin_ok 是真的探测结果，不是恒为 true 的安慰字段", () => {
+    seed({ executors: { claude: { bin: "/bin/ls" }, ghost: { bin: "/definitely/not/here" } } });
+    const l = listConfig(home);
+    expect(l.executors.find((e) => e.name === "claude")?.bin_ok).toBe(true);
+    expect(l.executors.find((e) => e.name === "ghost")?.bin_ok).toBe(false);
+  });
+
+  it("列出 profile 的环境变量名（值可能很大，只给名字）", () => {
+    seed();
+    const l = listConfig(home);
+    expect(l.profiles[0].env).toEqual(["ANTHROPIC_MODEL"]);
+  });
 });
 
 describe("config set —— 白名单字段", () => {
@@ -66,6 +79,13 @@ describe("config set —— 白名单字段", () => {
     expect(readConfig(home).notify.dry_run).toBe(true);
   });
 
+  it("拒绝空串（空 keyword 会让卡片不带关键词 ⇒ 飞书必然拒收 19024）", () => {
+    seed();
+    expect(() => setConfigValue(home, "notify.keyword", "")).toThrow(/non-empty/);
+    expect(() => setConfigValue(home, "notify.keyword", "   ")).toThrow(/non-empty/);
+    expect(readConfig(home).notify.keyword).toBe(BRAND);
+  });
+
   it("可写字段就是白名单里的那些", () => {
     expect(Object.keys(WRITABLE).sort()).toEqual([
       "defaults.profile", "defaults.timeout_sec", "notify.dry_run", "notify.keyword",
@@ -83,7 +103,9 @@ describe("config use —— 切默认 profile", () => {
 
   it("切到内置的 opencode-zen-free：自动创建 profile 并复用已有 executor", () => {
     seed();
-    const r = useProfile(home, "opencode-zen-free");
+    // 显式给一个存在的 bin：默认的 "opencode" 只有本机装了 opencode 才在 PATH 上，
+    // 用例不能依赖开发机的环境（否则"全绿"只是这台机器的巧合）
+    const r = useProfile(home, "opencode-zen-free", { bin: "/bin/ls" });
     expect(r.created).toBe(true);
     const c = readConfig(home);
     expect(c.defaults.profile).toBe("opencode-zen-free");
@@ -97,7 +119,7 @@ describe("config use —— 切默认 profile", () => {
 
   it("opencode executor 不存在时自动注册（带 --auto）", () => {
     seed();
-    useProfile(home, "opencode-zen-free");
+    useProfile(home, "opencode-zen-free", { bin: "/bin/ls" });
     const c = readConfig(home);
     expect(c.executors.opencode.extra_flags).toEqual(["--auto"]);
   });

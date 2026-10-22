@@ -13,7 +13,7 @@
  * ⚠️ 关键词闸门匹配的是**整张卡片**（不是那行小字），所以 worker 报告正文里偶然出现产品名
  * 就能过闸 —— 配置错了也可能长期"看起来正常"。因此验证必须用正文干净的自检卡（--send）。
  */
-import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { agentExHome, logsDir } from "./paths.js";
 import { BRAND } from "./brand.js";
@@ -68,6 +68,41 @@ export const FEISHU_ERRORS: Record<string, { meaning: string; fix: string }> = {
   "9499": { meaning: "请求体格式错误", fix: "检查卡片 JSON 是否超 20 KB" },
   "11232": { meaning: "触发限流", fix: "避开密集派发（单机器人 100 次/分、5 次/秒）" },
 };
+
+/**
+ * 本工具改名前用过的产品名（改名史，见 git: agent-flow → agent-flow-ex → agent-ex）。
+ *
+ * 只有这些名字能被判定为"客观上错了"：它们只可能来自本仓库自己的改名，
+ * 留在 config 里就是没跟着改的遗留——2026-10-13→10-15 的 23 个任务零通知
+ * 就是 live config 里留着 `agent-flow-ex` 造成的（机器人登记的是新名 `agent-ex`）。
+ *
+ * ⚠️ 不在名单里的自定义词（用户自己登记的）**不算错**：机器人登记了什么词，
+ * 本地无从得知，那是用户的界面（见 brand.ts："用户显式写 keyword 仍然优先"）。
+ */
+const STALE_BRANDS = new Set(["agent-flow", "agent-flow-ex"]);
+
+/** notify.keyword 的四种状态——doctor 的判定与 --fix 的动作共用这一份分类，避免两处规则漂移。 */
+export type KeywordState = "unset" | "empty" | "brand" | "stale" | "custom";
+
+/**
+ * 判定 notify.keyword 处于哪种状态。
+ *
+ * - `unset`：字段缺失 ⇒ 运行时由 `loadConfig` 填 BRAND（config.ts 的 `??= BRAND`），
+ *   卡片**是带关键词元素**的 ⇒ 不是缺陷，更不能把 BRAND 写死进 config
+ *   （写死等于冻结默认值，下次改名又变成"陈旧值"，正是 brand.ts 要防的漂移）。
+ * - `empty`：显式空串 ⇒ `??=` 不会替换它（空串不是 null/undefined）⇒ 卡片里
+ *   **没有关键词元素**（notifier.ts 的 `if (keyword)`）⇒ 只要机器人开了关键词闸门
+ *   就必然被拒（19024）。这是唯一能证明"投递不了"的配置态。
+ * - `stale`：本工具的旧产品名 ⇒ 客观上的遗留，可自动修。
+ * - `custom`：用户自定义词 ⇒ 合法，不判错、不自动改。
+ */
+export function classifyKeyword(keyword: string | undefined): KeywordState {
+  if (keyword === undefined) return "unset";
+  if (keyword.trim() === "") return "empty";
+  if (keyword === BRAND) return "brand";
+  if (STALE_BRANDS.has(keyword)) return "stale";
+  return "custom";
+}
 
 /** 从 runner 日志里聚合通知失败证据。 */
 export function scanNotifyFailures(home: string = agentExHome()): NotifyFailureStats {
@@ -124,30 +159,42 @@ function readConfigLoose(home: string): { cfg: Config | null; error: string | nu
  * 那是有后果的偏好，不是缺陷。所以 dry_run 只报不改。
  *
  * 可以自动修的，都是"客观上错了"的状态：
- *   - notify.keyword 缺失 → 写 BRAND（缺省由代码派生，唯一的真相源）；
- *   - notify.keyword 是陈旧品牌名（≠ BRAND）→ 改回 BRAND（机器人登记的词改了名，这是遗留）；
+ *   - notify.keyword 显式空串 → 写 BRAND（空串让卡片不带关键词 ⇒ 必然 19024）；
+ *   - notify.keyword 是本工具的旧产品名 → 改回 BRAND（改名遗留，2026-10-13 零通知的根因）；
  *   - 明文 webhook 落在 config.json → 挪进 .env、config 留占位符（凭证卫生）。
+ *
+ * 刻意**不修**的：
+ *   - keyword 缺失 → 运行时派生 BRAND；写死等于冻结默认值，重新引入改名漂移；
+ *   - keyword 是自定义值 → 机器人登记什么词是用户的界面（见 brand.ts）。
  */
 export interface FixResult {
   applied: string[];
   skipped: string[];
+  /** 需要用户知情的提示（如自动改了 keyword 后怎么改回去）。 */
+  notes: string[];
 }
 
-export function applyFixes(home: string, report: DoctorReport): FixResult {
+export function applyFixes(home: string): FixResult {
   const applied: string[] = [];
   const skipped: string[] = [];
+  const notes: string[] = [];
   const c = readConfigLoose(home).cfg;
-  if (!c) return { applied, skipped: ["config.json 不可用，未做任何修改"] };
+  if (!c) return { applied, skipped: ["config.json 不可用，未做任何修改"], notes };
 
   let changed = false;
 
-  // keyword 缺失或陈旧 → 改回 BRAND
+  // keyword：只修"客观上错了"的两种——显式空串、可证明的改名遗留。
+  // 缺失与自定义值一律不动（理由见上方注释）。
   const kw = c.notify?.keyword;
-  if (!kw || kw !== BRAND) {
-    const before = kw ?? "(unset)";
+  const kwState = classifyKeyword(kw);
+  if (kwState === "empty" || kwState === "stale") {
+    const before = kw === undefined ? "(unset)" : JSON.stringify(kw);
     c.notify.keyword = BRAND;
     changed = true;
     applied.push(`notify.keyword: ${before} → ${BRAND}`);
+    if (kwState === "stale") {
+      notes.push(`若你的机器人登记的关键词就是旧名 "${kw}"，请改回去：agent-ex config set notify.keyword "${kw}"`);
+    }
   }
 
   // 明文 webhook → 挪进 .env
@@ -158,9 +205,13 @@ export function applyFixes(home: string, report: DoctorReport): FixResult {
     if (!/^FEISHU_WEBHOOK_URL=/m.test(envText)) {
       envText = (envText ? envText.replace(/\n*$/, "\n") : "") + `FEISHU_WEBHOOK_URL=${url}\n`;
       writeFileSync(envPath, envText, { mode: 0o600 });
+      // mode 只在**创建**文件时生效；.env 在 init 之后几乎总是已存在（沿用旧权限），
+      // 必须显式 chmod，否则凭证从 644 的 config.json 挪进 644 的 .env，防护强度没变
+      // （与 init.ts 的 writeEnvFile 同一写法）。
+      chmodSync(envPath, 0o600);
       c.notify.feishu_webhook_url = "{env:FEISHU_WEBHOOK_URL}";
       changed = true;
-      applied.push("notify.feishu_webhook_url: 明文 → {env:FEISHU_WEBHOOK_URL}（原值已写入 .env）");
+      applied.push("notify.feishu_webhook_url: 明文 → {env:FEISHU_WEBHOOK_URL}（原值已写入 .env，权限 600）");
     } else {
       skipped.push(".env 里已有 FEISHU_WEBHOOK_URL，未覆盖（请手工核对是否与 config 一致）");
     }
@@ -170,10 +221,10 @@ export function applyFixes(home: string, report: DoctorReport): FixResult {
     validateConfig(c);
     writeFileSync(join(home, "config.json"), JSON.stringify(c, null, 2) + "\n");
   }
-  return { applied, skipped };
+  return { applied, skipped, notes };
 }
 
-export async function doctor(opts: { home?: string; send?: boolean } = {}): Promise<DoctorReport> {
+export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: typeof fetch; delays?: number[] } = {}): Promise<DoctorReport> {
   /**
    * 体检（只读，不改任何东西）。
    *
@@ -209,26 +260,47 @@ export async function doctor(opts: { home?: string; send?: boolean } = {}): Prom
   }
 
   // ---- 3. 关键词 ----
+  // 事实边界（先说清楚 doctor 能判什么、不能判什么）：
+  // 飞书机器人"登记了什么词"本地无从得知。所以 doctor 只能判**配置自身是否自洽**
+  // 与**是否可证明投递不了**；"与登记词是否一致"只有 `doctor --send` 能判定——
+  // 闸门匹配的是整张卡片，必须用正文干净的探针卡（见 §3.3 的实测教训）。
   const keyword = c.notify?.keyword;
-  if (!keyword) {
+  const kwState = classifyKeyword(keyword);
+  if (kwState === "empty") {
     findings.push({
       severity: "error",
-      title: "未配置关键词",
-      detail: "notify.keyword 缺失 ⇒ 飞书「自定义关键词」闸门必然拒收。",
+      title: "关键词被显式设为空",
+      detail: "notify.keyword = \"\" ⇒ 卡片里不会有关键词元素（notifier.ts 的 if (keyword)）⇒ 只要机器人开了「自定义关键词」闸门就必然被拒收（19024）。",
       fix: `agent-ex config set notify.keyword ${BRAND}`,
       fixable: true,
     });
-  } else if (keyword !== BRAND) {
-    // 陈旧品牌名：这是 2026-10-13→10-15 零通知的根因（live config 一直留着旧名 agent-flow-ex）
+  } else if (kwState === "unset") {
+    findings.push({
+      severity: "info",
+      title: "关键词未显式配置（运行时用产品名兜底）",
+      detail: `notify.keyword 未设置 ⇒ 运行时会填 "${BRAND}"（config.ts 的 ??= BRAND，产品改名时自动跟随），卡片是带关键词元素的。若机器人在「安全设置 → 自定义关键词」登记的不是这个词，请显式设置。`,
+    });
+  } else if (kwState === "stale") {
     findings.push({
       severity: "error",
-      title: "关键词与当前产品名不一致",
-      detail: `notify.keyword = "${keyword}"，而产品名是 "${BRAND}"。飞书按整卡子串匹配，若机器人登记的是 "${BRAND}"，卡片会被拒收（19024）。`,
+      title: "关键词是改名前的旧产品名",
+      detail: `notify.keyword = "${keyword}"，这是本工具改名前用过的名字（现名 "${BRAND}"）。若机器人登记的是 "${BRAND}"，卡片会被拒收（19024）——2026-10-13→10-15 的 23 个任务零通知就是这个状态造成的。`,
       fix: `agent-ex config set notify.keyword ${BRAND}`,
       fixable: true,
+    });
+  } else if (kwState === "custom") {
+    findings.push({
+      severity: "warn",
+      title: "关键词是自定义值（不替你决定，但要对齐机器人侧）",
+      detail: `notify.keyword = "${keyword}"，与产品名 "${BRAND}" 不同。**若机器人登记的就是 "${keyword}"，这是对的，请忽略本条**；若登记的是 "${BRAND}"，卡片会被拒收（19024）。`,
+      fix: "agent-ex doctor --send（自检卡能直接判定登记词是否匹配）",
     });
   } else {
-    findings.push({ severity: "ok", title: "关键词与产品名一致", detail: `notify.keyword = "${keyword}"` });
+    findings.push({
+      severity: "ok",
+      title: "关键词与产品名一致",
+      detail: `notify.keyword = "${keyword}"。是否与机器人登记词一致，只有自检卡能验证：agent-ex doctor --send`,
+    });
   }
 
   // ---- 4. webhook 是否配了 ----
@@ -294,15 +366,22 @@ export async function doctor(opts: { home?: string; send?: boolean } = {}): Prom
   // 它要表达的是"这里有线索"，而不是"现在坏了"。
   const stats = scanNotifyFailures(home);
   if (stats.logs_with_rejects > 0) {
+    // 两个单位不能混着说：logs_with_rejects 是**受影响的任务数**（一个 runner 日志 = 一个任务），
+    // by_code 里的数字是**拒收尝试次数**（每次失败重试 3 次都会各留一行）。
+    const attempts = Object.values(stats.by_code).reduce((a, b) => a + b, 0);
     const parts = Object.entries(stats.by_code)
-      .map(([code, n]) => `code=${code} ×${n}${FEISHU_ERRORS[code] ? `（${FEISHU_ERRORS[code].meaning}）` : ""}`)
+      .map(([code, n]) => `code=${code} ×${n} 次${FEISHU_ERRORS[code] ? `（${FEISHU_ERRORS[code].meaning}）` : ""}`)
       .join("，");
-    const worst = Object.entries(stats.by_code).sort((a, b) => b[1] - a[1])[0][0];
+    // 每个码的修法互斥（19024 改关键词、19001 必须换地址）⇒ 全部列出，
+    // 只给"次数最多"的那个会把人引到无效动作上。
+    const fixes = Object.keys(stats.by_code)
+      .map((code) => FEISHU_ERRORS[code]?.fix)
+      .filter((f): f is string => Boolean(f));
     findings.push({
       severity: "warn",
-      title: `历史上有 ${stats.logs_with_rejects} 个任务的通知被拒收`,
+      title: `历史上有 ${stats.logs_with_rejects} 个任务的通知被拒收（累计 ${attempts} 次尝试）`,
       detail: `${parts}。最近一次：${stats.recent[0]?.task_id}。`,
-      fix: FEISHU_ERRORS[worst]?.fix,
+      fix: fixes.length > 0 ? fixes.join("；") : undefined,
     });
   }
 
@@ -310,24 +389,35 @@ export async function doctor(opts: { home?: string; send?: boolean } = {}): Prom
   if (opts.send) {
     try {
       const url = resolveEnvPlaceholders({ url: c.notify.feishu_webhook_url }).url;
+      // 探针卡必须与真实投递用**同一个词**：缺 keyword 时运行时填 BRAND（config.ts 的 ??=），
+      // 这里若用原始的 undefined，卡片就不带关键词元素 → 明明能投递却报"被拒收"。
+      const effectiveKeyword = c.notify.keyword ?? BRAND;
       // 正文刻意不含产品名：闸门匹配整卡，用真实报告当探针会假通过
-      const card = buildFeishuCard("completed", "task_selfcheck", "自检卡片：正文不含产品名", c.notify.keyword);
-      const sent = await sendFeishuCard(url, card, { dryRun: false });
-      if (sent) {
+      const card = buildFeishuCard("completed", "task_selfcheck", "自检卡片：正文不含产品名", effectiveKeyword);
+      const res = await sendFeishuCard(url, card, { dryRun: false, fetchImpl: opts.fetchImpl, delays: opts.delays });
+      if (res.ok) {
         findings.push({ severity: "ok", title: "自检卡已投递", detail: "飞书返回 code=0" });
       } else {
+        const known = res.code !== null ? FEISHU_ERRORS[String(res.code)] : undefined;
         findings.push({
           severity: "error",
           title: "自检卡被拒收",
-          detail: "飞书返回非 0 code，详见 stderr 里的 [notifier] feishu rejected 行。",
+          // code 必须进结论：它是"改关键词"（19024）与"换地址"（19001）的唯一判据，
+          // MCP 侧拿不到 stderr（MCP 侧此前只能看到一个布尔值）
+          detail: `飞书返回 code=${res.code ?? "无响应"} msg=${res.msg || "(空)"}${known ? `（${known.meaning}）` : ""}。`,
+          fix: known?.fix,
         });
       }
     } catch (e) {
+      const msg = (e as Error).message;
       findings.push({
         severity: "error",
         title: "自检卡发送失败",
-        detail: (e as Error).message,
-        fix: "检查 FEISHU_WEBHOOK_URL 是否有效",
+        detail: msg,
+        // 别把人引到没坏的东西上：placeholder 报错是"变量没进进程环境"，不是"地址失效"
+        fix: /env placeholder/.test(msg)
+          ? `把该变量写进 ${join(home, ".env")}（或 export 到进程环境）后重试`
+          : "检查 FEISHU_WEBHOOK_URL 是否有效",
       });
     }
   }
