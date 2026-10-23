@@ -17,7 +17,14 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 
 import { join } from "node:path";
 import { agentExHome, logsDir } from "./paths.js";
 import { BRAND } from "./brand.js";
-import { resolveEnvPlaceholders, resolveBinPath, validateConfig, type Config } from "./config.js";
+import {
+  resolveEnvPlaceholders,
+  resolveBinPath,
+  validateConfig,
+  collectConfigIssues,
+  type Config,
+  type ConfigIssueCode,
+} from "./config.js";
 import { buildFeishuCard, sendFeishuCard } from "./notifier.js";
 
 export type Severity = "error" | "warn" | "info" | "ok";
@@ -102,6 +109,39 @@ export function classifyKeyword(keyword: string | undefined): KeywordState {
   if (keyword === BRAND) return "brand";
   if (STALE_BRANDS.has(keyword)) return "stale";
   return "custom";
+}
+
+/**
+ * `--fix` 的能力表：doctor 的 `fixable` 标记与 `applyFixes` 的实现**共用这一份**。
+ *
+ * 以前 `fixable` 是手写的，于是出现过两处"标了能修、实际不修"：
+ *  - 默认 profile 不存在标 `fixable: true`，但 applyFixes 没有这个分支
+ *    ⇒ `--fix` 打印"没有可自动修复的问题"（MCP 侧 agent 会照着调，白跑一趟）；
+ *  - 明文 webhook 标 `fixable: true`，但 applyFixes 只处理 `^https://` 开头
+ *    ⇒ `{env:bad_lower}` 这种形状不合规的占位符被报成"明文凭证泄露"，
+ *      而 `--fix` 静默不动、连 skipped 都不留。
+ *
+ * 现在能修的种类写在这张表里：doctor 只对表内的 kind 标 fixable，applyFixes 也只实现
+ * 表内的 kind。新增一种自动修复 = 表里加一行 + applyFixes 加分支，两处不可能再漂。
+ */
+export type FixKind = "keyword.empty" | "keyword.stale" | "webhook.plaintext";
+export const FIXABLE_KINDS: readonly FixKind[] = ["keyword.empty", "keyword.stale", "webhook.plaintext"];
+
+/**
+ * notify.feishu_webhook_url 的四种状态——doctor 的判定与 --fix 的动作共用这一份。
+ *
+ * `placeholder` 与 `malformed` 必须分开：前者是正常形态（只需确认变量有没有设），
+ * 后者是"形状就不对"（比如 `{env:bad_lower}`，小写变量名解析不了）。把后者混进
+ * "明文凭证泄露"是错的——它不是凭证泄露，而是一个必然失败的占位符。
+ */
+export type WebhookState = "empty" | "placeholder" | "plaintext" | "malformed";
+
+export function classifyWebhook(url: string | undefined): WebhookState {
+  const u = url ?? "";
+  if (u === "") return "empty";
+  if (/^\{env:[A-Z0-9_]+\}$/.test(u)) return "placeholder";
+  if (/^https?:\/\//i.test(u)) return "plaintext";
+  return "malformed";
 }
 
 /** 从 runner 日志里聚合通知失败证据。 */
@@ -216,9 +256,11 @@ export function applyFixes(home: string): FixResult {
     }
   }
 
-  // 明文 webhook → 挪进 .env
+  // 明文 webhook → 挪进 .env。
+  // 只处理 plaintext（http(s):// 开头）：placeholder 是正常形态，malformed（形状不对）
+  // 也不是凭证——两者都不该被"自动修复"成 .env 条目。
   const url = c.notify?.feishu_webhook_url ?? "";
-  if (url && !/^\{env:[A-Z0-9_]+\}$/.test(url) && /^https:\/\//.test(url)) {
+  if (classifyWebhook(url) === "plaintext") {
     const envPath = join(home, ".env");
     const envText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
     if (!/^FEISHU_WEBHOOK_URL=/m.test(envText)) {
@@ -278,6 +320,17 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
   }
   const c = cfg!;
 
+  /**
+   * 去重键集合：记录"本次已经产出过更详细 finding"的 (code, subject)。
+   *
+   * ⚠️ 必须是**动态记录**，不能用静态跳过名单：静态名单本身就是第二份真相，
+   * 2026-10-23 实测 `defaults: {}` 时 doctor 报"一切正常"——自有检查是
+   * `if (defProfile && …)`（字段缺失就不触发），而 `defaults.profile` 又在跳过名单里，
+   * 两边都不报。现在规则来自 collectConfigIssues，doctor 只补充**更详细**的文案。
+   */
+  const emitted = new Set<string>();
+  const emitKey = (code: ConfigIssueCode, subject?: string) => `${code}#${subject ?? ""}`;
+
   // ---- 2. dry_run：最常见的原因，但不是缺陷，所以是 warn 不是 error ----
   const dryRun = c.notify?.dry_run ?? true;
   if (dryRun) {
@@ -304,7 +357,7 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
       title: "关键词被显式设为空",
       detail: "notify.keyword = \"\" ⇒ 卡片里不会有关键词元素（notifier.ts 的 if (keyword)）⇒ 只要机器人开了「自定义关键词」闸门就必然被拒收（19024）。",
       fix: `agent-ex config set notify.keyword ${BRAND}`,
-      fixable: true,
+      fixable: FIXABLE_KINDS.includes("keyword.empty"),
     });
   } else if (kwState === "unset") {
     findings.push({
@@ -318,7 +371,7 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
       title: "关键词是改名前的旧产品名",
       detail: `notify.keyword = "${keyword}"，这是本工具改名前用过的名字（现名 "${BRAND}"）。若机器人登记的是 "${BRAND}"，卡片会被拒收（19024）——2026-10-13→10-15 的 23 个任务零通知就是这个状态造成的。`,
       fix: `agent-ex config set notify.keyword ${BRAND}`,
-      fixable: true,
+      fixable: FIXABLE_KINDS.includes("keyword.stale"),
     });
   } else if (kwState === "custom") {
     findings.push({
@@ -336,21 +389,35 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
   }
 
   // ---- 4. webhook 是否配了 ----
-  const webhookPlaceholder = c.notify?.feishu_webhook_url ?? "";
-  const isPlaceholder = /^\{env:[A-Z0-9_]+\}$/.test(webhookPlaceholder);
-  if (!webhookPlaceholder) {
-    findings.push({ severity: "error", title: "未配置 webhook 地址", detail: "notify.feishu_webhook_url 为空" });
-  } else if (!isPlaceholder) {
+  // 四态（classifyWebhook）：empty / placeholder（正常形态）/ plaintext（凭证泄露，可修）/ malformed（形状不对，不可修）
+  const webhookState = classifyWebhook(c.notify?.feishu_webhook_url);
+  if (webhookState === "empty") {
+    findings.push({
+      severity: "error",
+      title: "未配置 webhook 地址",
+      detail: "notify.feishu_webhook_url 为空",
+      fix: "agent-ex init 重建配置（会先备份坏文件）",
+    });
+    emitted.add(emitKey("notify.webhook"));
+  } else if (webhookState === "plaintext") {
     // 明文凭证落在 config.json 里：config 会被提交/同步/贴到 issue 时就泄露了
     findings.push({
       severity: "error",
       title: "webhook 以明文存在 config.json（凭证泄露风险）",
       detail: "notify.feishu_webhook_url 不是 {env:VAR} 占位符。config.json 可能被提交或同步，webhook 地址本身就是凭证。",
-      fix: "把地址挪进 .env，config 里改成 {env:FEISHU_WEBHOOK_URL}",
-      fixable: true,
+      fix: "agent-ex doctor --fix（会把地址挪进 .env 并改成 {env:FEISHU_WEBHOOK_URL}）",
+      fixable: FIXABLE_KINDS.includes("webhook.plaintext"),
+    });
+  } else if (webhookState === "malformed") {
+    // 形状不合规的占位符（如 {env:bad_lower}）：不是凭证泄露，是必然失败的配置
+    findings.push({
+      severity: "error",
+      title: "webhook 占位符格式不对",
+      detail: `notify.feishu_webhook_url = "${c.notify?.feishu_webhook_url}"，既不是 {env:大写变量名} 也不是 http(s) 地址。解析器只认 {env:[A-Z0-9_]+}，这个值永远解析不出来。`,
+      fix: "agent-ex config set …（把 config.json 里的 notify.feishu_webhook_url 改成 {env:FEISHU_WEBHOOK_URL}，密钥放 .env）",
     });
   } else {
-    const varName = /^\{env:([A-Z0-9_]+)\}$/.exec(webhookPlaceholder)![1];
+    const varName = /^\{env:([A-Z0-9_]+)\}$/.exec(c.notify!.feishu_webhook_url)![1];
     const envFile = join(home, ".env");
     const hasInEnv = existsSync(envFile) && new RegExp(`^${varName}=.+$`, "m").test(readFileSync(envFile, "utf8"));
     const hasInProcess = Boolean(process.env[varName]);
@@ -367,27 +434,75 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
   }
 
   // ---- 5. 默认 profile 指向 ----
+  // 缺失与"指向不存在的 profile"是两种病，但都归 defaults.profile 这一个 code。
   const defProfile = c.defaults?.profile;
-  if (defProfile && !c.profiles?.[defProfile]) {
+  if (!defProfile) {
+    findings.push({
+      severity: "error",
+      title: "未设置默认 profile",
+      detail: "defaults.profile 缺失 ⇒ 派发任务时拿不到默认 profile（unknown profile），server 起不来。",
+      fix: "agent-ex profile use <存在的 profile>",
+    });
+    emitted.add(emitKey("defaults.profile", "undefined"));
+  } else if (!c.profiles?.[defProfile]) {
     findings.push({
       severity: "error",
       title: "默认 profile 不存在",
       detail: `defaults.profile = "${defProfile}"，但 profiles 里没有它 ⇒ 每次派发都会失败（unknown profile）。`,
-      fix: `agent-ex config use <存在的 profile>`,
-      fixable: true,
+      fix: "agent-ex profile use <存在的 profile>",
+      // ⚠️ 不可自动修：不知道该指向哪个（"哪个都可能是"）。以前这里标 fixable: true，
+      // 但 applyFixes 没有这个分支 ⇒ MCP 侧 agent 照着调 --fix 只会得到
+      // "没有可自动修复的问题"，白跑一趟。fixable 由能力表派生，不手写。
+      fixable: false,
     });
+    emitted.add(emitKey("defaults.profile", defProfile));
   }
 
   // ---- 6. executor 的 bin 是否可执行 ----
   for (const [name, e] of Object.entries(c.executors ?? {})) {
-    if (resolveBinPath(e.bin) === null) {
+    // ⚠️ bin 字段可能整个缺失（手改 config 的常见后果）：此时 resolveBinPath(undefined)
+    // 会抛 "Cannot read properties of undefined" ⇒ doctor 崩掉、什么都报不出来。
+    // 体检工具在配置坏了的时候**最不能崩**——那正是它该出结论的时刻。
+    const bin = (e as { bin?: unknown } | undefined)?.bin;
+    if (typeof bin !== "string" || bin === "") {
+      findings.push({
+        severity: "error",
+        title: `executor "${name}" 没有 bin`,
+        detail: `executors.${name}.bin 缺失或不是字符串 ⇒ 派发时无法拉起 agent。`,
+        fix: `agent-ex config set executors.${name}.bin <绝对路径>`,
+      });
+      emitted.add(emitKey("executor.bin", name));
+      continue;
+    }
+    if (resolveBinPath(bin) === null) {
       findings.push({
         severity: "error",
         title: `executor "${name}" 的 bin 不可用`,
-        detail: `${e.bin} 不存在或不可执行`,
-        fix: "agent-ex init 重新配置该 executor 的路径",
+        detail: `${bin} 不存在或不可执行`,
+        // 定点修复：不是"跑 init 重配一遍"（那是重武器），而是改这一个字段。
+        fix: `agent-ex config set executors.${name}.bin <绝对路径>`,
       });
+      emitted.add(emitKey("executor.bin", name));
     }
+  }
+
+  // ---- 6b. 兜底：把 validateConfig 的规则补进来 ----
+  //
+  // 上面几段是 doctor 自己的**具名**检查（文案更具体）；但它们覆盖不全——
+  // 2026-10-23 实测两处假阴性：doctor 报"一切正常"、exit 0，而同一份配置
+  // loadConfig 直接抛错、server 起不来（timeout_sec 是字符串、defaults 整块缺失）。
+  // 规则只写一份（config.ts 的 collectConfigIssues），这里把**没被具名检查覆盖**的
+  // 那些补成 error finding。
+  for (const issue of collectConfigIssues(c)) {
+    const key = emitKey(issue.code, issue.subject);
+    if (emitted.has(key)) continue;
+    emitted.add(key);
+    findings.push({
+      severity: "error",
+      title: `配置有问题：${issue.message}`,
+      detail: "这条来自 config 的统一校验规则（与启动时 loadConfig 抛错的是同一份）——同样的配置会让 server 起不来。",
+      fix: issue.fix,
+    });
   }
 
   // ---- 7. 历史失败证据（runner 日志）----

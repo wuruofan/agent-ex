@@ -3,3 +3,5 @@ dist/
 *.log
 .DS_Store
 .workbuddy/
+# vitest 加载 config 时生成的临时模块（每次跑测试都会重建）
+vitest.config.ts.timestamp-*.mjs

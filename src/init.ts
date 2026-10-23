@@ -248,6 +248,7 @@ export function nextSteps(home: string, serverEntry: string): string {
     "     agent-ex doctor --send",
     "",
     "5) Optional: edit " + join(home, "config.json") + " to tune model aliases / env.",
+    "   Or use the targeted commands: agent-ex config set <key> <value> / agent-ex profile set <profile> <KEY> <value>",
   ].join("\n");
 }
 

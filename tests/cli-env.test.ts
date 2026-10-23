@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,10 +29,14 @@ const tsxCli = join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
 let server: Server;
 let webhookUrl: string;
 let home: string;
+/** 假飞书收到的卡片数（用来钉住"只发一张"）。 */
+let cardCount: number;
 
 beforeAll(async () => {
   // 本地假飞书：返回 code=0 ⇒ 一次就成功，不触发重试，也不出网
+  cardCount = 0;
   server = createServer((_req, res) => {
+    cardCount += 1;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ code: 0, msg: "success" }));
   });
@@ -93,6 +97,39 @@ describe("agent-ex doctor --send（CLI 路径）", () => {
     expect(r.out).toContain("webhook 地址已配置");
     expect(r.out).not.toContain("env placeholder not found");
   });
+
+  /**
+   * 回归：`--fix --send` 曾**先发卡再修** ⇒ 发出两张卡，其中第一张是"修复前"的状态
+   * （比如 keyword 是空串时那张卡根本没带关键词元素、注定被拒）——
+   * 用户拿到的 code 是修复前的结论，毫无意义。现在只发修复后的那一张。
+   */
+  it("--fix --send 只发一张卡（且是修复后的）", async () => {
+    const fHome = mkdtempSync(join(tmpdir(), "aex-cli-fixsend-"));
+    try {
+      mkdirSync(join(fHome, "logs"), { recursive: true });
+      writeFileSync(join(fHome, "config.json"), JSON.stringify({
+        executors: { fake: { bin: "/bin/ls" } },
+        profiles: { p1: { executor: "fake", env: {} } },
+        // keyword 显式空串 = 修复前那张卡注定被拒
+        notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: false, keyword: "" },
+        defaults: { profile: "p1", timeout_sec: 60 },
+      }, null, 2));
+      writeFileSync(join(fHome, ".env"), `FEISHU_WEBHOOK_URL=${webhookUrl}\n`);
+
+      const before = cardCount;
+      const r = await runCliAt(fHome, ["doctor", "--fix", "--send"]);
+      expect(r.code).toBe(0);
+      // 只多了一张卡
+      expect(cardCount - before).toBe(1);
+      // 修好了（keyword 不再是空串）
+      const cfg = JSON.parse(readFileSync(join(fHome, "config.json"), "utf8"));
+      expect(cfg.notify.keyword).toBe("agent-ex");
+      // 结论是"修复后"的
+      expect(r.out).toContain("自检卡已投递");
+    } finally {
+      rmSync(fHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("agent-ex config list（CLI 路径）", () => {
@@ -125,8 +162,97 @@ describe("agent-ex config list（CLI 路径）", () => {
       expect(r.out).toContain("[agent-ex] config failed");
       // 裸栈的标志：Node 的崩溃页脚
       expect(r.out).not.toMatch(/Node\.js v/);
+      // ⚠️ 光挡页脚不够：`console.error(msg, e)` 会连着打 3 行 `at ...` 栈帧，
+      // 用户要的是"哪儿错了"，栈是给开发者看的
+      expect(r.out).not.toMatch(/^\s+at /m);
     } finally {
       rmSync(badHome, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("agent-ex profile（CLI 路径）", () => {
+  it("profile list 列出 profile 并标出默认", async () => {
+    const r = await runCli(["profile", "list"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("p1");
+    expect(r.out).toContain("default");
+  });
+
+  it("profile use 切默认（只切换，不物化）", async () => {
+    const pHome = mkdtempSync(join(tmpdir(), "aex-cli-prof-"));
+    try {
+      writeFileSync(join(pHome, "config.json"), JSON.stringify({
+        executors: { fake: { bin: "/bin/ls" } },
+        profiles: { p1: { executor: "fake", env: {} }, p2: { executor: "fake", env: {} } },
+        notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "agent-ex" },
+        defaults: { profile: "p1", timeout_sec: 60 },
+      }, null, 2));
+      const r = await runCliAt(pHome, ["profile", "use", "p2"]);
+      expect(r.code).toBe(0);
+      const cfg = JSON.parse(readFileSync(join(pHome, "config.json"), "utf8"));
+      expect(cfg.defaults.profile).toBe("p2");
+    } finally {
+      rmSync(pHome, { recursive: true, force: true });
+    }
+  });
+
+  it("profile use 不存在的名字时报错且不创建（不隐式物化）", async () => {
+    const pHome = mkdtempSync(join(tmpdir(), "aex-cli-prof2-"));
+    try {
+      writeFileSync(join(pHome, "config.json"), JSON.stringify({
+        executors: { fake: { bin: "/bin/ls" } },
+        profiles: { p1: { executor: "fake", env: {} } },
+        notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "agent-ex" },
+        defaults: { profile: "p1", timeout_sec: 60 },
+      }, null, 2));
+      const r = await runCliAt(pHome, ["profile", "use", "ghost"]);
+      expect(r.code).toBe(1);
+      const cfg = JSON.parse(readFileSync(join(pHome, "config.json"), "utf8"));
+      expect(cfg.profiles.ghost).toBeUndefined();
+    } finally {
+      rmSync(pHome, { recursive: true, force: true });
+    }
+  });
+
+  it("profile create 物化内置预设（只创建，不切默认），并提示下一步", async () => {
+    const pHome = mkdtempSync(join(tmpdir(), "aex-cli-prof3-"));
+    try {
+      writeFileSync(join(pHome, "config.json"), JSON.stringify({
+        executors: { fake: { bin: "/bin/ls" } },
+        profiles: { p1: { executor: "fake", env: {} } },
+        notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "agent-ex" },
+        defaults: { profile: "p1", timeout_sec: 60 },
+      }, null, 2));
+      const r = await runCliAt(pHome, ["profile", "create", "opencode-zen-free", "--bin", "/bin/ls"]);
+      expect(r.code).toBe(0);
+      const cfg = JSON.parse(readFileSync(join(pHome, "config.json"), "utf8"));
+      expect(cfg.profiles["opencode-zen-free"]).toBeDefined();
+      // 只创建，不切默认
+      expect(cfg.defaults.profile).toBe("p1");
+      // 提示下一步
+      expect(r.out).toContain("agent-ex profile use opencode-zen-free");
+    } finally {
+      rmSync(pHome, { recursive: true, force: true });
+    }
+  });
+
+  it("profile set 拒绝会改写 worker 启动面的 key（NODE_OPTIONS）", async () => {
+    const pHome = mkdtempSync(join(tmpdir(), "aex-cli-prof4-"));
+    try {
+      writeFileSync(join(pHome, "config.json"), JSON.stringify({
+        executors: { fake: { bin: "/bin/ls" } },
+        profiles: { p1: { executor: "fake", env: {} } },
+        notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "agent-ex" },
+        defaults: { profile: "p1", timeout_sec: 60 },
+      }, null, 2));
+      const r = await runCliAt(pHome, ["profile", "set", "p1", "NODE_OPTIONS", "--require=/tmp/evil.js"]);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain("not allowed");
+      const cfg = JSON.parse(readFileSync(join(pHome, "config.json"), "utf8"));
+      expect(cfg.profiles.p1.env.NODE_OPTIONS).toBeUndefined();
+    } finally {
+      rmSync(pHome, { recursive: true, force: true });
     }
   });
 });

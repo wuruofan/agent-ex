@@ -389,8 +389,11 @@ agent-ex doctor --send
 | `agent-ex doctor --fix` | 自动修**确定性缺陷**（显式空串关键词、改名前的旧产品名、明文 webhook 落在 config.json）。**不动 `dry_run`** ——那是你的偏好，不是缺陷；**也不动自定义关键词** ——机器人登记什么词是用户的界面。 |
 | `agent-ex doctor --send` | 额外实发一张**正文不含产品名**的自检卡，验证真实投递。 |
 | `agent-ex config list` | 列出 profiles / executors / notify / defaults 现状。 |
-| `agent-ex config set <key> <value>` | 改单个字段（白名单：`notify.dry_run`、`notify.keyword`、`defaults.profile`、`defaults.timeout_sec`）。 |
-| `agent-ex config use <profile>` | 切默认 profile。内置 `opencode-zen-free` 在不存在时会**自动创建**（零密钥的 opencode 免费模型）。 |
+| `agent-ex config set <key> <value>` | 改单个字段。白名单：`notify.dry_run`、`notify.keyword`、`defaults.timeout_sec`，以及 `executors.<name>.bin`（定点修 bin 路径）。 |
+| `agent-ex profile list` | 列出所有 profile（标出默认的那个）。 |
+| `agent-ex profile use <profile>` | **切**默认 profile（profile 必须已存在）。 |
+| `agent-ex profile create <built-in> [--bin <path>]` | **物化**一个内置预设（当前：`opencode-zen-free`，零密钥的 opencode 免费模型）。只创建，不切默认；`--bin` 用于 executor 不在 PATH 上时指定绝对路径。 |
+| `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段（如 `ZEN_FREE_PREFER`），或用保留字 `executor` 改它用哪个 executor。 |
 
 > `doctor` 也有对应的 MCP 工具 `agent_ex_doctor`，让 agent 自己就能排错，不用手抄命令。
 

@@ -127,6 +127,79 @@ describe("doctor —— 把证据聚合成结论", () => {
     expect(r.findings.some((f) => f.title.includes("不可用"))).toBe(true);
   });
 
+  /**
+   * 回归：executor 的 bin 字段整个缺失时，doctor 曾直接崩
+   * （resolveBinPath(undefined) → "Cannot read properties of undefined"），
+   * 一条 finding 都报不出来。体检工具在配置坏了的时候最不能崩。
+   */
+  it("executor 缺 bin 字段时报错而不是崩掉", async () => {
+    writeCfg(baseCfg({ executors: { claude: {} as never } }));
+    const r = await doctor({ home });
+    expect(r.ok).toBe(false);
+    const f = r.findings.find((x) => x.title.includes("没有 bin"));
+    expect(f?.severity).toBe("error");
+    expect(f?.fix).toContain("config set executors.claude.bin");
+  });
+
+  /**
+   * 回归：doctor 曾对这两处**假阴性**——报"一切正常"、exit 0，
+   * 而同一份配置 loadConfig 直接抛错、server 起不来。
+   * 体检工具在用户最需要它的时刻说"一切正常"，比不体检更糟。
+   */
+  it("timeout_sec 是字符串时报 error（曾完全沉默）", async () => {
+    writeCfg(baseCfg({ defaults: { profile: "default", timeout_sec: "3600" } }));
+    const r = await doctor({ home });
+    expect(r.ok).toBe(false);
+    const f = r.findings.find((x) => x.title.includes("timeout_sec"));
+    expect(f?.severity).toBe("error");
+    // 每条 error 都得给出可复制的修复命令
+    expect(f?.fix).toContain("config set defaults.timeout_sec");
+  });
+
+  it("defaults 整块缺失时报 error（曾被静态跳过名单吞掉）", async () => {
+    writeCfg(baseCfg({ defaults: undefined }));
+    const r = await doctor({ home });
+    expect(r.ok).toBe(false);
+    expect(r.findings.some((f) => f.severity === "error")).toBe(true);
+  });
+
+  it("profile 指向未知 executor 时报 error", async () => {
+    writeCfg(baseCfg({ profiles: { p: { executor: "nope", env: {} } } }));
+    const r = await doctor({ home });
+    expect(r.ok).toBe(false);
+    expect(r.findings.some((f) => f.title.includes("nope"))).toBe(true);
+  });
+
+  it("同一个 code 的多个实例都报出来（去重按 code+subject，不整体吞）", async () => {
+    writeCfg(baseCfg({
+      executors: { a: { bin: "/nope-a" }, b: { bin: "/nope-b" } },
+    }));
+    const r = await doctor({ home });
+    const titles = r.findings.map((f) => f.title).join(" ");
+    expect(titles).toContain("\"a\"");
+    expect(titles).toContain("\"b\"");
+  });
+
+  it("占位符形状不合规（如 {env:bad_lower}）不被误报成明文凭证", async () => {
+    writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:bad_lower}", dry_run: true, keyword: BRAND } }));
+    const r = await doctor({ home });
+    expect(r.findings.some((f) => f.title.includes("明文"))).toBe(false);
+    const f = r.findings.find((x) => x.title.includes("占位符格式"));
+    expect(f?.severity).toBe("error");
+    // 形状不对不可自动修（自动"修"只会把一个坏值换成另一个坏值）
+    expect(f?.fixable).toBeFalsy();
+  });
+
+  it("默认 profile 不存在时不可自动修（applyFixes 没有这个分支）", async () => {
+    writeCfg(baseCfg({ defaults: { profile: "ghost", timeout_sec: 3600 } }));
+    const r = await doctor({ home });
+    const f = r.findings.find((x) => x.title.includes("默认 profile"));
+    expect(f?.severity).toBe("error");
+    expect(f?.fixable).toBe(false);
+    // 修复命令必须是重组后仍存在的命令
+    expect(f?.fix).toContain("agent-ex profile use");
+  });
+
   it("config.json 坏掉时也能体检（不崩），并指出是 config 的问题", async () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "config.json"), "{ not json");

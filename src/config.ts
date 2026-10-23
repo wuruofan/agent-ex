@@ -42,7 +42,13 @@ export function loadConfig(home?: string): Config {
   ensureRuntimeDirs();
   const cfgPath = join(home ?? agentExHome(), "config.json");
   const cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Config;
-  cfg.notify.keyword ??= BRAND;
+  // 归一化（不是校验）：keyword 缺省时补 BRAND，让下游不必判空。
+  // ⚠️ 必须留在 loadConfig、不能进 collectConfigIssues：一旦在这里把缺省填进去，
+  // doctor 就再也看不到"字段缺失"这个态（永远等于 BRAND），info 档会消失。
+  // notify 整块缺失时也不能在这里炸——那是 collectConfigIssues 该报的 issue。
+  if (cfg.notify && typeof cfg.notify === "object") {
+    cfg.notify.keyword ??= BRAND;
+  }
   validate(cfg);
   return cfg;
 }
@@ -58,24 +64,131 @@ export function validateConfig(cfg: Config): void {
   validate(cfg);
 }
 
-function validate(cfg: Config): void {
-  if (!cfg.executors || Object.keys(cfg.executors).length === 0) throw new Error("config.executors is empty");
-  if (!cfg.profiles || Object.keys(cfg.profiles).length === 0) throw new Error("config.profiles is empty");
-  for (const [name, e] of Object.entries(cfg.executors)) {
-    if (!e.bin || typeof e.bin !== "string") throw new Error(`executor "${name}" missing "bin"`);
-    if (!binIsExecutable(e.bin)) throw new Error(`executor "${name}" bin "${e.bin}" not found or not executable`);
+/** config 的问题分类。doctor 靠它决定"这条要不要再报一遍"。 */
+export type ConfigIssueCode =
+  | "executors.empty"
+  | "profiles.empty"
+  | "executor.bin"
+  | "profile.executor"
+  | "defaults.profile"
+  | "notify.webhook"
+  | "defaults.timeout_sec";
+
+export interface ConfigIssue {
+  code: ConfigIssueCode;
+  /** 与 validate() 抛出的文案一致（第一条即抛出的那条）。 */
+  message: string;
+  /** 可复制执行的修复命令——没有它，标红的 finding 用户也无从下手。 */
+  fix?: string;
+  /**
+   * 问题的主体（executor 名 / profile 名）。
+   *
+   * doctor 用它做去重：`executor.bin` 这类 code 会有多个实例，按 code 整体跳过
+   * 会把"另一个 executor 也有问题"一起吞掉。去重键 = code + subject。
+   */
+  subject?: string;
+}
+
+/** 把任意值当成对象看待（非对象一律当作空对象）。 */
+function asRecord(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+/**
+ * 收集一份 config 的**全部**问题（total：吃未校验的原始 JSON，绝不抛错）。
+ *
+ * 为什么要有它：doctor 原本手写 4 类检查、这里手写 8 条规则，两份各写各的 ⇒
+ * 2026-10-23 实测两处**假阴性**：doctor 报"一切正常"、exit 0，而同一份配置
+ * `loadConfig` 直接抛错、server 起不来：
+ *   - `defaults.timeout_sec: "3600"`（doctor 只看 dry_run/keyword/webhook/defaults.profile）；
+ *   - `defaults: {}`（doctor 的检查是 `if (defProfile && …)`，字段缺失就不触发）。
+ * 体检工具在用户最需要它的时刻说"一切正常"，比不体检更糟。
+ *
+ * 所以规则只写这一份，doctor 消费它。签名收 `unknown`：doctor 读的是磁盘上的
+ * 原始 JSON，defaults/notify 可能整块缺失，函数不能假设已通过校验。
+ */
+export function collectConfigIssues(cfg: unknown): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  const c = asRecord(cfg);
+  const executors = asRecord(c.executors);
+  const profiles = asRecord(c.profiles);
+
+  if (Object.keys(executors).length === 0) {
+    issues.push({
+      code: "executors.empty",
+      message: "config.executors is empty",
+      fix: "agent-ex init 重建配置（会先备份坏文件）",
+    });
   }
-  for (const [name, p] of Object.entries(cfg.profiles)) {
-    if (!cfg.executors[p.executor]) throw new Error(`profile "${name}" references unknown executor "${p.executor}"`);
+  if (Object.keys(profiles).length === 0) {
+    issues.push({
+      code: "profiles.empty",
+      message: "config.profiles is empty",
+      fix: "agent-ex init 重建配置（会先备份坏文件）",
+    });
   }
-  if (!cfg.defaults?.profile || !cfg.profiles[cfg.defaults.profile]) {
-    throw new Error(`defaults.profile "${cfg.defaults?.profile}" not found in profiles`);
+  for (const [name, raw] of Object.entries(executors)) {
+    const bin = asRecord(raw).bin;
+    if (typeof bin !== "string" || bin === "") {
+      issues.push({
+        code: "executor.bin",
+        message: `executor "${name}" missing "bin"`,
+        fix: `agent-ex config set executors.${name}.bin <path>`,
+        subject: name,
+      });
+    } else if (!binIsExecutable(bin)) {
+      issues.push({
+        code: "executor.bin",
+        message: `executor "${name}" bin "${bin}" not found or not executable`,
+        fix: `agent-ex config set executors.${name}.bin <path>`,
+        subject: name,
+      });
+    }
   }
-  if (!cfg.notify?.feishu_webhook_url) throw new Error("notify.feishu_webhook_url is required");
+  for (const [name, raw] of Object.entries(profiles)) {
+    const exec = asRecord(raw).executor;
+    if (typeof exec !== "string" || !executors[exec]) {
+      issues.push({
+        code: "profile.executor",
+        message: `profile "${name}" references unknown executor "${exec}"`,
+        fix: `agent-ex config set profiles.${name}.executor <存在的 executor>`,
+        subject: name,
+      });
+    }
+  }
+  const defaults = asRecord(c.defaults);
+  const defProfile = defaults.profile;
+  if (typeof defProfile !== "string" || defProfile === "" || !profiles[defProfile]) {
+    issues.push({
+      code: "defaults.profile",
+      message: `defaults.profile "${defProfile}" not found in profiles`,
+      fix: "agent-ex profile use <存在的 profile>",
+      subject: String(defProfile),
+    });
+  }
+  const notify = asRecord(c.notify);
+  if (typeof notify.feishu_webhook_url !== "string" || notify.feishu_webhook_url === "") {
+    issues.push({
+      code: "notify.webhook",
+      message: "notify.feishu_webhook_url is required",
+      fix: "agent-ex init 重建配置（会先备份坏文件）",
+    });
+  }
   // dry_run 缺省 = true（只打印到 stderr 不真发），调试期默认安全；想真发改 false
-  if (!Number.isInteger(cfg.defaults.timeout_sec) || cfg.defaults.timeout_sec <= 0) {
-    throw new Error("defaults.timeout_sec must be a positive integer");
+  const timeout = defaults.timeout_sec;
+  if (!Number.isInteger(timeout) || (timeout as number) <= 0) {
+    issues.push({
+      code: "defaults.timeout_sec",
+      message: "defaults.timeout_sec must be a positive integer",
+      fix: "agent-ex config set defaults.timeout_sec 5400",
+    });
   }
+  return issues;
+}
+
+function validate(cfg: Config): void {
+  const issues = collectConfigIssues(cfg);
+  if (issues.length > 0) throw new Error(issues[0].message);
 }
 
 /**

@@ -1,6 +1,7 @@
 # doctor / config：把「通知通不通」变成一条命令能回答的问题
 
 **状态**：✅ **已评审**（评审记录见 [`docs/reviews/2026-10-22-doctor-and-config-review.md`](../reviews/2026-10-22-doctor-and-config-review.md)；评审提出的 P0/P1 已修复并回填本 spec，Q1-Q6 结论见 §8）
+**后续变更**：2026-10-23 定稿的 CLI 重组与校验收口见 **§12（已实现）**；§3.4 描述的是当前已提交的形态。第二轮评审（同日）指出的 P1/P2/P3 已并入 §12 与 §10。
 **触发**：2026-10-13 → 10-15 连续 23 个任务零通知，事后复盘发现**证据早就存在，只是散在三处没人看**：
 - `tasks.db` 的 `notify_failed`：布尔值，只知道"失败了"，分不清「关键词拒收」和「网络不通」；
 - `~/.agent-ex/logs/runner-*.log`：`[notifier] feishu rejected: code=19024` —— 唯一能定位病因的证据面，但要手工翻 N 个文件；
@@ -40,6 +41,8 @@
 | D6 | init 覆盖前**先校验后落盘** | 原先是"先写盘再校验"：校验失败时坏 config 已落盘、旧 config 已被覆盖且无法恢复。 |
 | D7 | init 覆盖前的**变更预告放在写盘前一刻**（不是流程开头） | 开头还不知道新 config 长什么样，问"要不要覆盖"是让用户对未知后果点头。写盘前那一刻新旧两份都在手上，才能逐项列差异。 |
 | D8 | 体检同时做成 **CLI 与 MCP 工具** | MCP 侧让 agent 自己能查（上次受影响的正是 agent，却在 SKILL.md 里手抄 node -e 脚本）。两者共用纯函数 ⇒ 行为必然一致。 |
+| D9 | **按对象拆分命令**：`config` = 全局标量 + executor；`profile` = profile 生命周期 | 原 `config use` 一次做三件结构性写入（补 executor、写 profile env、切默认）+ 一次切换，语义混杂；且 profile env 创建后**没有任何编辑入口**（`ZEN_FREE_PREFER` 只能手改 JSON） |
+| D10 | `config set` 用**键形状白名单**：3 个固定键 + `executors.<name>.bin`，**不引入通用点路径** | 既保留 D5 的防手抖边界，又给"坏 bin 挡住一切"一个定点修复入口（原先只能跑全量 `init`） |
 
 ---
 
@@ -115,7 +118,7 @@
 
 **CLI 路径必须先加载 `.env`**：`server.ts` 在模块顶层就分派了 `doctor`/`config` 子命令，**走不到 `main()` 里的 `loadEnvFile()`** ⇒ `{env:VAR}` 占位符解析不了、`--send` 在 init 默认产出的配置形态下**必然失败**（2026-10-22 实测：同一轮体检里前半句"✓ webhook 已配置（在 .env 里）"、后半句"✗ env placeholder not found"）。
 
-### 3.4 `agent-ex config`
+### 3.4 `agent-ex config`（当前已提交形态；CLI 重组见 §12.1）
 
 | 子命令 | 语义 |
 | :--- | :--- |
@@ -129,6 +132,8 @@
 - profile env = `OPENCODE_CONFIG_CONTENT` 用 `{model:zen-free}` 占位符 + `ZEN_FREE_PREFER=mimo,nemotron,ling`
 - executor `opencode` 不存在时一并注册（`extra_flags: ["--auto"]`）
 - 真实模型名在 **spawn 时**由 `zen-free.ts` 动态解析（模型集会轮换，配置里零硬引用）
+
+⚠️ 这套形态有三个已确认的问题，修复方案在 §12.1：`use` 混合了"物化预设"与"切换"；`defaults.profile` 与 `use` 是两个切默认入口；profile env 没有编辑入口。
 
 ---
 
@@ -151,11 +156,11 @@
 | 文件 | 职责 |
 | :--- | :--- |
 | `src/doctor.ts` | 体检核心 + `--fix` + 历史日志扫描 + 飞书错误码表。**纯逻辑，无 IO 副作用**（除读文件与可选发卡） |
-| `src/config-cmd.ts` | config 的 list/set/use + 内置 profile 定义 + 白名单 |
-| `src/cli.ts` | CLI 渲染层（doctor / config 的输出格式） |
+| `src/config-cmd.ts` | config 的 list/set + profile 的 list/use/create/set + 内置 profile 定义 + 键白名单（§12.1 重组后仍是一个文件：共用 `readConfig`/`writeConfig`） |
+| `src/cli.ts` | CLI 渲染层（doctor / config / profile 的输出格式） |
 | `src/init-changes.ts` | init 覆盖前的 diff + 警告文案（**纯函数**，便于单测） |
-| `src/config.ts` | 新增导出 `validateConfig(cfg)`（不读盘），供 init 写盘前校验 |
-| `src/server.ts` | 新增 `agent_ex_doctor` MCP 工具 + `doctor`/`config` 子命令分派 |
+| `src/config.ts` | 导出 `validateConfig(cfg)`（不读盘，供 init 写盘前校验）+ `collectConfigIssues(cfg)`（§12.2，规则的唯一真相源） |
+| `src/server.ts` | 新增 `agent_ex_doctor` MCP 工具 + `doctor`/`config`/`profile` 子命令分派 |
 | `src/store.ts` | schema 迁移（见 §6） |
 
 **为什么不塞进 `src/tools/`**：`doctor` 有 CLI 与 MCP 两个入口，核心逻辑必须与渲染层分离；`src/tools/` 现有文件都是 MCP 工具的薄封装。
@@ -198,7 +203,7 @@
 | init 会静默丢配置 | 拿 2-profile / `dry_run=false` / `timeout=5400` 的 config 实跑 init → 变成 1 profile / `true` / `3600` |
 | init 先写盘后校验 | 实测输出 `config written but self-check failed: … not found or not executable` + exit 1，此时坏 config 已落盘 |
 | 旧库加列会静默失效 | 实测：旧库跑新版 SCHEMA 后新列不存在，写入报 `no such column` |
-| zen-free 实时清单可用 | 实测拉到 86 个模型，`{model:zen-free}` 解析成功 |
+| zen-free 实时清单可用 | 实测拉到 85 个模型（2026-10-23），`{model:zen-free}` 解析成功 |
 
 ---
 
@@ -210,7 +215,7 @@
 | :--- | :--- | :--- | :--- |
 | Q1 | `doctor` 的历史失败记 warn（D4）是否可接受？ | **接受，记 warn**，但必须修聚合文案 | 历史不会消失（记 error ⇒ doctor 永远红 ⇒ 用户学会无视）。文案已改：区分「受影响任务数」与「拒收次数」，并列出**每个码各自的修法**（19024 改关键词 / 19001 换地址互斥，只给次数最多的那个会把人引到无效动作） |
 | Q2 | `--fix` 改 `keyword` 是否越权？ | **越权，已收窄**为四态（见 §3.1） | 实测 `--fix` 曾把用户与机器人侧一致的 `my-bot-word` 覆写成 `agent-ex`，把能投递的配置改成不能投递；且与 `brand.ts`「用户显式写 keyword 仍然优先」冲突。19024 的 69 次证据只支持「**陈旧产品名**是错的」，推不出「任何 ≠BRAND 都错」。**缺失**也不是错（运行时 `??= BRAND`），**显式空串**才是（必然 19024） |
-| Q3 | `config set` 白名单（D5）是否够用？ | **够**，并已补非空校验 | 四个键覆盖了实测的所有需求；已补：`string` 类型拒绝空串/纯空白（否则 `config set notify.keyword ""` 能造出必然 19024 的状态） |
+| Q3 | `config set` 白名单（D5）是否够用？ | **不够，裁决已更正**（见 §12.3） | 评审时判"够"，依据是"缺陷都能被现有键修到"。反例：坏 `executor.bin` 是**阻断点**——它会让 `--fix` 的整份校验失败、也让 `config set` 报无关字段的错，而白名单里没有定点入口，唯一出路是跑全量 `init`。修法：加键形状 `executors.<name>.bin`（`<name>` 必须已存在、值必须过 `resolveBinPath`）。另补：`string` 类型拒绝空串/纯空白（否则 `config set notify.keyword ""` 能造出必然 19024 的状态） |
 | Q4 | doctor 是否该**默认**就发卡？ | **不默认**（保持 D2） | `--send` 会真实 POST 到群；MCP 侧 `agent_ex_doctor` 由 agent 自行调用，默认发送等于让 agent 有权刷群 |
 | Q5 | `opencode-zen-free` 内置 profile 的 `ZEN_FREE_PREFER` 默认值 | **保留 `mimo,nemotron,ling`** | 它是**软偏好**：命中前缀就用、未命中退回 `candidates[0]`，清单过期只会退化为"不挑食"，不可能导致失败。补的是可见性：`config list` 现在会列出 profile 的环境变量名 |
 | Q6 | 迁移是否要支持"改已有列类型"（重建表）？ | **不做**（保持现状） | 真实库打开前后逐字节不变；`ADD COLUMN` 天然只增不改，需要改类型时再引入重建表 + `user_version`（§10.2 已记为缺口） |
@@ -228,11 +233,14 @@
 | `tests/store.test.ts`（+5） | schema 迁移：补列、读写可用、NOT NULL 靠 DEFAULT、幂等、空库 |
 | `tests/init-changes.test.ts`（11） | diff 逻辑 + 警告文案的后果说明 |
 | `tests/init-e2e.test.ts`（4） | init 端到端：预告展示 / 拒绝则不写盘 / 同意则备份 / 非法则不写盘 |
-| `tests/doctor.test.ts`（30） | 各类 finding、keyword 四态、历史扫描聚合、错误码含义、`--fix` 边界（含"坏字段挡住写盘"的不崩溃/不落盘）、`--send` 的 code 回传 |
-| `tests/config-cmd.test.ts`（15） | list / set 白名单与类型校验 / 非空校验 / use 自动创建 |
-| `tests/cli-env.test.ts`（3） | **进程级**回归：CLI 子命令必须加载 `$AGENT_EX_HOME/.env`（P0-1）；`config list` 真的渲染 `bin_ok` |
+| `tests/doctor.test.ts`（38） | 各类 finding、keyword 四态、历史扫描聚合、错误码含义、`--fix` 边界（含"坏字段挡住写盘"的不崩溃/不落盘）、`--send` 的 code 回传、**两处假阴性的回归**、webhook 四态、缺 bin 的 executor |
+| `tests/config-cmd.test.ts`（37） | list / set 白名单与类型校验 / 非空校验 / 严格整数 / `executors.<name>.bin` / `profile use`·`create`·`set`（含键约束与深拷贝） |
+| `tests/config-issues.test.ts`（14） | `collectConfigIssues`：每条规则一个 code、每条 issue 带 fix、total（吃未校验 JSON 不抛错） |
+| `tests/cli-env.test.ts`（10） | **进程级**回归：CLI 子命令必须加载 `$AGENT_EX_HOME/.env`（P0-1）；`config list` 真的渲染 `bin_ok`；未预期异常走兜底且无栈帧；`profile` 子命令；`--fix --send` 只发一张卡 |
 
-全量：**215 passed / 21 files**，`tsc --noEmit` 0 error。
+全量：**266 passed / 22 files**，`tsc --noEmit` 0 error。
+
+> ⚠️ 这个数字**不是无条件稳定**：`tests/cli-env.test.ts` 会 spawn `tsx` 子进程，vitest 默认 `testTimeout` 是 5s——并行满载时实测出现 `209 passed / 4 failed / 4 skipped`。已加 `testTimeout: 30_000`（§12.5）。
 
 **变异验证**（证明断言有判别力）：关掉迁移 → 4 红；关掉变更预告 → 2 红；改成先写盘后校验 → 2 红；doctor 不扫历史 → 1 红；`--fix` 改 `dry_run` → 1 红；`config set` 不校验白名单 → 1 红；
 **评审后新增**：撤掉 CLI 的 `loadEnvFile()` → 1 红；撤掉 `.env` 的 `chmodSync` → 1 红；`--fix` 覆写自定义 keyword → 2 红；`config set` 允许空串 → 1 红；notifier 不回传 `code` → 2 红；
@@ -251,6 +259,11 @@
 5. **`19001` 之外的飞书错误码未穷举**：`FEISHU_ERRORS` 只收了实测见过的 6 个，未见过的码会原样显示 code 与 msg。
 6. **doctor 判不了"机器人登记的词是什么"**：这是飞书侧的私有状态，本地无从得知。doctor 的定位因此是"排除可证明的故障 + 汇总历史证据"，**最终的匹配判定只能靠 `doctor --send`**（自检卡正文干净 ⇒ 不会被偶然提及产品名蒙混过关）。
 7. **CLI 与 MCP 的环境加载路径曾经分叉**（已修）：MCP 侧 `main()` 里有 `loadEnvFile()`、CLI 侧没有 ⇒ 同一份配置，agent 查得通、命令行查不通。修复后两者共用同一套加载路径（`tests/cli-env.test.ts` 钉住）。
+8. **`config.example.json` 当前不可信**（2026-10-23 决定**暂缓**修）：claude 的 bin 是别人的家目录路径，直接喂 `validateConfig()` 会抛 `not found or not executable`；且除 `keyword === BRAND` 外没有任何断言钉住它的形状。"把 bin 改成 `claude`"这一行**不构成修复**——它只是换成 PATH 解析，机器上没装 claude 时照样校验失败。真要修就一次修到位：路径用必然存在的 `node` 并注明"替换成你的 agent CLI" + `satisfies Config` 编译期钉形状 + 一条语义测试（executor 引用、`timeout_sec` 正整数、webhook 必须占位符；**不**断言 bin 存在）。
+9. **不做 JSON Schema**（2026-10-23 决定）：Schema 只能表达形状，表达不了"`profile.executor` 必须存在""bin 必须可执行"这类跨字段关系，因此是 `collectConfigIssues()` 的严格子集，天然会漂。且 `$schema` 指向不稳定（相对路径落到 `~/.agent-ex/` 下不存在、绝对路径绑死机器、URL 需外部托管）。等 CLI 面稳定后，若仍需要编辑器补全，再以"schema 先跑形状、关系检查后跑"的派生形态引入，并用 fixture 双向钉。
+10. **未使用的 executor 缺失会阻断启动**（待定）：`validateConfig()` 校验**全部** executor，所以哪怕默认 profile 用 claude 且它完全正常，只要残留一个不可用的 `opencode` executor，`loadConfig()` 依旧抛错、server 起不来。实测（2026-10-23）：default=claudecode（bin `/bin/ls` 可用）仍 `THREW: executor "opencode" bin "opencode" not found…`。候选修法：启动只硬校验默认 profile 引用的 executor，其余由 doctor 报 error、派发到该 profile 时再失败。**这会改变启动语义，尚未裁决**。
+    - ⚠️ 本轮把 `config set executors.<name>.bin` 做成定点入口后，这条缺口的**可操作性**变好了（能定点改路径），但**启动仍会被它挡住** —— 未裁决的部分没变。
+11. **`ZEN_FREE_PREFER` 是静态软偏好**（待定）：模型 id 每次 spawn 动态解析（2026-10-23 实测清单 85 个），但"挑哪个家族"是创建时写死的 CSV。实测：`mimo,nemotron,ling` → `mimo-v2.6-flash-free`，`deepseek` 前缀 → `deepseek-v4.1-flash-free`，**空值 → `beam-free`**（字母序第一，并非合理默认）。API 的 `created` 字段在全部条目上相同，没有可用的"新度/质量"信号。候选：① 内置默认改 `deepseek,mimo,glm,nemotron`；② 家族内按数字版本降序（否则 `deepseek-v4-*` 与 `deepseek-v4.1-*` 并存时字母序会选中旧版）；③ 给已有 profile 一个显式 `profile set` 入口（§12.1 已实现）。**①②尚未裁决**（③ 已落地：现在可以直接 `agent-ex profile set <profile> ZEN_FREE_PREFER deepseek,mimo,glm`）。
 
 ---
 
@@ -270,3 +283,145 @@
 | P2-8 | 历史失败聚合单位混用，且只给一个码的修法 | **接受，已修** | 标题区分「受影响任务数」与「拒收次数」；`fix` 列出**每个码各自的修法**（19024 改关键词 / 19001 换地址互斥） |
 
 **评审之外补的一条**：两个 `config use opencode-zen-free` 用例原本依赖本机装了 `opencode` 且在 `PATH` 上——"196 全绿"只是那台机器的巧合。已改为与 `PATH` 无关。
+
+---
+
+## 12. 后续变更（2026-10-23 定稿，**已实现**）
+
+本轮只动 CLI 面与校验层，**`config.json` 结构不变、无数据迁移**。
+
+### 12.1 CLI 按对象重组（D9）
+
+```
+config list                                # 快照：globals / executors / profiles / 默认
+config set notify.dry_run false
+config set notify.keyword agent-ex
+config set defaults.timeout_sec 5400
+config set executors.<name>.bin <path>     # 定点修复坏 bin（<name> 必须已存在）
+
+profile list
+profile use <name>                         # 只切换，必须已存在
+profile create <builtin> [--bin <path>]    # 物化预设（只创建、不切默认）
+profile set <name> <KEY> <value>           # profile env 字段（如 ZEN_FREE_PREFER）
+```
+
+规则：
+
+- **`defaults.profile` 移出 `config set` 白名单**，切默认只保留 `profile use`——两个入口并存本身就是概念重复。
+- `profile use` 遇到不存在的名字：命中内置名 → 提示 `profile create <name>`；否则列出现有名字。
+- `profile create` 只创建；完成后打印下一条命令（`profile use …`）。
+- **`profile create --bin <path>` 是必需的重载，不是可选装饰**：内置 executor（`opencode`）不在 `PATH` 时，`validateConfig` 会在落盘前拒绝，executor 条目因此不存在，而 §12.3 的 `executors.<name>.bin` 要求 name 已存在 ⇒ 用户被两条规则夹死。`useProfile` 里已有 `opts.bin`，只需接到 CLI。没有 `--bin` 且探测不到时，错误信息必须**直接给出** `profile create <builtin> --bin <path>`。
+- **`profile set` 必须有键约束**（否则 D5/D10 的"防手抖"在 env 上开了更大的口子）：
+  - key 匹配 `^[A-Z][A-Z0-9_]*$`，value 非空；
+  - 拒绝 `NODE_OPTIONS`、`PATH`、`LD_*`、`DYLD_*`——这些是 worker 的启动/加载面，写进去等于允许任意代码执行或换掉解释器；
+  - `OPENCODE_CONFIG_CONTENT` 单独校验：必须能 `JSON.parse` 且含 `model`；对内置 zen-free profile 还必须保留 `{model:zen-free}` 占位（否则动态解析被绕过，配置里又出现硬编码模型）；
+  - 物化内置 profile 时必须**深拷贝** `BUILTIN_PROFILES` 的 `env`（当前 `config-cmd.ts:163` 共享引用，`profile set` 原地改会污染同进程里的常量）。
+- **不做**：通用点路径（如 `profiles.x.env.Y` 任意写）、`profile remove`/`rename`、`config use` 兼容别名（当前几乎只有一个使用者，留 shim 只会让两套语义长期并存）。
+- 迁移成本**不止**"CLI 分派 + 测试调用面"，完整清单见 §12.5；README 与 SKILL 必须与代码同一次提交。
+
+### 12.2 校验单一真相源（`collectConfigIssues`）
+
+**问题**：doctor 手写 4 类检查、`config.ts` 手写 8 条规则，两份各写各的。实测两处假阴性：
+
+- `defaults.timeout_sec: "3600"` → **doctor 报"一切正常"、exit 0**，同一份配置 `loadConfig` 抛 `must be a positive integer`、server 起不来；
+- `defaults: {}` → doctor **一条都不报**（自有检查是 `if (defProfile && …)`，字段缺失时不触发），`loadConfig` 抛 `defaults.profile "undefined" not found`。
+
+```ts
+export interface ConfigIssue { code: string; message: string; fix?: string }
+export function collectConfigIssues(cfg: unknown): ConfigIssue[]  // total：吃未校验 JSON，绝不 throw
+export function validateConfig(cfg: Config): void                 // 有 issue 即 throw issues[0].message（文案不变）
+```
+
+**签名必须是 `unknown`**：doctor 读的是磁盘上的原始 JSON，`defaults`/`notify` 可能整块缺失，函数不能假设已通过校验。
+
+规则与 code **一一对应，一条不漏**（旧稿只列了 6 个 code，`executors.empty`/`profiles.empty` 和"`defaults.profile` 缺失"都没有归属）：
+
+| code | 触发条件 |
+| :--- | :--- |
+| `executors.empty` | `executors` 缺失或空 |
+| `profiles.empty` | `profiles` 缺失或空 |
+| `executor.bin` | 某 executor 的 bin 缺失/非字符串/不可执行 |
+| `profile.executor` | 某 profile 指向不存在的 executor |
+| `defaults.profile` | **缺失**或指向不存在的 profile（两种都要报） |
+| `notify.webhook` | webhook 缺失（形状问题见 §12.4） |
+| `defaults.timeout_sec` | 非正整数 |
+
+doctor 的去重必须**按实际产出**：维护 `emittedCodes`，只有"本次确实 push 了更详细 finding"的 code 才跳过。**不允许静态跳过名单**——静态名单本身就是第二份真相，`defaults.profile` 的漏报正是它造成的（名单里跳过、自有检查又因子段缺失不触发）。
+
+`??= BRAND` 留在 `loadConfig`（归一化），**不能进 `collectConfigIssues`**：一旦把缺省填进去，keyword 的"字段缺失"态在 doctor 眼里永远等于 `BRAND`，info 档会消失。每个 issue 转 finding 时必须带 `fix`（可复制执行），否则 `timeout_sec` 会被标红却无从下手。
+
+### 12.3 `executors.<name>.bin` 定点修复（D10 / Q3 更正）
+
+键形状白名单：`executors.<name>.bin`，约束三条：
+
+1. `<name>` 必须已存在于 `cfg.executors`——不静默创建，未知名字报错并列出现有 executor；
+2. 值必须通过 `resolveBinPath()`——写一个不可执行的路径正是在重犯要修的错；
+3. 不引入 `executors.*` 通配，其余路径仍拒绝。
+
+doctor 的 fix 文案随之从"跑 `init`"改成定点命令；`init` 降为"多个 executor 一起改"时的备选。
+
+与 §12.1 的互动：本键要求 name 已存在，因此"装了但不在 `PATH`"必须由 `profile create --bin` 解决——两条路径不能互相堵死。
+
+### 12.4 报告与实际能力对齐
+
+| 问题（实测） | 修法 |
+| :--- | :--- |
+| 默认 profile 不存在标了 `fixable: true`，但 `applyFixes` 没有这个分支，`--fix` 输出"没有可自动修复的问题" | `fixable` 由 `applyFixes` 的**能力注册表**派生（同一个 registry 既驱动修复又驱动标记），不再手写 |
+| 明文 webhook 标 `fixable: true`，但 `applyFixes` 只处理 `^https://`；`{env:bad_lower}` 被报成"明文凭证泄露"，`--fix` 静默不动 | 拆成两种：**明文**（`^https?://`）才是凭证泄露且可修；**占位符形状不合规**（非 `{env:大写}`）单独判 error、只给文案不可修 |
+| `doctor.ts:376` 的 fix 文案是 `agent-ex config use …`，§12.1 之后该命令不存在 | 改成 `agent-ex profile use <存在的 profile>`（进 §12.5 迁移清单，靠测试钉住文案可执行） |
+| `--fix --send` 先发"修复前"的自检卡（可能注定被拒），再修 | 先修、再 `loadConfig` 复验、最后**只发一张**修复后的卡；卡里的 `code` 才是用户需要的结论 |
+| CLI 错误边界仍打印栈帧（`8d2b2db` 只挡住了 Node 页脚） | `e instanceof Error ? e.message : e`；栈留给调试开关或不打印，测试断言输出不含 `at ` 栈行 |
+| `parseInt` 宽松：`"3600abc"` → 3600、`"3.7"` → 3 | 先 `/^\d+$/` 再 `Number()`，非法输入直接拒绝 |
+
+### 12.5 测试稳定性与迁移清单
+
+**测试稳定性（实测）**：全量并行跑两次均为 `209 passed / 4 failed / 4 skipped`，失败的 4 条全是 `tests/cli-env.test.ts` 的 `Test timed out in 5000ms`；单独跑该文件 4/4 通过、约 1.3s。原因：它们 spawn `tsx` 子进程，而 `vitest.config.ts` 没有设 `testTimeout`，默认 5s 在满载并行时不够。这与 §9 刚修掉的"PATH 巧合"是同一类问题——"全绿"不能是某台机器空闲时的属性。修法：`testTimeout: 30_000`（或对该文件单独设），并让 §9 的全量数字只在干净 worktree 上引用。
+
+**迁移清单（已与代码同批完成）**：
+
+| 文件 | 改了什么 |
+| :--- | :--- |
+| `README.md` | `config use` → `profile use` / `profile create` / `profile set`；`config set` 白名单补 `executors.<name>.bin`、去掉 `defaults.profile` |
+| `skills/agent-ex-dispatch/SKILL.md` | executor bin 的建议从"手改 config.json"改成 `agent-ex config set executors.<name>.bin <绝对路径>` |
+| `src/doctor.ts` | fix 文案 → `agent-ex profile use <存在的 profile>`；executor bin 的 fix → `agent-ex config set executors.<name>.bin <绝对路径>` |
+| `src/init.ts` 的 nextSteps | 补一句"或用定点命令：`agent-ex config set` / `agent-ex profile set`" |
+| `src/cli.ts` | 新增 `runProfile`；`runConfig` 去掉 `use`；usage 文案同步 |
+| `src/server.ts` | 分派 `profile` 子命令；错误边界只打 message |
+| `tests/config-cmd.test.ts` | `use` 用例拆成 `use` / `create` 两组，并补 `profile set` 的键约束用例 |
+
+### 12.6 验收（全部通过）
+
+| 验收项 | 落地测试 |
+| :--- | :--- |
+| `collectConfigIssues` 每条规则一个 code、每条 issue 带 fix | `tests/config-issues.test.ts`（14 条） |
+| `defaults.timeout_sec: "3600"` 与 `defaults: {}` 都被 doctor 报成 error | `tests/doctor.test.ts`（假阴性回归主用例） |
+| doctor 只跳过**本次实际产出**的 code+subject | 同上（多个 executor 都有问题 ⇒ 两条都报） |
+| `config set executors.<name>.bin`：未知名字/不可执行路径拒绝、合法路径写入 | `tests/config-cmd.test.ts` |
+| `profile use` 不存在名字时不创建；`profile create` 只创建不切默认 | `tests/config-cmd.test.ts` + `tests/cli-env.test.ts`（进程级） |
+| `profile create --bin` 在 PATH 无 opencode 时能落地 | `tests/config-cmd.test.ts`（临时清空 PATH，精确复现"装了但不在 PATH"） |
+| `profile set` 拒绝 `NODE_OPTIONS`/`PATH`/`LD_*`/`DYLD_*`、空值、坏 `OPENCODE_CONFIG_CONTENT` | `tests/config-cmd.test.ts` + `tests/cli-env.test.ts` |
+| 物化后修改 profile env 不污染 `BUILTIN_PROFILES` | `tests/config-cmd.test.ts` |
+| `fixable` 与 `applyFixes` 能力表一致；`{env:bad_lower}` 不被报成"明文" | `tests/doctor.test.ts` |
+| `--fix --send` 只发一张修复后的卡 | `tests/cli-env.test.ts`（假飞书计数 `cardCount`） |
+| CLI 错误输出不含栈帧；`"3600abc"` 被拒绝 | `tests/cli-env.test.ts` / `tests/config-cmd.test.ts` |
+
+**全量**：266 passed / 22 files，`tsc --noEmit` 0 error。`vitest.config.ts` 已加 `testTimeout: 30_000`（§12.5 的稳定性问题）。
+
+**变异验证**（逐个实跑，全部能转红）：
+
+| 变异 | 结果 |
+| :--- | :--- |
+| doctor 不消费 `collectConfigIssues` | 2 红 |
+| 静态跳过名单（替代动态去重） | 1 红（`timeout_sec` 漏报） |
+| `profile set` 放开 `NODE_OPTIONS`/`PATH`/`LD_*` | 1 红 |
+| `config set` 放开成通用点路径 | 11 红 |
+| doctor 不保护"executor 缺 bin" | 1 红（且实测会崩） |
+| `--fix --send` 回到"先发卡再修" | 1 红（发两张卡） |
+| `profile use` 恢复隐式创建 | 1 红 |
+| CLI 错误边界改回 `console.error(msg, e)` | 1 红（栈帧回来） |
+
+**实施顺序**：§12.2 → §12.4 → §12.1 + §12.5 迁移清单 → §12.3（已按此顺序完成）。
+
+**实现中额外发现并修掉的 bug**（不在原评审清单里）：
+1. **doctor 在"executor 缺 `bin` 字段"时直接崩**（`resolveBinPath(undefined)` → `Cannot read properties of undefined`）⇒ 一条 finding 都报不出来。体检工具在配置坏了的时候最不能崩——那正是它该出结论的时刻。已加保护 + 回归用例。
+2. **`config set` 整数解析宽松**（§12.4 已列，本轮实装）：`"3600abc"` / `"3.7"` 现在被拒绝。

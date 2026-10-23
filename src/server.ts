@@ -115,8 +115,9 @@ if (sub === "init") {
   runInit()
     .then(() => process.exit(0))
     .catch((e) => { console.error("[agent-ex] init failed:", e); process.exit(1); });
-} else if (sub === "doctor" || sub === "config") {
-  // CLI 子命令：doctor（体检）/ config（改配置）。动态 import 避免 MCP 启动时拉入这些模块。
+} else if (sub === "doctor" || sub === "config" || sub === "profile") {
+  // CLI 子命令：doctor（体检）/ config（改全局字段）/ profile（改 profile）。
+  // 动态 import 避免 MCP 启动时拉入这些模块。
   //
   // ⚠️ 必须先加载 $AGENT_EX_HOME/.env：
   // MCP 路径的 loadEnvFile() 在 main() 里，而这个分支**根本不会走到 main()**（模块顶层直接分派）。
@@ -130,12 +131,16 @@ if (sub === "init") {
   // 与 init 分支同一套兜底：未预期的异常不该漏一个裸 Node 栈。
   // ⚠️ CLI 与 MCP 侧的异常体验必须对等——MCP 侧由 SDK 捕获（返回 isError 结果，
   // agent 看到的是一句错误信息），CLI 侧没人接就变成一屏栈加 exit 1。
+  //
+  // 只打 message 不打栈：栈是给开发者看的，用户要的是"哪儿错了"。
+  // （2026-10-23 实测：`console.error(msg, e)` 会连着打 3 行 `at ...` 栈帧。）
   try {
-    const { runDoctor, runConfig } = await import("./cli.js");
-    const code = sub === "doctor" ? await runDoctor(process.argv.slice(3)) : runConfig(process.argv.slice(3));
+    const { runDoctor, runConfig, runProfile } = await import("./cli.js");
+    const argv = process.argv.slice(3);
+    const code = sub === "doctor" ? await runDoctor(argv) : sub === "config" ? runConfig(argv) : runProfile(argv);
     process.exit(code);
   } catch (e) {
-    console.error(`[agent-ex] ${sub} failed:`, e);
+    console.error(`[agent-ex] ${sub} failed: ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
 } else {
