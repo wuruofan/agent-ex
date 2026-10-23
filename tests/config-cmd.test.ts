@@ -77,13 +77,13 @@ describe("config set —— 白名单字段", () => {
 
   it("拒绝白名单外的 key（防止手抖写坏 config）", () => {
     seed();
-    expect(() => setConfigValue(home, "notify.webhook_url", "x")).toThrow(/unknown key/);
-    expect(() => setConfigValue(home, "profiles.default.env", "x")).toThrow(/unknown key/);
+    expect(() => setConfigValue(home, "notify.webhook_url", "x")).toThrow(/Unknown key/);
+    expect(() => setConfigValue(home, "profiles.default.env", "x")).toThrow(/Unknown key/);
   });
 
   it("defaults.profile 不在白名单里（切默认只走 profile use）", () => {
     seed();
-    expect(() => setConfigValue(home, "defaults.profile", "other")).toThrow(/unknown key/);
+    expect(() => setConfigValue(home, "defaults.profile", "other")).toThrow(/Unknown key/);
   });
 
   it("类型不对时拒绝且不写盘", () => {
@@ -123,7 +123,7 @@ describe("config set executors.<name>.bin —— 定点修坏 bin", () => {
 
   it("executor 不存在时拒绝（不静默创建）", () => {
     seed();
-    expect(() => setConfigValue(home, "executors.ghost.bin", "/bin/ls")).toThrow(/unknown executor/);
+    expect(() => setConfigValue(home, "executors.ghost.bin", "/bin/ls")).toThrow(/Unknown executor/);
     expect(readConfig(home).executors.ghost).toBeUndefined();
   });
 
@@ -143,7 +143,7 @@ describe("profile use —— 纯切换，不物化", () => {
 
   it("切到不存在的 profile 时报错并列出可选项（不隐式创建）", () => {
     seed({ profiles: { a: { executor: "claude", env: {} } } });
-    expect(() => useProfile(home, "nope")).toThrow(/unknown profile/);
+    expect(() => useProfile(home, "nope")).toThrow(/Unknown profile/);
     expect(() => useProfile(home, "nope")).toThrow(/a/);
     // 没有被创建
     expect(readConfig(home).profiles.nope).toBeUndefined();
@@ -217,13 +217,38 @@ describe("profile create —— 物化内置预设（只创建，不切默认）
 
   it("非内置名报错", () => {
     seed();
-    expect(() => createProfile(home, "nope")).toThrow(/unknown built-in/);
+    expect(() => createProfile(home, "nope")).toThrow(/Unknown built-in/);
   });
 
   it("已存在时报错并指向 profile use", () => {
     seed();
     createProfile(home, "opencode-zen-free", { bin: "/bin/ls" });
     expect(() => createProfile(home, "opencode-zen-free")).toThrow(/already exists/);
+  });
+
+  /**
+   * `create --use` 一步到位：物化 + 切默认。
+   * 为什么不让 `use` 自动物化：`create` 可能需要 --bin（opencode 常在 ~/.opencode/bin），
+   * 而 `use` 是纯切换，不该悄悄写新 profile / executor —— 半步失败就会留下半截配置。
+   */
+  it("--use 在创建的同时切默认，且不改动其它 profile", () => {
+    seed({
+      profiles: { keep: { executor: "claude", env: {} } },
+      defaults: { profile: "keep", timeout_sec: 3600 },
+    });
+    const r = createProfile(home, "opencode-zen-free", { bin: "/bin/ls", use: true });
+    expect(r.switched_default).toBe(true);
+    const c = readConfig(home);
+    expect(c.profiles["opencode-zen-free"]).toBeDefined();
+    expect(c.profiles.keep).toBeDefined();
+    expect(c.defaults.profile).toBe("opencode-zen-free");
+  });
+
+  it("不加 --use 时不切默认（保持纯创建）", () => {
+    seed();
+    const r = createProfile(home, "opencode-zen-free", { bin: "/bin/ls" });
+    expect(r.switched_default).toBe(false);
+    expect(readConfig(home).defaults.profile).toBe("default");
   });
 
   it("内置 profile 清单就是那一个免费模型", () => {
@@ -254,7 +279,7 @@ describe("profile set —— 改 profile 的字段（键必须受约束）", () 
 
   it("executor 指向不存在的名字时拒绝", () => {
     seed();
-    expect(() => setProfileValue(home, "default", "executor", "nope")).toThrow(/unknown executor/);
+    expect(() => setProfileValue(home, "default", "executor", "nope")).toThrow(/Unknown executor/);
   });
 
   it("拒绝会改写 worker 启动面的 key（NODE_OPTIONS ≈ 任意代码执行）", () => {
@@ -279,7 +304,7 @@ describe("profile set —— 改 profile 的字段（键必须受约束）", () 
 
   it("profile 不存在时报错", () => {
     seed();
-    expect(() => setProfileValue(home, "ghost", "SOME_KEY", "x")).toThrow(/unknown profile/);
+    expect(() => setProfileValue(home, "ghost", "SOME_KEY", "x")).toThrow(/Unknown profile/);
   });
 
   it("OPENCODE_CONFIG_CONTENT 必须是合法 JSON 且含 model", () => {

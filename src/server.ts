@@ -8,6 +8,8 @@ import { setStartedAt, isTestMode } from "./tools/test-helpers.js";
 import { ensureRuntimeDirs } from "./paths.js";
 import { loadEnvFile } from "./env-file.js";
 import { BRAND } from "./brand.js";
+import { ansi } from "./ansi.js";
+import { MARK } from "./marks.js";
 
 /**
  * ⚠️ 这里的 import 是**故意不全**的：
@@ -123,6 +125,19 @@ async function main(): Promise<void> {
 }
 
 const sub = process.argv[2];
+
+const USAGE = [
+  `usage: ${BRAND} [command]`,
+  "",
+  "commands:",
+  "  init                            interactive onboarding (writes config.json)",
+  "  doctor [--fix] [--send]         check the notification path",
+  "  config [list|set]               global settings",
+  "  profile [list|use|create|set]   profiles (executor + env a task runs with)",
+  "",
+  "no command: start the MCP server on stdio (how MCP clients launch it)",
+].join("\n");
+
 if (sub === "init") {
   // 交互式 onboarding：探测 CLI、生成 config.json。动态 import 避免正常 MCP 启动拉入 readline。
   const { runInit } = await import("./init.js");
@@ -157,6 +172,14 @@ if (sub === "init") {
     console.error(`[agent-ex] ${sub} failed: ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
+} else if (sub === "--help" || sub === "-h") {
+  console.log(USAGE);
+} else if (sub && !sub.startsWith("-")) {
+  // 拼错的子命令曾经会**静默变成 MCP server**（挂在 stdio 上等输入），
+  // 用户只看到一行 "mcp server ready" —— 比报错更难懂。
+  // MCP 客户端是无参启动的，所以"有非选项参数但认不出"一定是手敲错了。
+  console.error(`${ansi.red(MARK.error)} unknown command "${sub}"\n\n${USAGE}`);
+  process.exit(2);
 } else {
   main().catch((e) => { console.error("[agent-ex] fatal:", e); process.exit(1); });
 }

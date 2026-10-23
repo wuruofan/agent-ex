@@ -77,6 +77,20 @@ export function writeConfig(home: string, cfg: Config): void {
   writeFileSync(configPath(home), JSON.stringify(cfg, null, 2) + "\n");
 }
 
+/**
+ * OPENCODE_CONFIG_CONTENT 是一整段 JSON；直接把它当 model 打印会撑爆一行。
+ * 只取其中的 `model` 字段（解析失败就原样返回，宁可难看也别吞掉信息）。
+ */
+function opencodeModel(raw: string | undefined): string {
+  if (!raw) return "";
+  try {
+    const m = (JSON.parse(raw) as { model?: unknown }).model;
+    return typeof m === "string" ? m : raw;
+  } catch {
+    return raw;
+  }
+}
+
 /** 列出当前配置概览。 */
 export function listConfig(home: string = agentExHome()): ConfigListResult {
   const c = readConfig(home);
@@ -84,7 +98,7 @@ export function listConfig(home: string = agentExHome()): ConfigListResult {
     profiles: Object.entries(c.profiles ?? {}).map(([name, p]) => ({
       name,
       executor: p.executor,
-      model: p.env?.ANTHROPIC_MODEL ?? p.env?.OPENCODE_CONFIG_CONTENT ?? "",
+      model: p.env?.ANTHROPIC_MODEL ?? opencodeModel(p.env?.OPENCODE_CONFIG_CONTENT),
       is_default: c.defaults?.profile === name,
       // 只列环境变量**名字**（不列值）：值可能是大段配置内容，名字才回答
       // "这个 profile 会注入哪些变量"（如内置 profile 的 ZEN_FREE_PREFER）
@@ -120,7 +134,7 @@ export function setConfigValue(home: string, key: string, rawValue: string): { k
     const name = m[1];
     if (!c.executors?.[name]) {
       throw new Error(
-        `unknown executor "${name}" — existing: ${Object.keys(c.executors ?? {}).join(", ") || "(none)"}; ` +
+        `Unknown executor "${name}" — existing: ${Object.keys(c.executors ?? {}).join(", ") || "(none)"}; ` +
         `this command cannot create an executor — run "agent-ex profile create <builtin>" first`,
       );
     }
@@ -138,7 +152,7 @@ export function setConfigValue(home: string, key: string, rawValue: string): { k
   const spec = WRITABLE[key];
   if (!spec) {
     throw new Error(
-      `unknown key "${key}" — writable keys: ${Object.keys(WRITABLE).join(", ")}, executors.<name>.bin`,
+      `Unknown key "${key}" — writable keys: ${Object.keys(WRITABLE).join(", ")}, executors.<name>.bin`,
     );
   }
   let value: unknown;
@@ -201,6 +215,8 @@ export interface ProfileCreateResult {
   executor: string;
   /** executor 是这次新建的吗（false = 复用了已有的）。 */
   executor_created: boolean;
+  /** 是否顺带切成了默认 profile（--use）。 */
+  switched_default: boolean;
 }
 
 /**
@@ -216,12 +232,12 @@ export function useProfile(home: string, name: string): ProfileUseResult {
   if (!c.profiles?.[name]) {
     if (BUILTIN_PROFILES[name]) {
       throw new Error(
-        `profile "${name}" not created yet — run "agent-ex profile create ${name}" first ` +
-        `(built-in presets must be materialized; create does not switch the default)`,
+        `profile "${name}" not created yet — run "agent-ex profile create ${name} --use" ` +
+        `(materializes the built-in preset and switches the default in one step)`,
       );
     }
     throw new Error(
-      `unknown profile "${name}" — existing: ${Object.keys(c.profiles ?? {}).join(", ") || "(none)"}`,
+      `Unknown profile "${name}" — existing: ${Object.keys(c.profiles ?? {}).join(", ") || "(none)"}`,
     );
   }
   c.defaults.profile = name;
@@ -230,19 +246,21 @@ export function useProfile(home: string, name: string): ProfileUseResult {
 }
 
 /**
- * 物化一个内置 profile 预设 —— **只创建，不切默认**。
+ * 物化一个内置 profile 预设 —— 默认**只创建，不切默认**。
  *
  * `--bin` 是必需的逃生口，不是装饰：内置 executor（opencode）常常不在 PATH 上
  * （本机就装在 ~/.opencode/bin），而 `validateConfig` 会在落盘前拒绝不可执行的 bin
  * ⇒ executor 条目根本写不进去 ⇒ 用户被"create 失败"与"set executors.<name>.bin 要求
  * name 已存在"两条规则夹死。给了 --bin 就能一次落地。
+ *
+ * `use` 传 true 时在创建后顺带切默认（`agent-ex profile create <name> --use` 一步到位）。
  */
-export function createProfile(home: string, name: string, opts: { bin?: string } = {}): ProfileCreateResult {
+export function createProfile(home: string, name: string, opts: { bin?: string; use?: boolean } = {}): ProfileCreateResult {
   const c = readConfig(home);
   const builtin = BUILTIN_PROFILES[name];
   if (!builtin) {
     throw new Error(
-      `unknown built-in profile "${name}" — built-in: ${Object.keys(BUILTIN_PROFILES).join(", ")}`,
+      `Unknown built-in profile "${name}" — built-in: ${Object.keys(BUILTIN_PROFILES).join(", ")}`,
     );
   }
   if (c.profiles?.[name]) {
@@ -263,8 +281,9 @@ export function createProfile(home: string, name: string, opts: { bin?: string }
   // 深拷贝 env：直接挂 builtin.env 会让后续的 `profile set` 原地改到**进程内的常量**上
   // （同一进程里再物化一次就会带上被改过的值）。
   c.profiles[name] = { executor: builtin.executor, env: { ...builtin.env } };
+  if (opts.use) c.defaults.profile = name;
   writeConfig(home, c);
-  return { profile: name, desc: builtin.desc, executor: builtin.executor, executor_created: executorCreated };
+  return { profile: name, desc: builtin.desc, executor: builtin.executor, executor_created: executorCreated, switched_default: Boolean(opts.use) };
 }
 
 export interface ProfileSetResult {
@@ -295,7 +314,7 @@ export function setProfileValue(
   const p = c.profiles?.[profileName];
   if (!p) {
     throw new Error(
-      `unknown profile "${profileName}" — existing: ${Object.keys(c.profiles ?? {}).join(", ") || "(none)"}`,
+      `Unknown profile "${profileName}" — existing: ${Object.keys(c.profiles ?? {}).join(", ") || "(none)"}`,
     );
   }
   const value = rawValue.trim();
@@ -305,7 +324,7 @@ export function setProfileValue(
   if (key === "executor") {
     if (!c.executors?.[value]) {
       throw new Error(
-        `unknown executor "${value}" — existing: ${Object.keys(c.executors ?? {}).join(", ") || "(none)"}`,
+        `Unknown executor "${value}" — existing: ${Object.keys(c.executors ?? {}).join(", ") || "(none)"}`,
       );
     }
     p.executor = value;

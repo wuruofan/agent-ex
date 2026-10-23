@@ -180,6 +180,24 @@ describe("doctor —— 把证据聚合成结论", () => {
     expect(titles).toContain("\"b\"");
   });
 
+  /**
+   * error 必须排在 warn 前面。
+   * 反例（未排序时的实际输出）：dry_run 的 warn 排第一，用户扫两行就以为
+   * "只是没开投递"，而真正的病灶（明文 webhook、旧关键词）在屏幕外。
+   */
+  it("findings 按级别排序：error 在前，warn 在后", async () => {
+    writeCfg(baseCfg({
+      // warn：dry_run=true
+      // error：明文 webhook
+      notify: { feishu_webhook_url: "https://open.feishu.cn/hook/secret", dry_run: true, keyword: BRAND },
+    }));
+    const r = await doctor({ home });
+    expect(r.findings.length).toBeGreaterThan(1);
+    expect(r.findings[0].severity).toBe("error");
+    const lastSeverity = r.findings[r.findings.length - 1].severity;
+    expect(["warn", "info", "ok"]).toContain(lastSeverity);
+  });
+
   it("占位符形状不合规（如 {env:bad_lower}）不被误报成明文凭证", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:bad_lower}", dry_run: true, keyword: BRAND } }));
     const r = await doctor({ home });

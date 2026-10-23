@@ -94,7 +94,7 @@ describe("init 的 CLI 探测与选择", () => {
     expect(text).not.toContain("Which agent CLI to use");
     expect(text).not.toContain("Executor to configure");
     // 直接用探测到的那个
-    expect(text).toContain("using opencode");
+    expect(text).toContain("Using opencode");
     // 而且配置里就是 opencode（不是没装的那个 claude）
     const cfg = readCfg(home);
     expect(Object.keys(cfg.executors)).toEqual(["opencode"]);

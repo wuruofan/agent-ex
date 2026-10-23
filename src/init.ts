@@ -391,13 +391,13 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
       detected = found[0].bin;
       // 说清"为什么是它"：用户得知道这是**唯一**可用的，而不是我们随便挑的
       const missing = AGENT_CLIS.filter((n) => n !== executor).join(", ");
-      console.log(`${ansi.green(MARK.ok)} using ${ansi.bold(executor)} ${ansi.dim(`(${detected}) — the only one installed; ${missing} not found`)}\n`);
+      console.log(`${ansi.green(MARK.ok)} Using ${ansi.bold(executor)} ${ansi.dim(`(${detected}) — the only one installed; ${missing} not found`)}\n`);
     } else if (found.length > 1) {
       const names = found.map((f) => f.name);
       const answer = (await ask(rl, `Which agent CLI to use? (${names.join("/")})`, found[0].name)).toLowerCase();
       const chosen = found.find((f) => f.name === answer);
       if (!chosen) {
-        console.log(`unknown agent CLI "${answer}" — using ${found[0].name}`);
+        console.log(`${ansi.yellow(MARK.warn)} Unknown agent CLI "${answer}" — using ${found[0].name}`);
       }
       executor = (chosen ?? found[0]).name;
       detected = (chosen ?? found[0]).bin;
@@ -405,14 +405,14 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
       // 一个都没找到：只能问用户要绝对路径
       executor = (await ask(rl, "Agent CLI to configure (claude/opencode)", "claude")).toLowerCase() || "claude";
       if (executor !== "claude" && executor !== "opencode") {
-        console.log(`unknown agent CLI "${executor}", falling back to claude`);
+        console.log(`${ansi.yellow(MARK.warn)} Unknown agent CLI "${executor}", falling back to claude`);
         executor = "claude";
       }
     }
 
     let bin = (await ask(rl, `Absolute path to ${executor} binary`, detected ?? "")).trim();
     if (!bin && detected) bin = detected;
-    if (!bin) { console.error("no binary path provided; aborting."); process.exit(1); }
+    if (!bin) { console.error(`${ansi.red(MARK.error)} No binary path provided; aborting.`); process.exit(1); }
 
     const profile = (await ask(rl, "Profile name", "default")).trim() || "default";
 
@@ -436,7 +436,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
       const secret = await collectSecret(rl, { label: "API key", varName: tokenVar, detect: presetName !== "custom" });
       if (secret) envUpdates[tokenVar] = secret;
     } else {
-      console.log("opencode: the provider is managed by opencode itself (opencode auth login / opencode.json); agent-ex only launches it. For extra env vars, add them to the profile's env later.");
+      console.log(`${ansi.dim(MARK.info)} opencode: the provider is managed by opencode itself (opencode auth login / opencode.json); agent-ex only launches it. For extra env vars, add them to the profile's env later.`);
       // zen free：零密钥、模型集会轮换 → 用 {model:zen-free} 占位符让 runner 每次 spawn 时动态解析。
       const zen = await askYesNo(rl, "Use opencode zen free model (auto-resolving, no key needed)", true);
       if (zen) {
@@ -471,7 +471,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
     try {
       validateConfig(config as Config);
     } catch (e) {
-      console.error(`config is invalid, nothing written: ${(e as Error).message}`);
+      console.error(`${ansi.red(MARK.error)} Config is invalid, nothing written: ${(e as Error).message}`);
       process.exit(1);
     }
 
@@ -480,27 +480,27 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
       const bak = `${cfgPath}.bak.${timestampSuffix()}`;
       try {
         writeFileSync(bak, readFileSync(cfgPath));
-        console.log(`backed up existing config -> ${bak}`);
+        console.log(`${ansi.dim(MARK.info)} Backed up existing config -> ${bak}`);
       } catch (e) {
-        console.error(`could not back up existing config: ${(e as Error).message}`);
+        console.error(`${ansi.red(MARK.error)} Could not back up existing config: ${(e as Error).message}`);
       }
     }
 
     writeFileSync(cfgPath, JSON.stringify(config, null, 2) + "\n");
-    console.log(`\nwrote ${cfgPath}`);
+    console.log(`\n${ansi.dim(MARK.info)} Wrote ${cfgPath}`);
 
     const written = writeEnvFile(home, envUpdates);
     if (written.length > 0) {
-      console.log(`wrote ${join(home, ".env")} (chmod 600): ${written.join(", ")}`);
+      console.log(`${ansi.dim(MARK.info)} Wrote ${join(home, ".env")} (chmod 600): ${written.join(", ")}`);
     } else {
-      console.log(".env unchanged (no new secrets written)");
+      console.log(`${ansi.dim(MARK.info)} .env unchanged (no new secrets written)`);
     }
 
     try {
       loadConfig(home);
-      console.log(`config valid ${ansi.green(MARK.ok)}`);
+      console.log(`${ansi.green(MARK.ok)} Config valid`);
     } catch (e) {
-      console.error("config written but self-check failed:", (e as Error).message);
+      console.error(`${ansi.red(MARK.error)} Config written but self-check failed: ${(e as Error).message}`);
       process.exit(1);
     }
 

@@ -467,7 +467,7 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
     if (typeof bin !== "string" || bin === "") {
       findings.push({
         severity: "error",
-        title: `executor "${name}" has no bin`,
+        title: `Executor "${name}" has no bin`,
         detail: `executors.${name}.bin is missing or not a string -> the agent cannot be spawned for dispatch.`,
         fix: `agent-ex config set executors.${name}.bin <absolute path>`,
       });
@@ -477,7 +477,7 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
     if (resolveBinPath(bin) === null) {
       findings.push({
         severity: "error",
-        title: `executor "${name}" bin is unusable`,
+        title: `Executor "${name}" bin is unusable`,
         detail: `${bin} does not exist or is not executable`,
         // 定点修复：不是"跑 init 重配一遍"（那是重武器），而是改这一个字段。
         fix: `agent-ex config set executors.${name}.bin <absolute path>`,
@@ -568,6 +568,11 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
       });
     }
   }
+
+  // 一屏里最该被一眼抓到的是 error。按级别排序，否则 warn（比如 dry_run）会把
+  // 真正的病灶挤到屏幕外——用户扫完前两行就以为"只是没开投递"。
+  const RANK: Record<string, number> = { error: 0, warn: 1, info: 2, ok: 3 };
+  findings.sort((a, b) => (RANK[a.severity] ?? 9) - (RANK[b.severity] ?? 9));
 
   const hasError = findings.some((f) => f.severity === "error");
   const summary = hasError

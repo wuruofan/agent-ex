@@ -292,6 +292,28 @@ describe("agent-ex profile（CLI 路径）", () => {
     }
   });
 
+  it("profile create --use 一步到位：物化 + 切默认，不再提示「Next」", async () => {
+    const pHome = mkdtempSync(join(tmpdir(), "aex-cli-prof5-"));
+    try {
+      writeFileSync(join(pHome, "config.json"), JSON.stringify({
+        executors: { fake: { bin: "/bin/ls" } },
+        profiles: { p1: { executor: "fake", env: {} } },
+        notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "agent-ex" },
+        defaults: { profile: "p1", timeout_sec: 60 },
+      }, null, 2));
+      const r = await runCliAt(pHome, ["profile", "create", "opencode-zen-free", "--bin", "/bin/ls", "--use"]);
+      expect(r.code).toBe(0);
+      const cfg = JSON.parse(readFileSync(join(pHome, "config.json"), "utf8"));
+      expect(cfg.profiles["opencode-zen-free"]).toBeDefined();
+      // 已经切好了：默认就是它
+      expect(cfg.defaults.profile).toBe("opencode-zen-free");
+      expect(r.out).toContain("default profile = opencode-zen-free");
+      expect(r.out).not.toContain("Next:");
+    } finally {
+      rmSync(pHome, { recursive: true, force: true });
+    }
+  });
+
   it("profile set 拒绝会改写 worker 启动面的 key（NODE_OPTIONS）", async () => {
     const pHome = mkdtempSync(join(tmpdir(), "aex-cli-prof4-"));
     try {

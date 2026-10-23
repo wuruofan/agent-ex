@@ -302,16 +302,17 @@ config set defaults.timeout_sec 5400
 config set executors.<name>.bin <path>     # 定点修复坏 bin（<name> 必须已存在）
 
 profile list
-profile use <name>                         # 只切换，必须已存在
-profile create <builtin> [--bin <path>]    # 物化预设（只创建、不切默认）
+profile use <name>                                     # 只切换，必须已存在
+profile create <builtin> [--bin <path>] [--use]       # 物化预设；默认不切默认，--use 一步到位
 profile set <name> <KEY> <value>           # profile env 字段（如 ZEN_FREE_PREFER）
 ```
 
 规则：
 
 - **`defaults.profile` 移出 `config set` 白名单**，切默认只保留 `profile use`——两个入口并存本身就是概念重复。
-- `profile use` 遇到不存在的名字：命中内置名 → 提示 `profile create <name>`；否则列出现有名字。
-- `profile create` 只创建；完成后打印下一条命令（`profile use …`）。
+- `profile use` 遇到不存在的名字：命中内置名 → 提示 `profile create <name> --use`（一步到位）；否则列出现有名字。
+- `profile create` 默认只创建，完成后打印下一条命令（`profile use …`）；**`--use` 让"物化 + 切默认"合为一条命令**（同一次写盘，不会留下半截配置）。
+  - 为什么不让 `profile use` 自动物化：`create` 可能需要 `--bin`（`opencode` 常装在 `~/.opencode/bin`，不在 `PATH`），而 `use` 应当是**纯切换无副作用**——否则"只想切一下"也会往 config 里写新 profile 和 executor，与 D9 拆分的初衷相悖。
 - **`profile create --bin <path>` 是必需的重载，不是可选装饰**：内置 executor（`opencode`）不在 `PATH` 时，`validateConfig` 会在落盘前拒绝，executor 条目因此不存在，而 §12.3 的 `executors.<name>.bin` 要求 name 已存在 ⇒ 用户被两条规则夹死。`useProfile` 里已有 `opts.bin`，只需接到 CLI。没有 `--bin` 且探测不到时，错误信息必须**直接给出** `profile create <builtin> --bin <path>`。
 - **`profile set` 必须有键约束**（否则 D5/D10 的"防手抖"在 env 上开了更大的口子）：
   - key 匹配 `^[A-Z][A-Z0-9_]*$`，value 非空；
@@ -399,7 +400,7 @@ doctor 的 fix 文案随之从"跑 `init`"改成定点命令；`init` 降为"多
 | `defaults.timeout_sec: "3600"` 与 `defaults: {}` 都被 doctor 报成 error | `tests/doctor.test.ts`（假阴性回归主用例） |
 | doctor 只跳过**本次实际产出**的 code+subject | 同上（多个 executor 都有问题 ⇒ 两条都报） |
 | `config set executors.<name>.bin`：未知名字/不可执行路径拒绝、合法路径写入 | `tests/config-cmd.test.ts` |
-| `profile use` 不存在名字时不创建；`profile create` 只创建不切默认 | `tests/config-cmd.test.ts` + `tests/cli-env.test.ts`（进程级） |
+| `profile use` 不存在名字时不创建；`profile create` 默认不切默认、`--use` 才切 | `tests/config-cmd.test.ts` + `tests/cli-env.test.ts`（进程级） |
 | `profile create --bin` 在 PATH 无 opencode 时能落地 | `tests/config-cmd.test.ts`（临时清空 PATH，精确复现"装了但不在 PATH"） |
 | `profile set` 拒绝 `NODE_OPTIONS`/`PATH`/`LD_*`/`DYLD_*`、空值、坏 `OPENCODE_CONFIG_CONTENT` | `tests/config-cmd.test.ts` + `tests/cli-env.test.ts` |
 | 物化后修改 profile env 不污染 `BUILTIN_PROFILES` | `tests/config-cmd.test.ts` |
@@ -407,12 +408,13 @@ doctor 的 fix 文案随之从"跑 `init`"改成定点命令；`init` 降为"多
 | `--fix --send` 只发一张修复后的卡 | `tests/cli-env.test.ts`（假飞书计数 `cardCount`） |
 | CLI 错误输出不含栈帧；`"3600abc"` 被拒绝 | `tests/cli-env.test.ts` / `tests/config-cmd.test.ts` |
 
-**全量**：297 passed / 24 files，`tsc --noEmit` 0 error。`vitest.config.ts` 已加 `testTimeout: 30_000`（§12.5 的稳定性问题）。
+**全量**：301 passed / 24 files，`tsc --noEmit` 0 error。`vitest.config.ts` 已加 `testTimeout: 30_000`（§12.5 的稳定性问题）。
 
 **变异验证**（逐个实跑，全部能转红）：
 
 | 变异 | 结果 |
 | :--- | :--- |
+| findings 不排序（去掉 `RANK` 那两行） | 1 红（`首条是 error`） |
 | doctor 不消费 `collectConfigIssues` | 2 红 |
 | 静态跳过名单（替代动态去重） | 1 红（`timeout_sec` 漏报） |
 | `profile set` 放开 `NODE_OPTIONS`/`PATH`/`LD_*` | 1 红 |
@@ -480,3 +482,20 @@ doctor 的 fix 文案随之从"跑 `init`"改成定点命令；`init` 降为"多
    - 全部用户可见文案统一为英文（推翻第 6 条那条"doctor 保持中文"的判断）：`doctor.ts` 的 `title`/`detail`/`summary`、`FEISHU_ERRORS`、`config-cmd.ts` 的 `WRITABLE.desc` 与 `BUILTIN_PROFILES.desc`、`config.ts` 的 fix 串。
    - 回归防线 `tests/user-facing-text.test.ts`（11 条）：扫描 6 个 CLI 界面模块，**注释之外不得有 CJK**、不得出现裸符号（`✗✓⚠❓✅❌±` 只能来自 `marks.ts`）、符号必须是单码点且不是 emoji、`-`/`+`/`±` 的映射固定、`→` 只在 `CMD` 里出现。注释用中文不受影响——那是给开发者看的。
    > ⚠️ 扫描器自己要先剥注释：源码里 `"https://…"` 的 `//` 会被朴素实现当成注释起点。实现顺序必须是**先识别字符串、再识别注释**。
+9. **命令面收尾：拼错的子命令会静默变成 MCP server**（逐条跑过全部子命令时发现）。
+   ```
+   $ agent-ex confg
+   [agent-ex] mcp server ready (stdio)      # 挂在 stdio 上等输入，用户以为卡住了
+   ```
+   根因：`server.ts` 的分派只认 `init/doctor/config/profile`，其余一律进 `main()`（那是 MCP 客户端的无参启动路径）。修法：**有非选项参数但认不出** ⇒ 打印 `✗ Unknown command "confg"` + usage（exit 2）；无参仍走 MCP。另补 `--help`。
+   同一轮还修了：
+   - **findings 不排序**：`dry_run` 的 warn 排第一，真正的病灶（明文 webhook、旧关键词）被挤出首屏。现在按 error → warn → info → ok 排序（`tests/doctor.test.ts` 钉住"首条是 error"）。
+   - **标题句首大小写不一致**：同一个列表里 `Keyword is…` 与 `executor "ghost" is unusable` 混排。规则统一为**标记后首字母大写**（`✗ Unknown key …` / `✗ Executor "ghost" bin is unusable`），`usage:` 保持小写（Unix 惯例）。
+   - **`profile list` 的 `Profiles:` 后多一个空行**：空行只用于**段间分隔**，标题紧跟内容；`config list` 的四个小节已按此对齐。
+   - **`--fix` 段尾多一个空行**（与 `renderDoctor` 自己的前导空行叠加成双空行），标题从 `--fix:` 改为加粗的 `Fixes:`。
+   - **`config list` 首行 `config:` 与段标题不同级**：改为 `Config: <path>`（路径暗色）。
+   - **缺 bin 的行只是普通文本**：`(missing — not executable)` 标红；`dry_run true` 的提示标黄（与 doctor 的 warn 同义）。
+   - **`model` 直接打印整段 `OPENCODE_CONFIG_CONTENT`**（`{"model":"{model:zen-free}",…}` 撑满一行）：只取其中的 `model` 字段，解析失败才原样输出。
+   - **`profile list` 把已物化的预设又列在"not in the config yet"下**：只列未物化的；全物化后整段消失（否则那句话是假话）。
+   - **`profile create` 无法一步切换**：新增 `--use`（同一次写盘完成"物化 + 切默认"）。`profile use` 仍**只切换**——它不该写 profile/executor，且 `create` 可能需要 `--bin`（`opencode` 常在 `~/.opencode/bin`，不在 `PATH`）。`profile use <未创建的内置名>` 的错误信息直接给出 `create <name> --use`。
+   - **`aborted.` 等句首小写**：`Aborted.` / `Using opencode …` / `Wrote <path>` / `Config valid` / `No binary path provided; aborting.`；`init` 的告警补 `!`、进度补 `·`、命令提示补 `→`。
