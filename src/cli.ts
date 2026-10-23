@@ -17,19 +17,28 @@ import {
   BUILTIN_PROFILES,
 } from "./config-cmd.js";
 import { agentExHome } from "./paths.js";
+import { ansi } from "./ansi.js";
+import { MARK, CMD, SEVERITY_MARK } from "./marks.js";
 
-const SEVERITY_MARK: Record<string, string> = { error: "✗", warn: "!", ok: "✓", info: "·" };
-
+/**
+ * 渲染体检结果。
+ *
+ * 颜色跟着**级别**走，不跟着内容走：一屏输出里最该被一眼抓到的是 error。
+ * 转义序列只在 TTY 下产生（见 ansi.ts），重定向到文件时是干净文本。
+ *
+ * 符号词汇见 marks.ts：mark 一律在行首，`→` 只用于"可复制执行的命令"。
+ */
 function renderDoctor(report: Awaited<ReturnType<typeof doctor>>): void {
-  console.log(`\n${report.summary}\n`);
+  console.log(`\n${report.ok ? ansi.green(report.summary) : ansi.bold(report.summary)}\n`);
   for (const f of report.findings) {
-    console.log(`${SEVERITY_MARK[f.severity] ?? "·"} ${f.title}`);
+    const style = SEVERITY_MARK[f.severity] ?? SEVERITY_MARK.info;
+    console.log(`${style.paint(style.mark)} ${style.paint(f.title)}`);
     console.log(`    ${f.detail}`);
-    if (f.fix) console.log(`    → ${f.fix}`);
+    if (f.fix) console.log(`    ${ansi.dim(CMD)} ${ansi.cyan(f.fix)}`);
   }
   if (report.notify_failures && report.notify_failures.logs_with_rejects > 0) {
     const s = report.notify_failures;
-    console.log(`\n历史通知失败：${s.logs_with_rejects} 个任务的日志里有拒收记录`);
+    console.log(`\n${ansi.yellow(`${s.logs_with_rejects} task log(s) contain rejected notifications`)}`);
     for (const [code, n] of Object.entries(s.by_code)) console.log(`  code=${code} × ${n}`);
   }
   console.log("");
@@ -47,10 +56,12 @@ export async function runDoctor(args: string[]): Promise<number> {
   if (fix) {
     const r = applyFixes(home);
     console.log("\n--fix:");
-    for (const a of r.applied) console.log(`  ✓ ${a}`);
-    for (const s of r.skipped) console.log(`  · ${s}`);
-    for (const n of r.notes) console.log(`  ! ${n}`);
-    if (r.applied.length === 0 && r.skipped.length === 0) console.log("  · 没有可自动修复的问题");
+    for (const a of r.applied) console.log(`  ${ansi.green(MARK.ok)} ${a}`);
+    for (const s of r.skipped) console.log(`  ${ansi.dim(MARK.info)} ${s}`);
+    for (const n of r.notes) console.log(`  ${ansi.yellow(MARK.warn)} ${n}`);
+    if (r.applied.length === 0 && r.skipped.length === 0) {
+      console.log(`  ${ansi.dim(MARK.info)} nothing to auto-fix`);
+    }
     console.log("");
     // 修完再体检一次，让用户看到修后状态（--send 也在这里发，且只发这一张）
     const after = await doctor({ home, send });
@@ -99,13 +110,13 @@ export function runConfig(args: string[]): number {
     }
     try {
       const r = setConfigValue(home, key, value);
-      console.log(`✓ ${r.key} = ${JSON.stringify(r.value)}`);
+      console.log(`${ansi.green(MARK.ok)} ${r.key} = ${ansi.bold(JSON.stringify(r.value))}`);
       if (r.key === "notify.dry_run" && r.value === false) {
-        console.log("  Now verify delivery: agent-ex doctor --send");
+        console.log(`  ${ansi.dim("Now verify delivery:")} agent-ex doctor --send`);
       }
       return 0;
     } catch (e) {
-      console.error(`✗ ${(e as Error).message}`);
+      console.error(`${ansi.red(MARK.error)} ${(e as Error).message}`);
       return 1;
     }
   }
@@ -139,10 +150,10 @@ export function runProfile(args: string[]): number {
     }
     try {
       const r = useProfile(home, name);
-      console.log(`✓ default profile → ${r.profile}`);
+      console.log(`${ansi.green(MARK.ok)} default profile = ${ansi.bold(r.profile)}`);
       return 0;
     } catch (e) {
-      console.error(`✗ ${(e as Error).message}`);
+      console.error(`${ansi.red(MARK.error)} ${(e as Error).message}`);
       return 1;
     }
   }
@@ -159,12 +170,12 @@ export function runProfile(args: string[]): number {
     const bin = binIdx >= 0 ? rest[binIdx + 1] : undefined;
     try {
       const r = createProfile(home, name, bin ? { bin } : {});
-      console.log(`✓ created profile ${r.profile}${r.desc ? `: ${r.desc}` : ""}`);
-      if (r.executor_created) console.log(`  registered executor ${r.executor}`);
-      console.log(`  Next: agent-ex profile use ${r.profile}`);
+      console.log(`${ansi.green(MARK.ok)} created profile ${ansi.bold(r.profile)}${r.desc ? ansi.dim(`: ${r.desc}`) : ""}`);
+      if (r.executor_created) console.log(`  ${ansi.dim("registered executor")} ${r.executor}`);
+      console.log(`  ${ansi.dim("Next:")} agent-ex profile use ${r.profile}`);
       return 0;
     } catch (e) {
-      console.error(`✗ ${(e as Error).message}`);
+      console.error(`${ansi.red(MARK.error)} ${(e as Error).message}`);
       return 1;
     }
   }
@@ -180,10 +191,10 @@ export function runProfile(args: string[]): number {
     }
     try {
       const r = setProfileValue(home, name, key, value);
-      console.log(`✓ ${r.profile}.${r.key} = ${JSON.stringify(r.value)}`);
+      console.log(`${ansi.green(MARK.ok)} ${r.profile}.${r.key} = ${ansi.bold(JSON.stringify(r.value))}`);
       return 0;
     } catch (e) {
-      console.error(`✗ ${(e as Error).message}`);
+      console.error(`${ansi.red(MARK.error)} ${(e as Error).message}`);
       return 1;
     }
   }

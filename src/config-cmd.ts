@@ -24,9 +24,9 @@ import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
 
 /** 可写的固定字段白名单：key → 类型 + 说明。 */
 export const WRITABLE: Record<string, { type: "boolean" | "string" | "integer"; desc: string }> = {
-  "notify.dry_run": { type: "boolean", desc: "false = 真实投递飞书；true = 只打 stderr" },
-  "notify.keyword": { type: "string", desc: "飞书「自定义关键词」闸门；须与机器人侧登记的一致" },
-  "defaults.timeout_sec": { type: "integer", desc: "每轮超时秒数" },
+  "notify.dry_run": { type: "boolean", desc: "false = really deliver to Feishu; true = print to stderr only" },
+  "notify.keyword": { type: "string", desc: 'the bot\'s "Custom keywords" gate; must match what the bot registered' },
+  "defaults.timeout_sec": { type: "integer", desc: "timeout in seconds per round" },
 };
 
 /**
@@ -120,8 +120,8 @@ export function setConfigValue(home: string, key: string, rawValue: string): { k
     const name = m[1];
     if (!c.executors?.[name]) {
       throw new Error(
-        `unknown executor "${name}" — existing: ${Object.keys(c.executors ?? {}).join(", ") || "(none)"}；` +
-        `executor 不存在时不能用这条命令建（请先 agent-ex profile create <builtin>）`,
+        `unknown executor "${name}" — existing: ${Object.keys(c.executors ?? {}).join(", ") || "(none)"}; ` +
+        `this command cannot create an executor — run "agent-ex profile create <builtin>" first`,
       );
     }
     const value = rawValue.trim();
@@ -162,7 +162,7 @@ export function setConfigValue(home: string, key: string, rawValue: string): { k
     if (value === "") {
       throw new Error(
         key === "notify.keyword"
-          ? `"${key}" expects a non-empty string — 空串会让卡片不带关键词，飞书必然拒收（19024）`
+          ? `"${key}" expects a non-empty string — an empty keyword makes the card carry no keyword, so Feishu will always reject it (19024)`
           : `"${key}" expects a non-empty string, got ""`,
       );
     }
@@ -186,7 +186,7 @@ export const BUILTIN_PROFILES: Record<string, { executor: string; env: Record<st
       // 空 = 不挑食（选稳定排序的第一个）。用户可改 config.json 里的这一行。
       ZEN_FREE_PREFER: "mimo,nemotron,ling",
     },
-    desc: "opencode zen 免费模型（零密钥，模型集会轮换，spawn 时动态解析）",
+    desc: "opencode zen free models (no API key; the model set rotates and is resolved at spawn time)",
   },
 };
 
@@ -217,7 +217,7 @@ export function useProfile(home: string, name: string): ProfileUseResult {
     if (BUILTIN_PROFILES[name]) {
       throw new Error(
         `profile "${name}" not created yet — run "agent-ex profile create ${name}" first ` +
-        `(内置预设需要先物化，create 不会自动切默认)`,
+        `(built-in presets must be materialized; create does not switch the default)`,
       );
     }
     throw new Error(
@@ -254,7 +254,7 @@ export function createProfile(home: string, name: string, opts: { bin?: string }
     if (resolveBinPath(bin) === null) {
       throw new Error(
         `executor "${builtin.executor}" bin "${bin}" not found or not executable — ` +
-        `若它不在 PATH 上，请用 --bin <绝对路径>：agent-ex profile create ${name} --bin /path/to/${builtin.executor}`,
+        `if it is not on PATH, pass --bin <absolute path>: agent-ex profile create ${name} --bin /path/to/${builtin.executor}`,
       );
     }
     c.executors[builtin.executor] = { bin, extra_flags: builtin.executor === "opencode" ? ["--auto"] : [] };

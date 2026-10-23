@@ -117,14 +117,14 @@ export function collectConfigIssues(cfg: unknown): ConfigIssue[] {
     issues.push({
       code: "executors.empty",
       message: "config.executors is empty",
-      fix: "agent-ex init 重建配置（会先备份坏文件）",
+      fix: "agent-ex init (rebuilds the config; the broken file is backed up first)",
     });
   }
   if (Object.keys(profiles).length === 0) {
     issues.push({
       code: "profiles.empty",
       message: "config.profiles is empty",
-      fix: "agent-ex init 重建配置（会先备份坏文件）",
+      fix: "agent-ex init (rebuilds the config; the broken file is backed up first)",
     });
   }
   for (const [name, raw] of Object.entries(executors)) {
@@ -151,7 +151,7 @@ export function collectConfigIssues(cfg: unknown): ConfigIssue[] {
       issues.push({
         code: "profile.executor",
         message: `profile "${name}" references unknown executor "${exec}"`,
-        fix: `agent-ex config set profiles.${name}.executor <存在的 executor>`,
+        fix: `agent-ex config set profiles.${name}.executor <existing executor>`,
         subject: name,
       });
     }
@@ -162,7 +162,7 @@ export function collectConfigIssues(cfg: unknown): ConfigIssue[] {
     issues.push({
       code: "defaults.profile",
       message: `defaults.profile "${defProfile}" not found in profiles`,
-      fix: "agent-ex profile use <存在的 profile>",
+      fix: "agent-ex profile use <existing profile>",
       subject: String(defProfile),
     });
   }
@@ -171,7 +171,7 @@ export function collectConfigIssues(cfg: unknown): ConfigIssue[] {
     issues.push({
       code: "notify.webhook",
       message: "notify.feishu_webhook_url is required",
-      fix: "agent-ex init 重建配置（会先备份坏文件）",
+      fix: "agent-ex init (rebuilds the config; the broken file is backed up first)",
     });
   }
   // dry_run 缺省 = true（只打印到 stderr 不真发），调试期默认安全；想真发改 false

@@ -68,12 +68,12 @@ export interface NotifyFailureStats {
  * 混为一谈会导致"改了关键词还是不通"，白折腾。
  */
 export const FEISHU_ERRORS: Record<string, { meaning: string; fix: string }> = {
-  "19024": { meaning: "关键词校验失败（卡片不含机器人登记的关键词）", fix: "让 config 的 notify.keyword 与机器人「安全设置 → 自定义关键词」一致" },
-  "19021": { meaning: "签名校验失败（机器人勾了「加签」，而本工具不发送 timestamp/sign）", fix: "在机器人安全设置里取消勾选「加签」" },
-  "19022": { meaning: "IP 校验失败（机器人勾了「IP 白名单」）", fix: "取消勾选 IP 白名单，或把出口 IP 加进白名单" },
-  "19001": { meaning: "webhook token 无效（地址失效：机器人被删/重建/地址轮换）", fix: "去机器人后台重新复制 webhook 地址，更新 .env 里的 FEISHU_WEBHOOK_URL" },
-  "9499": { meaning: "请求体格式错误", fix: "检查卡片 JSON 是否超 20 KB" },
-  "11232": { meaning: "触发限流", fix: "避开密集派发（单机器人 100 次/分、5 次/秒）" },
+  "19024": { meaning: "keyword check failed (the card does not contain the keyword registered on the bot)", fix: 'make notify.keyword match the bot\'s "Security settings -> Custom keywords"' },
+  "19021": { meaning: 'signature check failed (the bot has "signature verification" enabled, and this tool sends no timestamp/sign)', fix: 'uncheck "signature verification" in the bot\'s security settings' },
+  "19022": { meaning: 'IP check failed (the bot has an "IP allowlist")', fix: "uncheck the IP allowlist, or add your egress IP to it" },
+  "19001": { meaning: "webhook token invalid (the URL no longer works: bot deleted/recreated, address rotated)", fix: "copy the webhook URL again from the bot console and update FEISHU_WEBHOOK_URL in .env" },
+  "9499": { meaning: "request body malformed", fix: "check whether the card JSON exceeds 20 KB" },
+  "11232": { meaning: "rate limited", fix: "avoid bursty dispatching (100/min, 5/s per bot)" },
 };
 
 /**
@@ -184,11 +184,11 @@ export function scanNotifyFailures(home: string = agentExHome()): NotifyFailureS
 /** 读现有 config（宽容：坏 config 也要能体检）。 */
 function readConfigLoose(home: string): { cfg: Config | null; error: string | null } {
   const p = join(home, "config.json");
-  if (!existsSync(p)) return { cfg: null, error: "config.json 不存在" };
+  if (!existsSync(p)) return { cfg: null, error: "config.json does not exist" };
   try {
     return { cfg: JSON.parse(readFileSync(p, "utf8")) as Config, error: null };
   } catch (e) {
-    return { cfg: null, error: `config.json 解析失败：${(e as Error).message}` };
+    return { cfg: null, error: `config.json failed to parse: ${(e as Error).message}` };
   }
 }
 
@@ -219,7 +219,7 @@ export function applyFixes(home: string): FixResult {
   const skipped: string[] = [];
   const notes: string[] = [];
   const c = readConfigLoose(home).cfg;
-  if (!c) return { applied, skipped: ["config.json 不可用，未做任何修改"], notes };
+  if (!c) return { applied, skipped: ["config.json is unusable; nothing was changed"], notes };
 
   // 先在内存里改完、校验完，再动任何文件。
   //
@@ -250,9 +250,9 @@ export function applyFixes(home: string): FixResult {
     const before = kw === undefined ? "(unset)" : JSON.stringify(kw);
     c.notify.keyword = BRAND;
     changed = true;
-    pending.push(`notify.keyword: ${before} → ${BRAND}`);
+    pending.push(`notify.keyword: ${before} -> ${BRAND}`);
     if (kwState === "stale") {
-      revertHint = `若你的机器人登记的关键词就是旧名 "${kw}"，请改回去：agent-ex config set notify.keyword "${kw}"`;
+      revertHint = `If the keyword registered on your bot really is the old name "${kw}", change it back: agent-ex config set notify.keyword "${kw}"`;
     }
   }
 
@@ -267,9 +267,9 @@ export function applyFixes(home: string): FixResult {
       envLine = `${envText ? envText.replace(/\n*$/, "\n") : ""}FEISHU_WEBHOOK_URL=${url}\n`;
       c.notify.feishu_webhook_url = "{env:FEISHU_WEBHOOK_URL}";
       changed = true;
-      pending.push("notify.feishu_webhook_url: 明文 → {env:FEISHU_WEBHOOK_URL}（原值写入 .env，权限 600）");
+      pending.push("notify.feishu_webhook_url: plaintext -> {env:FEISHU_WEBHOOK_URL} (original value moved to .env, mode 600)");
     } else {
-      skipped.push(".env 里已有 FEISHU_WEBHOOK_URL，未覆盖（请手工核对是否与 config 一致）");
+      skipped.push("FEISHU_WEBHOOK_URL already exists in .env; not overwritten (verify by hand that it matches config)");
     }
   }
 
@@ -278,8 +278,8 @@ export function applyFixes(home: string): FixResult {
   try {
     validateConfig(c);
   } catch (e) {
-    skipped.push(`config.json 未写入：整份配置校验失败（${(e as Error).message}）`);
-    notes.push(`以下改动**未落盘**：${pending.join("；")}。上面的坏字段不适合由 --fix 自动改（它不知道该改成什么），先修它再重跑 --fix。`);
+    skipped.push(`config.json not written: validation of the whole config failed (${(e as Error).message})`);
+    notes.push(`These changes were NOT written: ${pending.join("; ")}. The broken field above cannot be fixed automatically (--fix does not know what it should become); fix it first, then re-run --fix.`);
     return { applied, skipped, notes };
   }
 
@@ -312,11 +312,11 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
   if (error) {
     findings.push({
       severity: "error",
-      title: "config.json 不可用",
+      title: "config.json is unusable",
       detail: error,
-      fix: "agent-ex init 重建（会先备份坏文件）",
+      fix: "agent-ex init (rebuilds the config; the broken file is backed up first)",
     });
-    return { ok: false, summary: "config.json 不可用，无法体检其余项", findings };
+    return { ok: false, summary: "config.json is unusable — the rest could not be checked", findings };
   }
   const c = cfg!;
 
@@ -336,12 +336,12 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
   if (dryRun) {
     findings.push({
       severity: "warn",
-      title: "通知处于 dry-run，不会真的投递",
-      detail: "notify.dry_run = true ⇒ 终态卡片只打到 stderr，群里收不到。",
+      title: "Notifications are in dry-run mode — nothing is delivered",
+      detail: "notify.dry_run = true -> terminal cards only go to stderr; the chat never receives them.",
       fix: "agent-ex config set notify.dry_run false",
     });
   } else {
-    findings.push({ severity: "ok", title: "通知处于真实投递模式", detail: "notify.dry_run = false" });
+    findings.push({ severity: "ok", title: "Notifications are actually delivered", detail: "notify.dry_run = false" });
   }
 
   // ---- 3. 关键词 ----
@@ -354,37 +354,37 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
   if (kwState === "empty") {
     findings.push({
       severity: "error",
-      title: "关键词被显式设为空",
-      detail: "notify.keyword = \"\" ⇒ 卡片里不会有关键词元素（notifier.ts 的 if (keyword)）⇒ 只要机器人开了「自定义关键词」闸门就必然被拒收（19024）。",
+      title: "Keyword is explicitly empty",
+      detail: 'notify.keyword = "" -> the card carries no keyword element (notifier.ts: if (keyword)) -> as long as the bot has the "custom keyword" gate enabled, every card is rejected (19024).',
       fix: `agent-ex config set notify.keyword ${BRAND}`,
       fixable: FIXABLE_KINDS.includes("keyword.empty"),
     });
   } else if (kwState === "unset") {
     findings.push({
       severity: "info",
-      title: "关键词未显式配置（运行时用产品名兜底）",
-      detail: `notify.keyword 未设置 ⇒ 运行时会填 "${BRAND}"（config.ts 的 ??= BRAND，产品改名时自动跟随），卡片是带关键词元素的。若机器人在「安全设置 → 自定义关键词」登记的不是这个词，请显式设置。`,
+      title: "Keyword not set explicitly (the product name is used at runtime)",
+      detail: `notify.keyword is unset -> runtime fills in "${BRAND}" (config.ts: ??= BRAND, so it follows product renames); the card does carry a keyword element. If the bot registered a different word under "Security settings -> Custom keywords", set it explicitly.`,
     });
   } else if (kwState === "stale") {
     findings.push({
       severity: "error",
-      title: "关键词是改名前的旧产品名",
-      detail: `notify.keyword = "${keyword}"，这是本工具改名前用过的名字（现名 "${BRAND}"）。若机器人登记的是 "${BRAND}"，卡片会被拒收（19024）——2026-10-13→10-15 的 23 个任务零通知就是这个状态造成的。`,
+      title: "Keyword is a pre-rename product name",
+      detail: `notify.keyword = "${keyword}", an old name of this tool (current: "${BRAND}"). If the bot registered "${BRAND}", every card is rejected (19024) — this is exactly what caused 23 tasks with zero notifications on 2026-10-13..15.`,
       fix: `agent-ex config set notify.keyword ${BRAND}`,
       fixable: FIXABLE_KINDS.includes("keyword.stale"),
     });
   } else if (kwState === "custom") {
     findings.push({
       severity: "warn",
-      title: "关键词是自定义值（不替你决定，但要对齐机器人侧）",
-      detail: `notify.keyword = "${keyword}"，与产品名 "${BRAND}" 不同。**若机器人登记的就是 "${keyword}"，这是对的，请忽略本条**；若登记的是 "${BRAND}"，卡片会被拒收（19024）。`,
-      fix: "agent-ex doctor --send（自检卡能直接判定登记词是否匹配）",
+      title: "Keyword is a custom value (not changed for you, but it must match the bot)",
+      detail: `notify.keyword = "${keyword}", which differs from the product name "${BRAND}". If the bot registered "${keyword}", this is correct — ignore this item. If it registered "${BRAND}", cards are rejected (19024).`,
+      fix: "agent-ex doctor --send (a self-check card tells you whether the registered word matches)",
     });
   } else {
     findings.push({
       severity: "ok",
-      title: "关键词与产品名一致",
-      detail: `notify.keyword = "${keyword}"。是否与机器人登记词一致，只有自检卡能验证：agent-ex doctor --send`,
+      title: "Keyword matches the product name",
+      detail: `notify.keyword = "${keyword}". Whether it matches the word registered on the bot can only be verified by a self-check card: agent-ex doctor --send`,
     });
   }
 
@@ -394,27 +394,27 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
   if (webhookState === "empty") {
     findings.push({
       severity: "error",
-      title: "未配置 webhook 地址",
-      detail: "notify.feishu_webhook_url 为空",
-      fix: "agent-ex init 重建配置（会先备份坏文件）",
+      title: "No webhook URL configured",
+      detail: "notify.feishu_webhook_url is empty",
+      fix: "agent-ex init (rebuilds the config; the broken file is backed up first)",
     });
     emitted.add(emitKey("notify.webhook"));
   } else if (webhookState === "plaintext") {
     // 明文凭证落在 config.json 里：config 会被提交/同步/贴到 issue 时就泄露了
     findings.push({
       severity: "error",
-      title: "webhook 以明文存在 config.json（凭证泄露风险）",
-      detail: "notify.feishu_webhook_url 不是 {env:VAR} 占位符。config.json 可能被提交或同步，webhook 地址本身就是凭证。",
-      fix: "agent-ex doctor --fix（会把地址挪进 .env 并改成 {env:FEISHU_WEBHOOK_URL}）",
+      title: "Webhook stored in plaintext in config.json (credential leak risk)",
+      detail: "notify.feishu_webhook_url is not an {env:VAR} placeholder. config.json may be committed or synced, and the webhook URL is itself a credential.",
+      fix: "agent-ex doctor --fix (moves the URL into .env and rewrites it as {env:FEISHU_WEBHOOK_URL})",
       fixable: FIXABLE_KINDS.includes("webhook.plaintext"),
     });
   } else if (webhookState === "malformed") {
     // 形状不合规的占位符（如 {env:bad_lower}）：不是凭证泄露，是必然失败的配置
     findings.push({
       severity: "error",
-      title: "webhook 占位符格式不对",
-      detail: `notify.feishu_webhook_url = "${c.notify?.feishu_webhook_url}"，既不是 {env:大写变量名} 也不是 http(s) 地址。解析器只认 {env:[A-Z0-9_]+}，这个值永远解析不出来。`,
-      fix: "agent-ex config set …（把 config.json 里的 notify.feishu_webhook_url 改成 {env:FEISHU_WEBHOOK_URL}，密钥放 .env）",
+      title: "Webhook placeholder has the wrong shape",
+      detail: `notify.feishu_webhook_url = "${c.notify?.feishu_webhook_url}", which is neither {env:UPPER_CASE_VAR} nor an http(s) URL. The resolver only accepts {env:[A-Z0-9_]+}, so this value can never be resolved.`,
+      fix: "agent-ex config set (change notify.feishu_webhook_url in config.json to {env:FEISHU_WEBHOOK_URL} and put the secret in .env)",
     });
   } else {
     const varName = /^\{env:([A-Z0-9_]+)\}$/.exec(c.notify!.feishu_webhook_url)![1];
@@ -422,13 +422,13 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
     const hasInEnv = existsSync(envFile) && new RegExp(`^${varName}=.+$`, "m").test(readFileSync(envFile, "utf8"));
     const hasInProcess = Boolean(process.env[varName]);
     if (hasInEnv || hasInProcess) {
-      findings.push({ severity: "ok", title: "webhook 地址已配置", detail: `${varName} 在 ${hasInEnv ? ".env" : "进程环境"}里` });
+      findings.push({ severity: "ok", title: "Webhook URL is configured", detail: `${varName} is in ${hasInEnv ? ".env" : "the process environment"}` });
     } else {
       findings.push({
         severity: "error",
-        title: "webhook 地址未设置",
-        detail: `${varName} 既不在 .env 也不在进程环境 ⇒ 真实发送时会抛 "env placeholder not found"。`,
-        fix: `在 ${join(home, ".env")} 里加 ${varName}=<webhook 地址>`,
+        title: "Webhook URL is not set",
+        detail: `${varName} is in neither .env nor the process environment -> a real send will throw "env placeholder not found".`,
+        fix: `add ${varName}=<webhook URL> to ${join(home, ".env")}`,
       });
     }
   }
@@ -439,17 +439,17 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
   if (!defProfile) {
     findings.push({
       severity: "error",
-      title: "未设置默认 profile",
-      detail: "defaults.profile 缺失 ⇒ 派发任务时拿不到默认 profile（unknown profile），server 起不来。",
-      fix: "agent-ex profile use <存在的 profile>",
+      title: "No default profile set",
+      detail: "defaults.profile is missing -> dispatching has no default profile (unknown profile); the server will not start.",
+      fix: "agent-ex profile use <existing profile>",
     });
     emitted.add(emitKey("defaults.profile", "undefined"));
   } else if (!c.profiles?.[defProfile]) {
     findings.push({
       severity: "error",
-      title: "默认 profile 不存在",
-      detail: `defaults.profile = "${defProfile}"，但 profiles 里没有它 ⇒ 每次派发都会失败（unknown profile）。`,
-      fix: "agent-ex profile use <存在的 profile>",
+      title: "Default profile does not exist",
+      detail: `defaults.profile = "${defProfile}", but profiles has no such entry -> every dispatch fails (unknown profile).`,
+      fix: "agent-ex profile use <existing profile>",
       // ⚠️ 不可自动修：不知道该指向哪个（"哪个都可能是"）。以前这里标 fixable: true，
       // 但 applyFixes 没有这个分支 ⇒ MCP 侧 agent 照着调 --fix 只会得到
       // "没有可自动修复的问题"，白跑一趟。fixable 由能力表派生，不手写。
@@ -467,9 +467,9 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
     if (typeof bin !== "string" || bin === "") {
       findings.push({
         severity: "error",
-        title: `executor "${name}" 没有 bin`,
-        detail: `executors.${name}.bin 缺失或不是字符串 ⇒ 派发时无法拉起 agent。`,
-        fix: `agent-ex config set executors.${name}.bin <绝对路径>`,
+        title: `executor "${name}" has no bin`,
+        detail: `executors.${name}.bin is missing or not a string -> the agent cannot be spawned for dispatch.`,
+        fix: `agent-ex config set executors.${name}.bin <absolute path>`,
       });
       emitted.add(emitKey("executor.bin", name));
       continue;
@@ -477,10 +477,10 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
     if (resolveBinPath(bin) === null) {
       findings.push({
         severity: "error",
-        title: `executor "${name}" 的 bin 不可用`,
-        detail: `${bin} 不存在或不可执行`,
+        title: `executor "${name}" bin is unusable`,
+        detail: `${bin} does not exist or is not executable`,
         // 定点修复：不是"跑 init 重配一遍"（那是重武器），而是改这一个字段。
-        fix: `agent-ex config set executors.${name}.bin <绝对路径>`,
+        fix: `agent-ex config set executors.${name}.bin <absolute path>`,
       });
       emitted.add(emitKey("executor.bin", name));
     }
@@ -499,8 +499,8 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
     emitted.add(key);
     findings.push({
       severity: "error",
-      title: `配置有问题：${issue.message}`,
-      detail: "这条来自 config 的统一校验规则（与启动时 loadConfig 抛错的是同一份）——同样的配置会让 server 起不来。",
+      title: `Config problem: ${issue.message}`,
+      detail: "This comes from the shared validation rules in config.ts (the same ones loadConfig throws on at startup) — the same config would keep the server from starting.",
       fix: issue.fix,
     });
   }
@@ -517,8 +517,8 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
     // by_code 里的数字是**拒收尝试次数**（每次失败重试 3 次都会各留一行）。
     const attempts = Object.values(stats.by_code).reduce((a, b) => a + b, 0);
     const parts = Object.entries(stats.by_code)
-      .map(([code, n]) => `code=${code} ×${n} 次${FEISHU_ERRORS[code] ? `（${FEISHU_ERRORS[code].meaning}）` : ""}`)
-      .join("，");
+      .map(([code, n]) => `code=${code} ×${n} attempt(s)${FEISHU_ERRORS[code] ? ` (${FEISHU_ERRORS[code].meaning})` : ""}`)
+      .join("; ");
     // 每个码的修法互斥（19024 改关键词、19001 必须换地址）⇒ 全部列出，
     // 只给"次数最多"的那个会把人引到无效动作上。
     const fixes = Object.keys(stats.by_code)
@@ -526,9 +526,9 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
       .filter((f): f is string => Boolean(f));
     findings.push({
       severity: "warn",
-      title: `历史上有 ${stats.logs_with_rejects} 个任务的通知被拒收（累计 ${attempts} 次尝试）`,
-      detail: `${parts}。最近一次：${stats.recent[0]?.task_id}。`,
-      fix: fixes.length > 0 ? fixes.join("；") : undefined,
+      title: `${stats.logs_with_rejects} task(s) had notifications rejected in the past (${attempts} attempt(s) total)`,
+      detail: `${parts}. Most recent: ${stats.recent[0]?.task_id}.`,
+      fix: fixes.length > 0 ? fixes.join("; ") : undefined,
     });
   }
 
@@ -540,18 +540,18 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
       // 这里若用原始的 undefined，卡片就不带关键词元素 → 明明能投递却报"被拒收"。
       const effectiveKeyword = c.notify.keyword ?? BRAND;
       // 正文刻意不含产品名：闸门匹配整卡，用真实报告当探针会假通过
-      const card = buildFeishuCard("completed", "task_selfcheck", "自检卡片：正文不含产品名", effectiveKeyword);
+      const card = buildFeishuCard("completed", "task_selfcheck", "self-check card: body contains no product name", effectiveKeyword);
       const res = await sendFeishuCard(url, card, { dryRun: false, fetchImpl: opts.fetchImpl, delays: opts.delays });
       if (res.ok) {
-        findings.push({ severity: "ok", title: "自检卡已投递", detail: "飞书返回 code=0" });
+        findings.push({ severity: "ok", title: "Self-check card delivered", detail: "Feishu returned code=0" });
       } else {
         const known = res.code !== null ? FEISHU_ERRORS[String(res.code)] : undefined;
         findings.push({
           severity: "error",
-          title: "自检卡被拒收",
+          title: "Self-check card was rejected",
           // code 必须进结论：它是"改关键词"（19024）与"换地址"（19001）的唯一判据，
           // MCP 侧拿不到 stderr（MCP 侧此前只能看到一个布尔值）
-          detail: `飞书返回 code=${res.code ?? "无响应"} msg=${res.msg || "(空)"}${known ? `（${known.meaning}）` : ""}。`,
+          detail: `Feishu returned code=${res.code ?? "no response"} msg=${res.msg || "(empty)"}${known ? ` (${known.meaning})` : ""}.`,
           fix: known?.fix,
         });
       }
@@ -559,21 +559,21 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
       const msg = (e as Error).message;
       findings.push({
         severity: "error",
-        title: "自检卡发送失败",
+        title: "Failed to send the self-check card",
         detail: msg,
         // 别把人引到没坏的东西上：placeholder 报错是"变量没进进程环境"，不是"地址失效"
         fix: /env placeholder/.test(msg)
-          ? `把该变量写进 ${join(home, ".env")}（或 export 到进程环境）后重试`
-          : "检查 FEISHU_WEBHOOK_URL 是否有效",
+          ? `add the variable to ${join(home, ".env")} (or export it into the process env), then retry`
+          : "check whether FEISHU_WEBHOOK_URL is valid",
       });
     }
   }
 
   const hasError = findings.some((f) => f.severity === "error");
   const summary = hasError
-    ? `发现 ${findings.filter((f) => f.severity === "error").length} 个问题，通知链路不通`
+    ? `${findings.filter((f) => f.severity === "error").length} problem(s) found — the notification path is broken`
     : findings.some((f) => f.severity === "warn")
-      ? "配置基本可用，但有一项需要注意"
-      : "一切正常";
+      ? "Config is usable, but one item needs attention"
+      : "All good";
   return { ok: !hasError, summary, findings, notify_failures: stats };
 }

@@ -232,13 +232,15 @@
 | :--- | :--- |
 | `tests/store.test.ts`（+5） | schema 迁移：补列、读写可用、NOT NULL 靠 DEFAULT、幂等、空库 |
 | `tests/init-changes.test.ts`（11） | diff 逻辑 + 警告文案的后果说明 |
-| `tests/init-e2e.test.ts`（4） | init 端到端：预告展示 / 拒绝则不写盘 / 同意则备份 / 非法则不写盘 |
+| `tests/init-e2e.test.ts`（8） | init 端到端：预告展示 / 拒绝则不写盘 / 同意则备份 / 非法则不写盘 / **只探测到一个 CLI 时不再问"用哪个"** / 探测到两个时才问 / **yes-no 用 (y/N) 形式** / **长提示分多行** |
+| `tests/init.test.ts`（19） | `detectAgentClis` / `renderDetectedClis`：只列真正找到的、展示用标记区分找到与没找到、没找到时明确说没有；**init 的用户可见输出不得含中文** |
+| `tests/ansi.test.ts`（8） | 颜色开关：`NO_COLOR`（任意值）⇒ 关、非 TTY ⇒ 关、`FORCE_COLOR` ⇒ 强制开、`NO_COLOR` 优先于 `FORCE_COLOR`、关闭时原样返回 |
 | `tests/doctor.test.ts`（38） | 各类 finding、keyword 四态、历史扫描聚合、错误码含义、`--fix` 边界（含"坏字段挡住写盘"的不崩溃/不落盘）、`--send` 的 code 回传、**两处假阴性的回归**、webhook 四态、缺 bin 的 executor |
 | `tests/config-cmd.test.ts`（37） | list / set 白名单与类型校验 / 非空校验 / 严格整数 / `executors.<name>.bin` / `profile use`·`create`·`set`（含键约束与深拷贝） |
 | `tests/config-issues.test.ts`（14） | `collectConfigIssues`：每条规则一个 code、每条 issue 带 fix、total（吃未校验 JSON 不抛错） |
-| `tests/cli-env.test.ts`（10） | **进程级**回归：CLI 子命令必须加载 `$AGENT_EX_HOME/.env`（P0-1）；`config list` 真的渲染 `bin_ok`；未预期异常走兜底且无栈帧；`profile` 子命令；`--fix --send` 只发一张卡 |
+| `tests/cli-env.test.ts`（12） | **进程级**回归：CLI 子命令必须加载 `$AGENT_EX_HOME/.env`（P0-1）；`config list` 真的渲染 `bin_ok`；未预期异常走兜底且无栈帧；`profile` 子命令；`--fix --send` 只发一张卡；**加载 store 模块不 require node:sqlite**（懒加载） |
 
-全量：**266 passed / 22 files**，`tsc --noEmit` 0 error。
+全量：**286 passed / 23 files**，`tsc --noEmit` 0 error。
 
 > ⚠️ 这个数字**不是无条件稳定**：`tests/cli-env.test.ts` 会 spawn `tsx` 子进程，vitest 默认 `testTimeout` 是 5s——并行满载时实测出现 `209 passed / 4 failed / 4 skipped`。已加 `testTimeout: 30_000`（§12.5）。
 
@@ -405,7 +407,7 @@ doctor 的 fix 文案随之从"跑 `init`"改成定点命令；`init` 降为"多
 | `--fix --send` 只发一张修复后的卡 | `tests/cli-env.test.ts`（假飞书计数 `cardCount`） |
 | CLI 错误输出不含栈帧；`"3600abc"` 被拒绝 | `tests/cli-env.test.ts` / `tests/config-cmd.test.ts` |
 
-**全量**：266 passed / 22 files，`tsc --noEmit` 0 error。`vitest.config.ts` 已加 `testTimeout: 30_000`（§12.5 的稳定性问题）。
+**全量**：297 passed / 24 files，`tsc --noEmit` 0 error。`vitest.config.ts` 已加 `testTimeout: 30_000`（§12.5 的稳定性问题）。
 
 **变异验证**（逐个实跑，全部能转红）：
 
@@ -419,9 +421,62 @@ doctor 的 fix 文案随之从"跑 `init`"改成定点命令；`init` 降为"多
 | `--fix --send` 回到"先发卡再修" | 1 红（发两张卡） |
 | `profile use` 恢复隐式创建 | 1 红 |
 | CLI 错误边界改回 `console.error(msg, e)` | 1 红（栈帧回来） |
+| `store.ts` 改回顶层 `require("node:sqlite")` | 1 红（`SQLITE_LOADED=true`） |
+| init 恢复"只探测到一个也问用哪个" | 4 红（答案序列错位 ⇒ readline 卡死超时） |
+| init 恢复旧的 `detected:` 展示格式 | 1 红（输出含 `not found`） |
+| 颜色在非 TTY 也开 | 2 红（管道/重定向场景） |
+| 探测展示退回"只列找到的" | 2 红（找不到 claude 的那一行没了） |
+| init 的那句话说回中文 | 1 红（文案语言断言） |
+| yes/no 改回 `[N]` 形式 | 1 红 |
+| 覆盖确认的长提示合回一行 | 1 红 |
+| init-changes 的 removed 标记换回 `✗`（裸符号） | 2 红（裸符号扫描 + diff 语义断言） |
+| doctor 的 summary 改回中文 | 1 红（doctor.ts 的 CJK 扫描） |
+| 值变化用 `→` 而不是 `->` | 1 红（「`→` 只留给可复制的命令」） |
 
 **实施顺序**：§12.2 → §12.4 → §12.1 + §12.5 迁移清单 → §12.3（已按此顺序完成）。
 
 **实现中额外发现并修掉的 bug**（不在原评审清单里）：
 1. **doctor 在"executor 缺 `bin` 字段"时直接崩**（`resolveBinPath(undefined)` → `Cannot read properties of undefined`）⇒ 一条 finding 都报不出来。体检工具在配置坏了的时候最不能崩——那正是它该出结论的时刻。已加保护 + 回归用例。
 2. **`config set` 整数解析宽松**（§12.4 已列，本轮实装）：`"3600abc"` / `"3.7"` 现在被拒绝。
+3. **SQLite 的实验性警告插进了 `init` 的提示符中间**（npm link 后手工验证时发现）：`server.ts` 顶层静态 import `submit.js` → `store.js` → **顶层** `require("node:sqlite")` ⇒ 任何子命令（包括根本不碰数据库的 `init` / `doctor` / `config`）都在启动时加载了 SQLite；Node 的 `ExperimentalWarning: SQLite is an experimental feature` 是**异步**打印的，正好落在 readline 的第一个提示符后面：
+   ```
+   Executor to configure (claude/opencode) [claude]: (node:71345) ExperimentalWarning: SQLite is an experimental feature…
+   ```
+   实测 init 全程**一个字节的数据库都没写**（没有 `tasks.db`），那条警告纯属噪音。修法两处：① `store.ts` 改成**懒加载**（真正要开库时才 `require`）；② `server.ts` 把 `submit`/`status`/`cancel`/`doctor` 改成 `main()` 内动态 import（`init`/`doctor`/`config` 不必加载 SDK、SQLite、runner 相关的全部模块）。
+   > ⚠️ 回归断言不能只看子命令输出：`doctor` 立刻 `process.exit`，异步警告还没 flush 就被冲掉了（回退改动后 doctor 依然干净，只有交互式的 `init` 才看得见）。所以断言的是**更本质**的那件事——加载 store 模块后 `process.moduleLoadList` 里不该出现 sqlite。
+4. **init 的 CLI 选择提示是白问，而且默认值指向没装的那个**（npm link 后手工验证时发现）：本机只装了 opencode，界面却是
+   ```
+   detected: claude=(not found)  opencode=/Users/wuruofan/.opencode/bin/opencode
+   Executor to configure (claude/opencode) [claude]:
+   ```
+   三个问题：① 只探测到一个时"选哪个"**答案唯一**，问了是白问；② **默认值恒为 `claude`** —— 只装了 opencode 的人直接回车会配出一个**根本没装**的 executor，还得再手打一遍它的绝对路径；③ `detected:` 那行是给机器看的（"没找到"与"找到了"平铺在同一行），用户得自己分辨哪个可用。
+   修法：`detectAgentClis()` 只返回**真正找到的**；`renderDetectedClis()` **两个候选都列**（找到=✓、没找到=✗ 并变暗）——只列找到的那个会让人看不出"另一个到底是没有、还是压根不支持"；**只找到一个时直接用它、不再问**，并说清"the only one installed; claude not found"；找到多个才问（默认第一个）；一个都没找到才退回到"问名字 + 要绝对路径"。
+   > ⚠️ 探测函数做成**可注入**（`runInit(input, { which })`）：init 的问答流程会随"探测到几个 CLI"变化，若依赖开发机环境，测试就变成"这台机器恰好装了 X"的巧合（同 §9 的 PATH 巧合）。
+5. **终端输出没有颜色**（同一轮手工验证时发现）：整个项目**零** ANSI 支持（grep 无命中），一屏输出里哪个是 error、哪个是次要信息全靠符号（`✗` `!` `✓` `·`）分辨，密度一高就糊成一团。
+   修法：新增 `src/ansi.ts`（自写，不引依赖——着色需求就 6 个函数 + 一个开关，为此拉个库不划算）。开关规则按 no-color.org 惯例 + 常见约定：`NO_COLOR` 存在⇒关；`FORCE_COLOR` 非 "0"⇒强制开；否则**只在 stdout 是 TTY 时开**。最后一条最关键：输出被重定向到文件或管道时，转义序列只是噪音（实测 `agent-ex doctor > file` 与 `| cat -v` 的 ESC 数量均为 0）。
+   着色范围：`init` 的探测展示与问答提示、`doctor` 的按级别着色（error 红 / warn 黄 / ok 绿 / info 暗）、`config`/`profile` 的成功与失败行。
+   > ⚠️ **MCP 工具的返回值绝不能带转义序列**——那是 JSON 数据，不是给人看的终端输出。着色只加在 `cli.ts`（渲染层）与 `init.ts` 的交互输出上。
+6. **init 的输出里混进了一句中文**（同一轮手工验证时发现）：`opencode: provider 由 opencode 自己的配置管理…` —— 而 init 向导的其它文案（问题、默认值提示、变更预告、next steps）**历来全是英文**，就这一句是中文，一屏里两种语言。
+   修法：改成英文。**代码注释用中文没关系**（那是给开发者看的），但**用户看到的东西**要么全英文、要么全中文。
+   > ~~顺带核了一遍：doctor 那一侧（`title`/`detail`/`summary`）是自洽的中文体系，与 init 的英文体系是两个独立界面，不冲突——`cli.ts` 里剩下的两处中文属于 doctor 界面，保持中文。~~
+   > **该判断已被推翻**（见第 8 条）：一个工具的用户可见输出不该有两种语言，doctor 界面后来整体改成英文，`cli.ts` 里那两处中文也随之消失。
+   > 回归防线：`tests/init.test.ts` 扫 `init.ts` 源码里所有 `console.log/error` 与 `ask(` 提示语，**不得出现中文字符**（注释行被排除）。
+7. **init 的 yes/no 提问用错了形式，且长提示顶满终端**（同一轮手工验证时发现）：
+   ```
+   /tmp/agent-ex-test/config.json already exists. Re-running init REWRITES it (you will see exactly what changes before anything is written). Continue? [N]:
+   ```
+   两个问题：① **`[N]` 不是 Unix 惯例**——它只说"默认值是 N"，没说还能按什么；惯例是 `(y/N)`：**小写=可选的答案，大写=回车即取的默认值**，一眼看出"按 N 就是不"。② 一行长文本把路径、说明、问题全挤在一行，终端宽度不够时还会折行错位。
+   修法：新增 `askYesNo(rl, prompt, defaultYes)` —— 显示 `(y/N)` / `(Y/n)`、返回 **boolean**（调用方不再各写一遍大小写/空串归一化，漏一处就是 bug）。非法输入按默认值处理并提示一句（**不重问**：重问要在 readline 里循环，管道/脚本场景下第二次 `question()` 会抛 "readline was closed"）。长提示拆成多行：路径一行、说明一行、问题另起。
+   > ⚠️ 回归断言的坑：init 的输出走**两个通道**——说明文字走 `console.log`（**vitest 会拦截它**），提问走 readline（直接写 `process.stdout.write`）。只捕获一个通道会漏断言。
+8. **符号是三套并存，且都有 emoji**（第 7 条修完后通读全部输出时发现）：`init-changes.ts` 用 `⚠️`（带 U+FE0F）当表头、`✗` 当"即将删除"、`→` 同时表示"值变成"和"可复制的命令"；`init.ts` 一句里混用 `✓` / `→` / `\u26a0`；`cli.ts` 又自带一份 `SEVERITY_STYLE`（与 doctor 的逻辑重复）。三个问题：
+   - **emoji 的宽度不可控**：`⚠️` 带变体选择符，不同字体下占 1 或 2 列，对齐会歪；复制时还会带上不可见字符。
+   - **`→` 一个符号两种语义**：用户无法判断"这后面的东西能不能粘进终端"。
+   - **同一个概念在不同模块有不同符号**，改一处忘一处就是新一轮漂移。
+
+   修法：
+   - 新增 `src/marks.ts` 作为**唯一真相源**：`✗` error / `!` warn / `✓` ok / `·` info / `-` removed / `+` added / `±` changed；`SEVERITY_MARK` 把级别映射到「符号 + 着色函数」，`cli.ts` 删掉自己的 `SEVERITY_STYLE`。
+   - **`→`（`CMD`）只留给可复制的命令**；值的前后变化一律用 ASCII `->`（`false -> true`），避免"这个箭头是命令还是变化"的歧义。
+   - 变更预告按 **diff 语义**三段分类：新增 `+`、删除 `-`、改写 `±`（零学习成本，`git diff` 同款）。原先"即将删除"用 `✗` 是错的——它读起来像"出错了"，而实际是"将消失"。
+   - 全部用户可见文案统一为英文（推翻第 6 条那条"doctor 保持中文"的判断）：`doctor.ts` 的 `title`/`detail`/`summary`、`FEISHU_ERRORS`、`config-cmd.ts` 的 `WRITABLE.desc` 与 `BUILTIN_PROFILES.desc`、`config.ts` 的 fix 串。
+   - 回归防线 `tests/user-facing-text.test.ts`（11 条）：扫描 6 个 CLI 界面模块，**注释之外不得有 CJK**、不得出现裸符号（`✗✓⚠❓✅❌±` 只能来自 `marks.ts`）、符号必须是单码点且不是 emoji、`-`/`+`/`±` 的映射固定、`→` 只在 `CMD` 里出现。注释用中文不受影响——那是给开发者看的。
+   > ⚠️ 扫描器自己要先剥注释：源码里 `"https://…"` 的 `//` 会被朴素实现当成注释起点。实现顺序必须是**先识别字符串、再识别注释**。

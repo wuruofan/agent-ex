@@ -67,14 +67,16 @@ describe("renderChangeWarning —— 警告文案要说清后果", () => {
     const text = renderChangeWarning(diffConfigs(old, cfg()));
     expect(text).toContain("Removed");
     expect(text).toContain("profiles.ds-v4");
-    expect(text).toContain("✗");
-    expect(text).toContain("Rewritten");
+    expect(text).toMatch(/^\s+- profiles\.ds-v4 /m);
+    // 新增的 profile 单列一节，用 +（不再混进"改写"里）
+    expect(text).toContain("Added");
+    expect(text).toMatch(/^\s+\+ profiles\.default /m);
   });
 
   it("dry_run false→true 要解释后果（而不只是列字段变化）", () => {
     const old = cfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: false, keyword: "agent-ex" } });
     const text = renderChangeWarning(diffConfigs(old, cfg()));
-    expect(text).toContain("notify.dry_run false → true");
+    expect(text).toContain("notify.dry_run false -> true");
     expect(text).toMatch(/NOT be delivered/i);
   });
 

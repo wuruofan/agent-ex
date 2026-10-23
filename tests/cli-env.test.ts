@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,13 +88,13 @@ describe("agent-ex doctor --send（CLI 路径）", () => {
     // 修复前这里是 "env placeholder {env:FEISHU_WEBHOOK_URL} not found in process environment"
     expect(r.out).not.toContain("env placeholder");
     // 加载成功 ⇒ 占位符被解析 ⇒ 自检卡真的发出并被接受
-    expect(r.out).toContain("自检卡已投递");
+    expect(r.out).toContain("Self-check card delivered");
     expect(r.code).toBe(0);
   });
 
   it("同一轮体检里不再自相矛盾（不再同时出现「已配置」与「not found」）", async () => {
     const r = await runCli(["doctor", "--send"]);
-    expect(r.out).toContain("webhook 地址已配置");
+    expect(r.out).toContain("Webhook URL is configured");
     expect(r.out).not.toContain("env placeholder not found");
   });
 
@@ -125,7 +125,7 @@ describe("agent-ex doctor --send（CLI 路径）", () => {
       const cfg = JSON.parse(readFileSync(join(fHome, "config.json"), "utf8"));
       expect(cfg.notify.keyword).toBe("agent-ex");
       // 结论是"修复后"的
-      expect(r.out).toContain("自检卡已投递");
+      expect(r.out).toContain("Self-check card delivered");
     } finally {
       rmSync(fHome, { recursive: true, force: true });
     }
@@ -172,6 +172,61 @@ describe("agent-ex config list（CLI 路径）", () => {
 });
 
 describe("agent-ex profile（CLI 路径）", () => {
+  /**
+   * 回归：`agent-ex init` 的第一个提示符中间曾插着
+   * "ExperimentalWarning: SQLite is an experimental feature"——
+   * 因为 server.ts 顶层静态 import 了 submit.js → store.js → node:sqlite，
+   * 于是**根本不碰数据库**的 init/doctor/config 也在启动时加载了 SQLite。
+   * 那条警告是异步打印的，正好落在 readline 的提示符中间，把交互界面搅乱。
+   *
+   * 现在 node:sqlite 是懒加载的：不碰库的子命令不该有任何 SQLite 噪音。
+   *
+   * ⚠️ 断言方式：不能只看 `doctor` 的输出——它立刻 process.exit，
+   * 异步警告还没 flush 就被冲掉了（回退改动后 doctor 依然干净，只有交互式的
+   * init 才看得见）。所以这里断言的是**更本质**的那件事：加载 store 模块本身
+   * 不该 require node:sqlite。警告只是它的症状。
+   */
+  it("加载 store 模块不会 require node:sqlite（懒加载）", async () => {
+    // 子进程里 import store 模块，然后看 node:sqlite 有没有进 moduleLoadList
+    // （内置模块不进 require.cache，所以只能用 process.moduleLoadList）
+    const script = `
+      await import(${JSON.stringify(join(repoRoot, "src", "store.ts"))});
+      const loaded = process.moduleLoadList.filter((m) => m.includes("sqlite"));
+      console.log("SQLITE_LOADED=" + (loaded.length > 0));
+    `;
+    const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    expect(stdout).toContain("SQLITE_LOADED=false");
+  });
+
+  it("不碰数据库的子命令不会创建 tasks.db", async () => {
+    const sHome = mkdtempSync(join(tmpdir(), "aex-cli-nosqlite-"));
+    try {
+      mkdirSync(join(sHome, "logs"), { recursive: true });
+      writeFileSync(join(sHome, "config.json"), JSON.stringify({
+        executors: { fake: { bin: "/bin/ls" } },
+        profiles: { p1: { executor: "fake", env: {} } },
+        notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "agent-ex" },
+        defaults: { profile: "p1", timeout_sec: 60 },
+      }, null, 2));
+      // 夹具要健康：webhook 变量不在 .env 里时 doctor 会正确地报 error 并 exit 1
+      writeFileSync(join(sHome, ".env"), "FEISHU_WEBHOOK_URL=https://open.feishu.cn/hook/test\n");
+      for (const args of [["doctor"], ["config", "list"], ["profile", "list"]]) {
+        const r = await runCliAt(sHome, args);
+        expect(r.code).toBe(0);
+        expect(r.out).not.toContain("ExperimentalWarning");
+        // 不能进 MCP server 分支（那就说明子命令分派坏了）
+        expect(r.out).not.toContain("mcp server ready");
+      }
+      // 顺带钉住"没有真开库"：doctor 不该创建 tasks.db
+      expect(existsSync(join(sHome, "tasks.db"))).toBe(false);
+    } finally {
+      rmSync(sHome, { recursive: true, force: true });
+    }
+  });
+
   it("profile list 列出 profile 并标出默认", async () => {
     const r = await runCli(["profile", "list"]);
     expect(r.code).toBe(0);

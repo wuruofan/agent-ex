@@ -14,6 +14,7 @@
  * 保留其余），所以密钥不会因为重跑 init 而丢失。变的只有 config.json。
  */
 import type { Config } from "./config.js";
+import { MARK } from "./marks.js";
 
 export interface ConfigChange {
   /** 变更类别，决定提示语怎么写。 */
@@ -128,26 +129,32 @@ export function renderChangeWarning(changes: ConfigChange[]): string {
   if (changes.length === 0) return "";
   const lines = [
     "",
-    "⚠️  Re-running init REWRITES config.json. These settings will change:",
+    `${MARK.warn} Re-running init REWRITES config.json. These settings will change:`,
     "",
   ];
   const lost = changes.filter((c) => c.after === "(removed)");
-  const changed = changes.filter((c) => c.after !== "(removed)");
+  const added = changes.filter((c) => c.before === "(absent)");
+  const changed = changes.filter((c) => c.after !== "(removed)" && c.before !== "(absent)");
+  if (added.length) {
+    lines.push("  Added:");
+    for (const c of added) lines.push(`    ${MARK.added} ${c.field}  ${c.after}`);
+    lines.push("");
+  }
   if (lost.length) {
     lines.push("  Removed (will be gone):");
-    for (const c of lost) lines.push(`    ✗ ${c.field}  ${c.before}`);
+    for (const c of lost) lines.push(`    ${MARK.removed} ${c.field}  ${c.before}`);
     lines.push("");
   }
   if (changed.length) {
     lines.push("  Rewritten:");
-    for (const c of changed) lines.push(`    · ${c.field}  ${c.before} → ${c.after}`);
+    for (const c of changed) lines.push(`    ${MARK.changed} ${c.field}  ${c.before} -> ${c.after}`);
     lines.push("");
   }
   // 逐项解释最容易被忽略的后果
   const notes: string[] = [];
   const dryRun = changed.find((c) => c.field === "notify.dry_run");
   if (dryRun && dryRun.before === "false" && dryRun.after === "true") {
-    notes.push('  notify.dry_run false → true means terminal notifications will NOT be delivered.');
+    notes.push('  notify.dry_run false -> true means terminal notifications will NOT be delivered.');
   }
   const dp = changed.find((c) => c.field === "defaults.profile");
   // 风险在**旧**默认 profile 被删：它可能同时是 defaults.profile 和别的 profile 的依赖。

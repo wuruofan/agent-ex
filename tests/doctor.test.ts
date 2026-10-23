@@ -57,7 +57,7 @@ describe("doctor —— 把证据聚合成结论", () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true } }));
     writeFileSync(join(home, ".env"), "FEISHU_WEBHOOK_URL=https://open.feishu.cn/hook/test\n");
     const r = await doctor({ home });
-    const f = r.findings.find((x) => x.title.includes("关键词"));
+    const f = r.findings.find((x) => x.title.includes("Keyword not set explicitly"));
     expect(f?.severity).toBe("info");
     expect(f?.fixable).toBeFalsy();
     // 缺失不是缺陷：整体不该因此判红
@@ -67,7 +67,7 @@ describe("doctor —— 把证据聚合成结论", () => {
   it("keyword 是本工具的旧产品名时报错并指出不一致（2026-10-13 零通知的根因）", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "agent-flow-ex" } }));
     const r = await doctor({ home });
-    const f = r.findings.find((x) => x.title.includes("旧产品名"));
+    const f = r.findings.find((x) => x.title.includes("pre-rename product name"));
     expect(f?.severity).toBe("error");
     expect(f?.fixable).toBe(true);
     expect(f?.detail).toContain("agent-flow-ex");
@@ -77,18 +77,18 @@ describe("doctor —— 把证据聚合成结论", () => {
   it("自定义 keyword 只报 warn、不判错（机器人登记什么词是用户的界面，见 brand.ts）", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "my-bot-word" } }));
     const r = await doctor({ home });
-    const f = r.findings.find((x) => x.title.includes("自定义值"));
+    const f = r.findings.find((x) => x.title.includes("custom value"));
     expect(f?.severity).toBe("warn");
     expect(f?.fixable).toBeFalsy();
     // 文案必须说清"若机器人登记的就是这个词就忽略"，否则是把用户推向无效动作
     expect(f?.detail).toContain("my-bot-word");
-    expect(f?.detail).toContain("忽略");
+    expect(f?.detail).toContain("ignore this item");
   });
 
   it("显式空串 keyword 是 error 且可自动修（卡片不带关键词 ⇒ 必然 19024）", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "" } }));
     const r = await doctor({ home });
-    const f = r.findings.find((x) => x.title.includes("空"));
+    const f = r.findings.find((x) => x.title.includes("explicitly empty"));
     expect(f?.severity).toBe("error");
     expect(f?.fixable).toBe(true);
   });
@@ -96,7 +96,7 @@ describe("doctor —— 把证据聚合成结论", () => {
   it("明文 webhook 落在 config.json 里报凭证泄露风险", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "https://open.feishu.cn/hook/secret", dry_run: true, keyword: BRAND } }));
     const r = await doctor({ home });
-    const f = r.findings.find((x) => x.title.includes("明文"));
+    const f = r.findings.find((x) => x.title.includes("plaintext"));
     expect(f?.severity).toBe("error");
     expect(f?.fixable).toBe(true);
   });
@@ -108,7 +108,7 @@ describe("doctor —— 把证据聚合成结论", () => {
     try {
       writeCfg(baseCfg());
       const r = await doctor({ home });
-      expect(r.findings.some((f) => f.title.includes("webhook 地址未设置"))).toBe(true);
+      expect(r.findings.some((f) => f.title.includes("Webhook URL is not set"))).toBe(true);
     } finally {
       if (saved !== undefined) process.env.FEISHU_WEBHOOK_URL = saved;
     }
@@ -117,14 +117,14 @@ describe("doctor —— 把证据聚合成结论", () => {
   it("默认 profile 不存在时报错（会导致每次派发都失败）", async () => {
     writeCfg(baseCfg({ defaults: { profile: "ghost", timeout_sec: 3600 } }));
     const r = await doctor({ home });
-    const f = r.findings.find((x) => x.title.includes("默认 profile"));
+    const f = r.findings.find((x) => x.title.includes("Default profile does not exist"));
     expect(f?.severity).toBe("error");
   });
 
   it("executor 的 bin 不可执行时报错", async () => {
     writeCfg(baseCfg({ executors: { claude: { bin: "/definitely/not/here" } } }));
     const r = await doctor({ home });
-    expect(r.findings.some((f) => f.title.includes("不可用"))).toBe(true);
+    expect(r.findings.some((f) => f.title.includes("bin is unusable"))).toBe(true);
   });
 
   /**
@@ -136,7 +136,7 @@ describe("doctor —— 把证据聚合成结论", () => {
     writeCfg(baseCfg({ executors: { claude: {} as never } }));
     const r = await doctor({ home });
     expect(r.ok).toBe(false);
-    const f = r.findings.find((x) => x.title.includes("没有 bin"));
+    const f = r.findings.find((x) => x.title.includes("has no bin"));
     expect(f?.severity).toBe("error");
     expect(f?.fix).toContain("config set executors.claude.bin");
   });
@@ -183,8 +183,8 @@ describe("doctor —— 把证据聚合成结论", () => {
   it("占位符形状不合规（如 {env:bad_lower}）不被误报成明文凭证", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:bad_lower}", dry_run: true, keyword: BRAND } }));
     const r = await doctor({ home });
-    expect(r.findings.some((f) => f.title.includes("明文"))).toBe(false);
-    const f = r.findings.find((x) => x.title.includes("占位符格式"));
+    expect(r.findings.some((f) => f.title.includes("plaintext"))).toBe(false);
+    const f = r.findings.find((x) => x.title.includes("wrong shape"));
     expect(f?.severity).toBe("error");
     // 形状不对不可自动修（自动"修"只会把一个坏值换成另一个坏值）
     expect(f?.fixable).toBeFalsy();
@@ -193,7 +193,7 @@ describe("doctor —— 把证据聚合成结论", () => {
   it("默认 profile 不存在时不可自动修（applyFixes 没有这个分支）", async () => {
     writeCfg(baseCfg({ defaults: { profile: "ghost", timeout_sec: 3600 } }));
     const r = await doctor({ home });
-    const f = r.findings.find((x) => x.title.includes("默认 profile"));
+    const f = r.findings.find((x) => x.title.includes("Default profile does not exist"));
     expect(f?.severity).toBe("error");
     expect(f?.fixable).toBe(false);
     // 修复命令必须是重组后仍存在的命令
@@ -216,7 +216,7 @@ describe("doctor —— 把证据聚合成结论", () => {
       "[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found (attempt 1/3)\n",
     );
     const r = await doctor({ home });
-    const f = r.findings.find((x) => x.title.includes("历史上"));
+    const f = r.findings.find((x) => x.title.includes("in the past"));
     expect(f?.severity).toBe("warn");
     // 当前配置没问题 ⇒ 整体仍算 ok
     expect(r.ok).toBe(true);
@@ -237,10 +237,10 @@ describe("doctor —— 把证据聚合成结论", () => {
       "[notifier] feishu rejected: HTTP 200 code=19001 msg=param invalid (attempt 1/3)\n",
     );
     const r = await doctor({ home });
-    const f = r.findings.find((x) => x.title.includes("历史上"));
-    expect(f?.title).toContain("2 个任务");       // 受影响任务数
-    expect(f?.title).toContain("4 次尝试");       // 拒收尝试次数
-    expect(f?.detail).toContain("code=19024 ×3 次");
+    const f = r.findings.find((x) => x.title.includes("in the past"));
+    expect(f?.title).toContain("2 task(s)");       // 受影响任务数
+    expect(f?.title).toContain("4 attempt(s)");    // 拒收尝试次数
+    expect(f?.detail).toContain("code=19024 ×3 attempt(s)");
     // 两个码的修法互斥（改关键词 vs 换地址）⇒ 都要给，不能只给次数最多的那个
     expect(f?.fix).toContain(FEISHU_ERRORS["19024"].fix);
     expect(f?.fix).toContain(FEISHU_ERRORS["19001"].fix);
@@ -353,7 +353,7 @@ describe("--fix —— 只修确定性缺陷", () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "https://open.feishu.cn/hook/abc", dry_run: true, keyword: BRAND } }));
     writeFileSync(join(home, ".env"), "FEISHU_WEBHOOK_URL=https://other/hook\n");
     const r = applyFixes(home);
-    expect(r.skipped.join()).toContain("未覆盖");
+    expect(r.skipped.join()).toContain("not overwritten");
     expect(readFileSync(join(home, ".env"), "utf8")).toContain("https://other/hook");
   });
 
@@ -369,8 +369,8 @@ describe("--fix —— 只修确定性缺陷", () => {
     const before = readFileSync(join(home, "config.json"), "utf8");
     const r = applyFixes(home); // 修复前：Error: executor "ghost" bin ... not found or not executable
     expect(r.applied).toEqual([]);                     // 没落盘就不能报"已修"
-    expect(r.skipped.join()).toContain("未写入");
-    expect(r.notes.join()).toContain("未落盘");
+    expect(r.skipped.join()).toContain("not written");
+    expect(r.notes.join()).toContain("NOT written");
     expect(readFileSync(join(home, "config.json"), "utf8")).toBe(before);
   });
 
@@ -382,7 +382,7 @@ describe("--fix —— 只修确定性缺陷", () => {
     const r = applyFixes(home);
     expect(r.applied).toEqual([]);
     // 旧名提示只在真的写进 config 之后才成立
-    expect(r.notes.join()).not.toContain("改回去");
+    expect(r.notes.join()).not.toContain("change it back");
   });
 
   it("校验失败时不先把凭证写进 .env（config 没改，凭证就不该多一份拷贝）", () => {
@@ -409,7 +409,7 @@ describe("doctor --send —— 自检卡的结论里必须带飞书 code", () =>
       ok: true, status: 200, json: async () => ({ code: 19024, msg: "Key Words Not Found" }),
     }) as Response);
     const r = await doctor({ home, send: true, fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
-    const f = r.findings.find((x) => x.title.includes("自检卡"));
+    const f = r.findings.find((x) => x.title.includes("was rejected"));
     expect(f?.severity).toBe("error");
     expect(f?.detail).toContain("code=19024");
     expect(f?.detail).toContain("Key Words Not Found");
@@ -421,7 +421,7 @@ describe("doctor --send —— 自检卡的结论里必须带飞书 code", () =>
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: false, keyword: BRAND } }));
     const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ code: 0 }) }) as Response);
     const r = await doctor({ home, send: true, fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
-    const f = r.findings.find((x) => x.title.includes("自检卡已投递"));
+    const f = r.findings.find((x) => x.title.includes("Self-check card delivered"));
     expect(f?.severity).toBe("ok");
   });
 
@@ -435,6 +435,6 @@ describe("doctor --send —— 自检卡的结论里必须带飞书 code", () =>
     const r = await doctor({ home, send: true, fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
     // 卡片里必须有关键词元素，且内容是 BRAND（与真实投递一致）
     expect(bodies[0]).toContain(BRAND);
-    expect(r.findings.some((f) => f.title.includes("自检卡已投递"))).toBe(true);
+    expect(r.findings.some((f) => f.title.includes("Self-check card delivered"))).toBe(true);
   });
 });
