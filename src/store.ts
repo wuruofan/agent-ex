@@ -6,7 +6,30 @@ import type { DatabaseSync } from "node:sqlite";
 // vitest 2.1.x 的 vite resolver 会把 "node:sqlite" 的前缀剥掉，导致 "Failed to load url sqlite"。
 // 用 createRequire 绕过 vite 转译；运行时无差别。
 const require = createRequire(import.meta.url);
-const { DatabaseSync: DatabaseSyncCtor } = require("node:sqlite") as { DatabaseSync: new (path: string) => DatabaseSync };
+
+/**
+ * 懒加载 node:sqlite。
+ *
+ * ⚠️ 为什么不能放在模块顶层：`require("node:sqlite")` 会让 Node 立刻打印
+ * "ExperimentalWarning: SQLite is an experimental feature"——而这条警告是**异步**触发的，
+ * 会插进 readline 的第一个提示符中间，把交互式 init 的界面搅乱：
+ *
+ *   Executor to configure (claude/opencode) [claude]: (node:71345) ExperimentalWarning: SQLite is an experimental feature…
+ *
+ * 根因是 `server.ts` 顶层静态 import 了 submit.js → store.js ⇒ 任何子命令（包括根本不碰
+ * 数据库的 `init` / `doctor` / `config`）都在启动时加载了 SQLite。实测 init 全程
+ * 一个字节的数据库都没写，那条警告纯属噪音。
+ *
+ * 改成"真正要开库时才 require"：警告只在真的要开库时出现，而不是每次启动都出现。
+ */
+type DatabaseSyncCtor = new (path: string) => DatabaseSync;
+let ctor: DatabaseSyncCtor | null = null;
+function databaseSyncCtor(): DatabaseSyncCtor {
+  if (!ctor) {
+    ctor = (require("node:sqlite") as { DatabaseSync: DatabaseSyncCtor }).DatabaseSync;
+  }
+  return ctor;
+}
 
 export type TaskStatus = "queued" | "running" | "needs_input" | "completed" | "failed" | "cancelled";
 export const TERMINAL_STATUSES: TaskStatus[] = ["completed", "failed", "cancelled"];
@@ -89,7 +112,7 @@ export class Store {
   private db: DatabaseSync;
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
-    this.db = new DatabaseSyncCtor(dbPath);
+    this.db = new (databaseSyncCtor())(dbPath);
     // busy_timeout 必须先设：下面的 journal_mode 切换要拿独占锁，撞上其他连接时靠它重试
     // （后设的话切换会直接 SQLITE_BUSY 失败，且没有任何等待）。
     this.db.exec("PRAGMA busy_timeout=5000;");

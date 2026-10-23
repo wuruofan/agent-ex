@@ -2,17 +2,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { submit } from "./tools/submit.js";
-import { status } from "./tools/status.js";
-import { cancel } from "./tools/cancel.js";
 import { version } from "./tools/version.js";
 import { restart } from "./tools/restart.js";
-import { doctor } from "./doctor.js";
 import { setStartedAt, isTestMode } from "./tools/test-helpers.js";
 import { ensureRuntimeDirs } from "./paths.js";
 import { loadEnvFile } from "./env-file.js";
 import { BRAND } from "./brand.js";
 
+/**
+ * ⚠️ 这里的 import 是**故意不全**的：
+ * `submit` / `status` / `cancel` / `doctor` 都在 `main()` 里动态 import。
+ *
+ * 原因：submit.js → store.js → node:sqlite 是**顶层**加载链，一旦静态 import，
+ * 连 `agent-ex init`（根本不碰数据库）也会在启动时加载 SQLite ——
+ * Node 的 "ExperimentalWarning: SQLite is an experimental feature" 是异步打印的，
+ * 会插进 readline 的第一个提示符中间，把交互式 init 的界面搅乱。
+ *
+ * 保持动态 import 还有一个好处：`init` / `doctor` / `config` 三个子命令启动更快
+ * （不必加载 SDK、SQLite、runner 相关的全部模块）。
+ */
 const json = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }] });
 
 async function main(): Promise<void> {
@@ -20,6 +28,12 @@ async function main(): Promise<void> {
   loadEnvFile();
   ensureRuntimeDirs();
   const server = new McpServer({ name: BRAND, version: "0.1.0" });
+
+  // 动态 import：避免把 SQLite / spawn 相关模块拖进每个子命令的启动路径（见上方注释）
+  const { submit } = await import("./tools/submit.js");
+  const { status } = await import("./tools/status.js");
+  const { cancel } = await import("./tools/cancel.js");
+  const { doctor } = await import("./doctor.js");
 
   server.tool(
     "agent_ex_submit",
