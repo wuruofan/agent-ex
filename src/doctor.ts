@@ -181,7 +181,18 @@ export function applyFixes(home: string): FixResult {
   const c = readConfigLoose(home).cfg;
   if (!c) return { applied, skipped: ["config.json 不可用，未做任何修改"], notes };
 
+  // 先在内存里改完、校验完，再动任何文件。
+  //
+  // 为什么不能边改边写：validateConfig 校验的是**整份**配置，而 --fix 修的只是其中一两项。
+  // 2026-10-23 实测：一个坏 executor + 一个空 keyword 的配置，--fix 把异常从 validateConfig
+  // 一路抛到 CLI，用户看到的是 Node 栈、什么 finding 都没有，且那次修的一个字节都没落盘。
+  // doctor 的存在前提就是"一次聚合多个问题"，所以"可修项与不可修项并存"是主路径而非边角。
+  // 现在校验失败时把改动记为 skipped/notes 并原样返回——文件不动，但话说明白。
   let changed = false;
+  /** 待落盘的改动说明：写盘成功后才搬进 applied，避免"报修了却没写进去"。 */
+  const pending: string[] = [];
+  /** 待写入 .env 的行（延后到校验通过再写，避免 config 没改而凭证先被复制）。 */
+  let envLine: string | null = null;
 
   // keyword：只修"客观上错了"的两种——显式空串、可证明的改名遗留。
   // 缺失与自定义值一律不动（理由见上方注释）。
@@ -191,7 +202,7 @@ export function applyFixes(home: string): FixResult {
     const before = kw === undefined ? "(unset)" : JSON.stringify(kw);
     c.notify.keyword = BRAND;
     changed = true;
-    applied.push(`notify.keyword: ${before} → ${BRAND}`);
+    pending.push(`notify.keyword: ${before} → ${BRAND}`);
     if (kwState === "stale") {
       notes.push(`若你的机器人登记的关键词就是旧名 "${kw}"，请改回去：agent-ex config set notify.keyword "${kw}"`);
     }
@@ -201,26 +212,37 @@ export function applyFixes(home: string): FixResult {
   const url = c.notify?.feishu_webhook_url ?? "";
   if (url && !/^\{env:[A-Z0-9_]+\}$/.test(url) && /^https:\/\//.test(url)) {
     const envPath = join(home, ".env");
-    let envText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+    const envText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
     if (!/^FEISHU_WEBHOOK_URL=/m.test(envText)) {
-      envText = (envText ? envText.replace(/\n*$/, "\n") : "") + `FEISHU_WEBHOOK_URL=${url}\n`;
-      writeFileSync(envPath, envText, { mode: 0o600 });
-      // mode 只在**创建**文件时生效；.env 在 init 之后几乎总是已存在（沿用旧权限），
-      // 必须显式 chmod，否则凭证从 644 的 config.json 挪进 644 的 .env，防护强度没变
-      // （与 init.ts 的 writeEnvFile 同一写法）。
-      chmodSync(envPath, 0o600);
+      envLine = `${envText ? envText.replace(/\n*$/, "\n") : ""}FEISHU_WEBHOOK_URL=${url}\n`;
       c.notify.feishu_webhook_url = "{env:FEISHU_WEBHOOK_URL}";
       changed = true;
-      applied.push("notify.feishu_webhook_url: 明文 → {env:FEISHU_WEBHOOK_URL}（原值已写入 .env，权限 600）");
+      pending.push("notify.feishu_webhook_url: 明文 → {env:FEISHU_WEBHOOK_URL}（原值写入 .env，权限 600）");
     } else {
       skipped.push(".env 里已有 FEISHU_WEBHOOK_URL，未覆盖（请手工核对是否与 config 一致）");
     }
   }
 
-  if (changed) {
+  if (!changed) return { applied, skipped, notes };
+
+  try {
     validateConfig(c);
-    writeFileSync(join(home, "config.json"), JSON.stringify(c, null, 2) + "\n");
+  } catch (e) {
+    skipped.push(`config.json 未写入：整份配置校验失败（${(e as Error).message}）`);
+    notes.push(`以下改动**未落盘**：${pending.join("；")}。上面的坏字段不适合由 --fix 自动改（它不知道该改成什么），先修它再重跑 --fix。`);
+    return { applied, skipped, notes };
   }
+
+  if (envLine !== null) {
+    const envPath = join(home, ".env");
+    writeFileSync(envPath, envLine, { mode: 0o600 });
+    // mode 只在**创建**文件时生效；.env 在 init 之后几乎总是已存在（沿用旧权限），
+    // 必须显式 chmod，否则凭证从 644 的 config.json 挪进 644 的 .env，防护强度没变
+    // （与 init.ts 的 writeEnvFile 同一写法）。
+    chmodSync(envPath, 0o600);
+  }
+  writeFileSync(join(home, "config.json"), JSON.stringify(c, null, 2) + "\n");
+  applied.push(...pending);
   return { applied, skipped, notes };
 }
 

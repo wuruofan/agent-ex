@@ -283,6 +283,32 @@ describe("--fix —— 只修确定性缺陷", () => {
     expect(r.skipped.join()).toContain("未覆盖");
     expect(readFileSync(join(home, ".env"), "utf8")).toContain("https://other/hook");
   });
+
+  /**
+   * 回归：可修项与不可修项并存时（doctor 的主场景），--fix 曾把 validateConfig 的异常
+   * 一路抛到 CLI —— 用户看到 Node 栈、看不到任何 finding，且改动一个字节都没落盘。
+   */
+  it("配置里另有不可修的坏字段时，--fix 不抛错、不写盘，并说明哪些改动被挡下", () => {
+    writeCfg(baseCfg({
+      executors: { claude: { bin: "/bin/ls" }, ghost: { bin: "/definitely/not/here" } },
+      notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "" },
+    }));
+    const before = readFileSync(join(home, "config.json"), "utf8");
+    const r = applyFixes(home); // 修复前：Error: executor "ghost" bin ... not found or not executable
+    expect(r.applied).toEqual([]);                     // 没落盘就不能报"已修"
+    expect(r.skipped.join()).toContain("未写入");
+    expect(r.notes.join()).toContain("未落盘");
+    expect(readFileSync(join(home, "config.json"), "utf8")).toBe(before);
+  });
+
+  it("校验失败时不先把凭证写进 .env（config 没改，凭证就不该多一份拷贝）", () => {
+    writeCfg(baseCfg({
+      executors: { claude: { bin: "/bin/ls" }, ghost: { bin: "/definitely/not/here" } },
+      notify: { feishu_webhook_url: "https://open.feishu.cn/hook/abc", dry_run: true, keyword: BRAND },
+    }));
+    applyFixes(home);
+    expect(existsSync(join(home, ".env"))).toBe(false);
+  });
 });
 
 describe("doctor --send —— 自检卡的结论里必须带飞书 code", () => {

@@ -221,21 +221,22 @@
 
 **⚠️ 实现先于 spec 落地**（本轮会话中在用户明确要求"先解决 schema 隐患"的前提下先行实现，未先出 spec —— 流程偏离，已如实记录）。
 
-当前状态：**全部通过测试，未提交**。
+当前状态：**全部通过测试，已提交**（`bc5759f` 实现；`9a74cb2` 评审修复；后续 `--fix` 校验崩溃的修复随下一提交落地）。
 
 | 测试文件 | 覆盖 |
 | :--- | :--- |
 | `tests/store.test.ts`（+5） | schema 迁移：补列、读写可用、NOT NULL 靠 DEFAULT、幂等、空库 |
 | `tests/init-changes.test.ts`（11） | diff 逻辑 + 警告文案的后果说明 |
 | `tests/init-e2e.test.ts`（4） | init 端到端：预告展示 / 拒绝则不写盘 / 同意则备份 / 非法则不写盘 |
-| `tests/doctor.test.ts`（28） | 各类 finding、keyword 四态、历史扫描聚合、错误码含义、`--fix` 边界、`--send` 的 code 回传 |
+| `tests/doctor.test.ts`（30） | 各类 finding、keyword 四态、历史扫描聚合、错误码含义、`--fix` 边界（含"坏字段挡住写盘"的不崩溃/不落盘）、`--send` 的 code 回传 |
 | `tests/config-cmd.test.ts`（15） | list / set 白名单与类型校验 / 非空校验 / use 自动创建 |
-| `tests/cli-env.test.ts`（2） | **进程级**回归：CLI 子命令必须加载 `$AGENT_EX_HOME/.env`（P0-1） |
+| `tests/cli-env.test.ts`（3） | **进程级**回归：CLI 子命令必须加载 `$AGENT_EX_HOME/.env`（P0-1）；`config list` 真的渲染 `bin_ok` |
 
-全量：**212 passed / 21 files**，`tsc --noEmit` 0 error。
+全量：**215 passed / 21 files**，`tsc --noEmit` 0 error。
 
 **变异验证**（证明断言有判别力）：关掉迁移 → 4 红；关掉变更预告 → 2 红；改成先写盘后校验 → 2 红；doctor 不扫历史 → 1 红；`--fix` 改 `dry_run` → 1 红；`config set` 不校验白名单 → 1 红；
-**评审后新增**：撤掉 CLI 的 `loadEnvFile()` → 1 红；撤掉 `.env` 的 `chmodSync` → 1 红；`--fix` 覆写自定义 keyword → 2 红；`config set` 允许空串 → 1 红；notifier 不回传 `code` → 2 红。
+**评审后新增**：撤掉 CLI 的 `loadEnvFile()` → 1 红；撤掉 `.env` 的 `chmodSync` → 1 红；`--fix` 覆写自定义 keyword → 2 红；`config set` 允许空串 → 1 红；notifier 不回传 `code` → 2 红；
+**2026-10-23 新增**：去掉 `applyFixes` 里的 try/catch（让 `validateConfig` 的异常穿透）→ **2 红**（实测修复前是 Node 栈 + exit 1）；把 `.env` 写回提前到校验之前 → **1 红**。
 
 > ⚠️ **测试不再依赖开发机环境**：原先 `config use opencode-zen-free` 的两个用例要求本机装了 `opencode` 且在 `PATH` 上，否则必红——"全绿"曾经只是那台机器的巧合。现在用例显式给一个存在的 `bin`，与 `PATH` 无关。
 

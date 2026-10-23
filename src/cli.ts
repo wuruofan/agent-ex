@@ -62,7 +62,9 @@ export function runConfig(args: string[]): number {
       console.log(`  ${p.name}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${env}${mark}`);
     }
     console.log("\nexecutors:");
-    for (const e of l.executors) console.log(`  ${e.name}  bin=${e.bin}`);
+    // bin_ok 必须真的渲染出来：只在结构里探测、界面上不显示，等于没修
+    // （原先恒为 true 的字段至少还骗得过眼睛，现在是真值却没人看）
+    for (const e of l.executors) console.log(`  ${e.name}  bin=${e.bin}${e.bin_ok ? "" : "  (missing — not executable)"}`);
     console.log(`\nnotify:`);
     console.log(`  dry_run   ${l.notify.dry_run}${l.notify.dry_run ? "  (nothing is delivered)" : ""}`);
     console.log(`  keyword   ${l.notify.keyword}`);

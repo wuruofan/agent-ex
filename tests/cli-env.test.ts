@@ -58,7 +58,11 @@ afterAll(async () => {
 });
 
 async function runCli(args: string[]): Promise<{ out: string; code: number }> {
-  const env = { ...process.env, AGENT_EX_HOME: home };
+  return runCliAt(home, args);
+}
+
+async function runCliAt(cwdHome: string, args: string[]): Promise<{ out: string; code: number }> {
+  const env = { ...process.env, AGENT_EX_HOME: cwdHome };
   // 关键：进程环境里**不能**有这个变量，否则测的是"环境变量已有"而不是"加载了 .env"
   delete (env as Record<string, string | undefined>).FEISHU_WEBHOOK_URL;
   try {
@@ -88,5 +92,26 @@ describe("agent-ex doctor --send（CLI 路径）", () => {
     const r = await runCli(["doctor", "--send"]);
     expect(r.out).toContain("webhook 地址已配置");
     expect(r.out).not.toContain("env placeholder not found");
+  });
+});
+
+describe("agent-ex config list（CLI 路径）", () => {
+  it("不可执行的 executor 在输出里被标出来，而不是静默罗列", async () => {
+    const listHome = mkdtempSync(join(tmpdir(), "aex-cli-list-"));
+    try {
+      writeFileSync(join(listHome, "config.json"), JSON.stringify({
+        executors: { good: { bin: "/bin/ls" }, ghost: { bin: "/definitely/not/here" } },
+        profiles: { p1: { executor: "good", env: {} } },
+        notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "agent-ex" },
+        defaults: { profile: "p1", timeout_sec: 60 },
+      }, null, 2));
+      const r = await runCliAt(listHome, ["config", "list"]);
+      expect(r.code).toBe(0);
+      // listConfig 用 resolveBinPath 真探测；这里钉住"值真的被渲染"（否则就是死字段）
+      expect(r.out).toMatch(/ghost\s+bin=\/definitely\/not\/here\s+\(missing/);
+      expect(r.out).not.toMatch(/good\s+bin=\/bin\/ls\s+\(missing/);
+    } finally {
+      rmSync(listHome, { recursive: true, force: true });
+    }
   });
 });
