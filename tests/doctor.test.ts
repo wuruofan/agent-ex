@@ -301,6 +301,17 @@ describe("--fix —— 只修确定性缺陷", () => {
     expect(readFileSync(join(home, "config.json"), "utf8")).toBe(before);
   });
 
+  it("改动被挡下时不提示「改回去」——没改过就没什么可改回", () => {
+    writeCfg(baseCfg({
+      executors: { claude: { bin: "/bin/ls" }, ghost: { bin: "/definitely/not/here" } },
+      notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "agent-flow-ex" },
+    }));
+    const r = applyFixes(home);
+    expect(r.applied).toEqual([]);
+    // 旧名提示只在真的写进 config 之后才成立
+    expect(r.notes.join()).not.toContain("改回去");
+  });
+
   it("校验失败时不先把凭证写进 .env（config 没改，凭证就不该多一份拷贝）", () => {
     writeCfg(baseCfg({
       executors: { claude: { bin: "/bin/ls" }, ghost: { bin: "/definitely/not/here" } },

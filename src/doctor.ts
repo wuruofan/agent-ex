@@ -193,6 +193,14 @@ export function applyFixes(home: string): FixResult {
   const pending: string[] = [];
   /** 待写入 .env 的行（延后到校验通过再写，避免 config 没改而凭证先被复制）。 */
   let envLine: string | null = null;
+  /**
+   * "改回去"的提示：**只在真的落盘后**才告诉用户。
+   *
+   * 之前它在改内存时就被 push 进 notes ⇒ 校验失败、什么都没写的时候，
+   * 用户仍被告知"若你的机器人登记的就是旧名，请改回去"——可压根没改过，
+   * 没什么可改回。与 applied 的 pending/applied 分档同理：报告必须与事实一致。
+   */
+  let revertHint: string | null = null;
 
   // keyword：只修"客观上错了"的两种——显式空串、可证明的改名遗留。
   // 缺失与自定义值一律不动（理由见上方注释）。
@@ -204,7 +212,7 @@ export function applyFixes(home: string): FixResult {
     changed = true;
     pending.push(`notify.keyword: ${before} → ${BRAND}`);
     if (kwState === "stale") {
-      notes.push(`若你的机器人登记的关键词就是旧名 "${kw}"，请改回去：agent-ex config set notify.keyword "${kw}"`);
+      revertHint = `若你的机器人登记的关键词就是旧名 "${kw}"，请改回去：agent-ex config set notify.keyword "${kw}"`;
     }
   }
 
@@ -243,6 +251,8 @@ export function applyFixes(home: string): FixResult {
   }
   writeFileSync(join(home, "config.json"), JSON.stringify(c, null, 2) + "\n");
   applied.push(...pending);
+  // 落盘成功了，"改回去"这条提示才有意义（没改过就没什么可改回）
+  if (revertHint) notes.push(revertHint);
   return { applied, skipped, notes };
 }
 

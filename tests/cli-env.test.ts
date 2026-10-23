@@ -114,4 +114,19 @@ describe("agent-ex config list（CLI 路径）", () => {
       rmSync(listHome, { recursive: true, force: true });
     }
   });
+
+  it("未预期的异常走 CLI 兜底，而不是漏一个裸 Node 栈（MCP 侧由 SDK 兜，CLI 侧必须自己对等）", async () => {
+    const badHome = mkdtempSync(join(tmpdir(), "aex-cli-bad-"));
+    try {
+      // config.json 是个目录 ⇒ readFileSync 抛 EISDIR（不依赖 uid/权限，跨环境稳定）
+      mkdirSync(join(badHome, "config.json"));
+      const r = await runCliAt(badHome, ["config", "list"]);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain("[agent-ex] config failed");
+      // 裸栈的标志：Node 的崩溃页脚
+      expect(r.out).not.toMatch(/Node\.js v/);
+    } finally {
+      rmSync(badHome, { recursive: true, force: true });
+    }
+  });
 });

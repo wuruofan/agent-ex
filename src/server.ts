@@ -127,9 +127,17 @@ if (sub === "init") {
   // init 不在这里加载：它自己就是 .env 的写入方（writeEnvFile 负责合并），
   // 预先把 .env 灌进进程环境会让"检测到的值"与"本次采集的值"混为一谈。
   loadEnvFile();
-  const { runDoctor, runConfig } = await import("./cli.js");
-  const code = sub === "doctor" ? await runDoctor(process.argv.slice(3)) : runConfig(process.argv.slice(3));
-  process.exit(code);
+  // 与 init 分支同一套兜底：未预期的异常不该漏一个裸 Node 栈。
+  // ⚠️ CLI 与 MCP 侧的异常体验必须对等——MCP 侧由 SDK 捕获（返回 isError 结果，
+  // agent 看到的是一句错误信息），CLI 侧没人接就变成一屏栈加 exit 1。
+  try {
+    const { runDoctor, runConfig } = await import("./cli.js");
+    const code = sub === "doctor" ? await runDoctor(process.argv.slice(3)) : runConfig(process.argv.slice(3));
+    process.exit(code);
+  } catch (e) {
+    console.error(`[agent-ex] ${sub} failed:`, e);
+    process.exit(1);
+  }
 } else {
   main().catch((e) => { console.error("[agent-ex] fatal:", e); process.exit(1); });
 }
