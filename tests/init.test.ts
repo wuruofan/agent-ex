@@ -5,12 +5,52 @@ import {
   buildConfig,
   DEFAULT_CLAUDE_ENV,
   DEFAULT_EXTRA_FLAGS,
+  detectAgentClis,
   mcpServerSnippet,
   nextSteps,
   nodeExecPath,
   presetEnv,
+  renderDetectedClis,
   resolveServerEntry,
 } from "../src/init.js";
+
+describe("探测 agent CLI", () => {
+  it("只列真正找到的（没找到的不占位）", () => {
+    const found = detectAgentClis((n) => (n === "opencode" ? "/opt/opencode/bin/opencode" : null));
+    expect(found).toEqual([{ name: "opencode", bin: "/opt/opencode/bin/opencode" }]);
+  });
+
+  it("两个都找到时都列出来", () => {
+    const found = detectAgentClis((n) => `/usr/bin/${n}`);
+    expect(found.map((f) => f.name)).toEqual(["claude", "opencode"]);
+  });
+
+  it("一个都没找到时返回空数组（不是把没找到的塞成 null 占位）", () => {
+    expect(detectAgentClis(() => null)).toEqual([]);
+  });
+
+  it("两个候选都列出来，用标记区分找到与没找到", () => {
+    const text = renderDetectedClis([{ name: "opencode", bin: "/opt/opencode/bin/opencode" }]);
+    expect(text).toContain("opencode");
+    expect(text).toContain("/opt/opencode/bin/opencode");
+    // 没找到的那个也要列出来（否则用户看不出"是没装还是不支持"），
+    // 但要标清楚
+    expect(text).toContain("claude");
+    expect(text).toContain("not found on PATH");
+    // 找到的那个带 ✓，没找到的带 ✗
+    expect(text).toMatch(/✓\s+opencode/);
+    expect(text).toMatch(/✗\s+claude/);
+    // 旧格式是给机器看的
+    expect(text).not.toContain("detected:");
+  });
+
+  it("一个都没找到时说清楚", () => {
+    const text = renderDetectedClis([]);
+    expect(text).toContain("No agent CLI found");
+    expect(text).toContain("claude");
+    expect(text).toContain("opencode");
+  });
+});
 
 describe("presetEnv", () => {
   it("merges generic claude default env (API_TIMEOUT_MS) into every preset", () => {
@@ -72,6 +112,36 @@ describe("buildConfig", () => {
     });
     expect(cfg.executors.opencode.extra_flags).toEqual(DEFAULT_EXTRA_FLAGS.opencode);
     expect(cfg.executors.opencode.extra_flags).toEqual(["--auto"]);
+  });
+});
+
+describe("init 的文案语言", () => {
+  /**
+   * init 的**用户可见**输出必须全英文。
+   *
+   * 为什么钉死：init 的向导（问题、默认值提示、next steps、变更预告）历来全是英文，
+   * 中间混进过一句中文说明（"opencode: provider 由 opencode 自己的配置管理…"）——
+   * 一屏里两种语言，用户得自己分辨哪句是哪语种。代码注释用中文没关系（那是给开发者看的），
+   * 但**用户看到的东西**要么全英文、要么全中文，不能混。
+   *
+   * 断言方式：扫 init.ts 源码里所有 console.log/error 与 ask() 的提示语，
+   * 看有没有中文字符。
+   */
+  it("init 源码里没有面向用户的中文输出", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const src = readFileSync(join(repoRoot, "src", "init.ts"), "utf8");
+
+    // 只看"用户可见"的调用：console.log / console.error / ask( / rl.question(
+    // 注释里的中文不在这些行里（注释行以 * 或 // 开头）。
+    const userVisible = src
+      .split("\n")
+      .filter((line) => /console\.(log|error)\(|rl\.question\(|\bask\(/.test(line))
+      .filter((line) => !/^\s*(\*|\/\/)/.test(line));
+    const chinese = userVisible.filter((line) => /[一-龥]/.test(line));
+    expect(chinese).toEqual([]);
   });
 });
 

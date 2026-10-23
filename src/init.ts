@@ -6,7 +6,7 @@
  * 完成后用 loadConfig() 自校验，并提示可编辑 config.json 调整模型别名/默认 env。
  *
  * 密钥处理策略：
- *   - preset（minimax/deepseek）：检测对应环境变量 → 掩码展示 → [Y/n]（Enter=Y）；
+ *   - preset（minimax/deepseek）：检测对应环境变量 → 掩码展示 → 问 "Use this value? (Y/n)"（Enter=Y）；
  *     拒绝后粘贴新值或 Enter=skip。config 占位符沿用预设的 token_var。
  *   - custom：只粘贴（无标准变量名可检测）；占位符变量名从 profile 名派生（apiKeyVarFor）。
  *   - 检测到/粘贴到的值写入 .env（幂等）；config.json 始终是 {env:VAR}。
@@ -21,8 +21,13 @@ import { loadConfig, validateConfig, type Config } from "./config.js";
 import { BRAND } from "./brand.js";
 import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
 import { diffConfigs, renderChangeWarning } from "./init-changes.js";
+import { ansi } from "./ansi.js";
+import { MARK } from "./marks.js";
 
 type RL = ReturnType<typeof createInterface>;
+
+/** 本工具支持的 agent CLI（名字 = config 里的 executor 名）。 */
+export const AGENT_CLIS = ["claude", "opencode"] as const;
 
 function which(name: string): string | null {
   try {
@@ -32,9 +37,73 @@ function which(name: string): string | null {
   }
 }
 
+export interface DetectedCli {
+  name: string;
+  /** 绝对路径（`command -v` 的结果）。 */
+  bin: string;
+}
+
+/**
+ * 探测可用的 agent CLI。
+ *
+ * `whichFn` 可注入：测试不能依赖开发机装了什么（§9 的"PATH 巧合"同款问题）。
+ */
+export function detectAgentClis(whichFn: (name: string) => string | null = which): DetectedCli[] {
+  const out: DetectedCli[] = [];
+  for (const name of AGENT_CLIS) {
+    const bin = whichFn(name);
+    if (bin) out.push({ name, bin });
+  }
+  return out;
+}
+
+/**
+ * 探测结果的展示。
+ *
+ * 原先是 `detected: claude=(not found)  opencode=/path` —— 给机器看的：
+ * "没找到"与"找到了"平铺在同一行，用户得自己分辨哪个可用。
+ *
+ * 现在两个候选**都列出来**，用颜色区分（找到=绿、没找到=暗）：
+ * 只列找到的那个会让人看不出"另一个到底是没有、还是压根不支持"。
+ */
+export function renderDetectedClis(found: DetectedCli[]): string {
+  const lines = AGENT_CLIS.map((name) => {
+    const hit = found.find((f) => f.name === name);
+    return hit
+      ? `  ${ansi.green(MARK.ok)} ${name.padEnd(9)} ${hit.bin}`
+      : `  ${ansi.dim(MARK.error)} ${ansi.dim(name.padEnd(9) + "not found on PATH")}`;
+  });
+  const header = found.length === 0
+    ? ansi.yellow("No agent CLI found on PATH")
+    : ansi.bold("Agent CLIs on PATH");
+  return `${header}\n${lines.join("\n")}`;
+}
+
 async function ask(rl: RL, prompt: string, def?: string): Promise<string> {
-  const suffix = def !== undefined ? ` [${def}]` : "";
-  return (await rl.question(`${prompt}${suffix}: `)).trim();
+  // 默认值用暗色：它是"回车即可"的提示，不该和正题一样抢注意力
+  const suffix = def !== undefined ? ` ${ansi.dim(`[${def}]`)}` : "";
+  return (await rl.question(`${ansi.cyan(prompt)}${suffix}${ansi.dim(":")} `)).trim();
+}
+
+/**
+ * yes/no 型提问。
+ *
+ * 为什么不用普通 `ask` + `[Y/n]` 后缀：
+ *  - `[N]` 只说"默认值是 N"，没说还能按什么。Unix 惯例是 `(y/N)`——
+ *    **小写=可选的答案，大写=回车即取的默认值**，一眼看出"按 N 就是不"。
+ *  - 返回值直接是 boolean，调用方不会各写一遍大小写/空串的归一化（漏一处就是 bug）。
+ *
+ * 非法输入不重问而是按默认值处理：重问意味着在 readline 里循环，
+ * 一旦输入流已经 EOF（管道/脚本场景），第二次 question() 会抛 "readline was closed"。
+ */
+async function askYesNo(rl: RL, prompt: string, defaultYes: boolean): Promise<boolean> {
+  const hint = defaultYes ? "(Y/n)" : "(y/N)";
+  const answer = (await rl.question(`${ansi.cyan(prompt)} ${ansi.dim(hint)}${ansi.dim(":")} `)).trim().toLowerCase();
+  if (answer === "") return defaultYes;
+  if (answer === "y" || answer === "yes") return true;
+  if (answer === "n" || answer === "no") return false;
+  console.log(ansi.dim(`  (please answer y or n — treating it as "${defaultYes ? "yes" : "no"}")`));
+  return defaultYes;
 }
 
 /** 通用 claude 环境变量默认值：自动并入每个 claude profile，用户可事后编辑 config.json 调整。 */
@@ -100,7 +169,7 @@ function maskSecret(v: string): string {
 
 /**
  * 密钥/URL 采集（两步语义各自自洽）：
- *   detect=true 且环境里有值 → 掩码展示，问 "Use this value? [Y/n]"（Enter=Y，符合默认值惯例）；
+ *   detect=true 且环境里有值 → 掩码展示，问 "Use this value? (Y/n)"（Enter=Y，符合默认值惯例）；
  *     拒绝（n）才进入下一步 → 粘贴新值，或 Enter=skip。
  *   detect=false（custom）→ 直接粘贴或跳过。
  * 返回解析到的真实值；undefined 表示跳过（保留占位符，不写 .env）。
@@ -111,8 +180,9 @@ async function collectSecret(
 ): Promise<string | undefined> {
   const detected = opts.detect ? process.env[opts.varName] : undefined;
   if (detected) {
-    const a = (await ask(rl, `Detected ${opts.varName} = ${maskSecret(detected)}\nUse this value? [Y/n]`, "Y")).trim();
-    if (a === "" || /^y(es)?$/i.test(a)) return detected;
+    // "Detected X = sk-abc…wxyz" 单独一行，问题另起一行 ⇒ 两件事都看得清
+    console.log(`Detected ${opts.varName} = ${maskSecret(detected)}`);
+    if (await askYesNo(rl, "Use this value?", true)) return detected;
   }
   const b = (await ask(rl, `Paste ${opts.label} (or Enter to skip)`)).trim();
   return b || undefined;
@@ -277,7 +347,18 @@ function timestampSuffix(): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
-export async function runInit(input: NodeJS.ReadableStream = process.stdin): Promise<void> {
+export interface InitOptions {
+  /**
+   * 探测 agent CLI 的实现（默认走 `command -v`）。
+   *
+   * 可注入是为了让测试**不依赖开发机装了什么**：init 的问答流程会随
+   * "探测到几个 CLI"变化（只找到一个就不再问"用哪个"），若探测结果依赖
+   * 开发机环境，测试就会变成"这台机器恰好装了 X"的巧合。
+   */
+  which?: (name: string) => string | null;
+}
+
+export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts: InitOptions = {}): Promise<void> {
   const home = agentExHome();
   ensureRuntimeDirs();
   const cfgPath = join(home, "config.json");
@@ -288,22 +369,47 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
       // 这里只做"廉价退出"，不做"知情同意"：此刻还不知道新 config 长什么样（问答还没开始），
       // 所以问"要不要覆盖"是在让用户对一个未知后果点头。知情同意放在写盘前那一刻
       // （那时新旧两份都在手上，能逐项列出差异）。
-      const ow = (await ask(rl,
-        `${cfgPath} already exists. Re-running init REWRITES it (you will see exactly what changes before anything is written). Continue?`,
-        "N")).toLowerCase();
-      if (ow !== "y" && ow !== "yes") { console.log("aborted."); return; }
+      //
+      // 提示分三行：一行长文本会顶满终端宽度、还把问题挤在末尾。
+      console.log(`${ansi.yellow(MARK.warn)} ${ansi.bold(cfgPath)} already exists.`);
+      console.log(ansi.dim("  Re-running init REWRITES it — you will see exactly what changes before anything is written."));
+      if (!(await askYesNo(rl, "Continue?", false))) { console.log("Aborted."); return; }
     }
 
-    const claudeBin = which("claude");
-    const opencodeBin = which("opencode");
-    console.log(`detected: claude=${claudeBin ?? "(not found)"}  opencode=${opencodeBin ?? "(not found)"}`);
+    // ---- 探测可用的 agent CLI ----
+    // 只列真正找到的；**只找到一个时不再问"用哪个"**（答案已经唯一），
+    // 找到多个才问。
+    const found = detectAgentClis(opts.which);
+    console.log(renderDetectedClis(found));
 
-    let executor = (await ask(rl, "Executor to configure (claude/opencode)", "claude")).toLowerCase() || "claude";
-    if (executor !== "claude" && executor !== "opencode") {
-      console.log(`unknown executor "${executor}", falling back to claude`);
-      executor = "claude";
+    let executor: string;
+    let detected: string | null = null;
+    if (found.length === 1) {
+      // 只有一个可用项 ⇒ 问"claude 还是 opencode"是白问（默认还是 claude 的话更糟：
+      // 用户直接回车就会配出一个**根本没装**的 executor，还得再手打一遍它的路径）。
+      executor = found[0].name;
+      detected = found[0].bin;
+      // 说清"为什么是它"：用户得知道这是**唯一**可用的，而不是我们随便挑的
+      const missing = AGENT_CLIS.filter((n) => n !== executor).join(", ");
+      console.log(`${ansi.green(MARK.ok)} using ${ansi.bold(executor)} ${ansi.dim(`(${detected}) — the only one installed; ${missing} not found`)}\n`);
+    } else if (found.length > 1) {
+      const names = found.map((f) => f.name);
+      const answer = (await ask(rl, `Which agent CLI to use? (${names.join("/")})`, found[0].name)).toLowerCase();
+      const chosen = found.find((f) => f.name === answer);
+      if (!chosen) {
+        console.log(`unknown agent CLI "${answer}" — using ${found[0].name}`);
+      }
+      executor = (chosen ?? found[0]).name;
+      detected = (chosen ?? found[0]).bin;
+    } else {
+      // 一个都没找到：只能问用户要绝对路径
+      executor = (await ask(rl, "Agent CLI to configure (claude/opencode)", "claude")).toLowerCase() || "claude";
+      if (executor !== "claude" && executor !== "opencode") {
+        console.log(`unknown agent CLI "${executor}", falling back to claude`);
+        executor = "claude";
+      }
     }
-    const detected = executor === "claude" ? claudeBin : opencodeBin;
+
     let bin = (await ask(rl, `Absolute path to ${executor} binary`, detected ?? "")).trim();
     if (!bin && detected) bin = detected;
     if (!bin) { console.error("no binary path provided; aborting."); process.exit(1); }
@@ -330,10 +436,10 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
       const secret = await collectSecret(rl, { label: "API key", varName: tokenVar, detect: presetName !== "custom" });
       if (secret) envUpdates[tokenVar] = secret;
     } else {
-      console.log("opencode: provider 由 opencode 自己的配置管理（opencode auth login / opencode.json），agent-ex 只负责拉起；如需额外环境变量，稍后加到 config.json 的 profile.env。");
+      console.log("opencode: the provider is managed by opencode itself (opencode auth login / opencode.json); agent-ex only launches it. For extra env vars, add them to the profile's env later.");
       // zen free：零密钥、模型集会轮换 → 用 {model:zen-free} 占位符让 runner 每次 spawn 时动态解析。
-      const zen = (await ask(rl, "Use opencode zen free model (auto-resolving, no key needed)", "Y")).trim();
-      if (zen === "" || /^y(es)?$/i.test(zen)) {
+      const zen = await askYesNo(rl, "Use opencode zen free model (auto-resolving, no key needed)", true);
+      if (zen) {
         env = { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: ZEN_FREE_PLACEHOLDER, small_model: ZEN_FREE_PLACEHOLDER }) };
       }
     }
@@ -354,8 +460,8 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
     const changes = diffConfigs(oldCfg, config as Config);
     if (changes.length > 0) {
       console.log(renderChangeWarning(changes));
-      const proceed = (await ask(rl, "Apply these changes?", "N")).toLowerCase();
-      if (proceed !== "y" && proceed !== "yes") { console.log("aborted."); return; }
+      const proceed = await askYesNo(rl, "Apply these changes?", false);
+      if (!proceed) { console.log("Aborted."); return; }
     }
 
     // ---- 先校验、后落盘 ----
@@ -374,7 +480,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
       const bak = `${cfgPath}.bak.${timestampSuffix()}`;
       try {
         writeFileSync(bak, readFileSync(cfgPath));
-        console.log(`backed up existing config → ${bak}`);
+        console.log(`backed up existing config -> ${bak}`);
       } catch (e) {
         console.error(`could not back up existing config: ${(e as Error).message}`);
       }
@@ -392,7 +498,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
 
     try {
       loadConfig(home);
-      console.log("config valid \u2713");
+      console.log(`config valid ${ansi.green(MARK.ok)}`);
     } catch (e) {
       console.error("config written but self-check failed:", (e as Error).message);
       process.exit(1);
@@ -403,7 +509,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
     const tokenKeyMatch = /^\{env:(.+)\}$/.exec(tokenPlaceholder);
     const tokenKey = tokenKeyMatch ? tokenKeyMatch[1] : undefined;
     if (tokenKey && !readEnv(join(home, ".env")).map.has(tokenKey)) {
-      console.log(`\n\u26a0 ${tokenKey} not set — add it to ${join(home, ".env")} (or export it) before running the server, otherwise tasks will fail.`);
+      console.log(`\n${ansi.yellow(MARK.warn)} ${tokenKey} not set — add it to ${join(home, ".env")} (or export it) before running the server, otherwise tasks will fail.`);
     }
 
     console.log(nextSteps(home, resolveServerEntry()));
