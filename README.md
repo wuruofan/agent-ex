@@ -593,6 +593,37 @@ node dist/server.js init    # 即 `agent-ex init`
 > 之后再跑 `profile create` 会得到「已存在」而不是多出一个同义但名字不同的 profile。
 > 名字仍可自己改（改了名 env 不变：env 描述的是「用哪套模型配置」，不是「叫什么」）。
 
+## 版本历史
+
+### 0.2.0（2026-10-26）
+
+面向「配置改不动、通知不通」这两个高频痛点的版本。
+
+**新增 MCP 工具**
+- `agent_ex_doctor`：把「通知到底通不通」的证据聚合成**结论 + 病因 + 可复制的修复命令**；`send=true` 会实发一张正文不含产品名的自检卡。验证飞书关键词闸门必须用它——拿真实任务报告当探针会假通过。
+
+**新增 CLI 子命令**（0.1.0 的 server 只认 `init`，其余子命令一律被静默吞成 MCP server）
+- `agent-ex doctor [--fix] [--send]`：体检。`--fix` 自动修**确定性缺陷**（显式空串关键词、过期产品名、明文 webhook 落在 config.json），但**不动 `dry_run`**（那是偏好不是缺陷）、**不动自定义关键词**（机器人登记什么词是用户的界面）。
+- `agent-ex config [list|set]`：改全局字段（`notify.dry_run` / `notify.keyword` / `defaults.timeout_sec` / `executors.<name>.bin`）。写入口是**白名单**——只改一个字段不必重跑 `init`。
+- `agent-ex profile [list|use|create|set]`：profile 生命周期。`profile create opencode-zen-free` 物化零密钥的内置免费模型预设。
+- 拼错的子命令现在**明确报错并打印用法**，不再静默变成 MCP server。
+
+**免费模型**
+- zen 免费模型**动态解析** `{model:zen-free}`：每次 spawn 前拉实时清单（免鉴权），配置里零硬引用模型名；撞限流的模型进排除集后自动路由到下一个。
+- 内置偏好默认 `deepseek,glm,mimo`（实时清单快照；清单的 `created` 字段无区分度，家族顺序是口味）。
+
+**修复**
+- init 的 opencode+zen-free 分支与内置 preset 统一：**同名同 env**。原先它叫 `default` 且漏了 `ZEN_FREE_PREFER`，于是「先 init、再 profile create」会得到两个同义但名字与 env 都不同的 profile。
+- CLI 与 MCP 的 `.env` 加载路径统一：此前 CLI 侧解析 `{env:VAR}` **必失败**（同一份配置，agent 查得通、命令行查不通）。
+- `init` / `doctor` / `config` 懒加载 `node:sqlite`：不再有实验性警告插进交互提示符中间。
+- `doctor --fix` 不再在坏 config 上崩溃。
+- 飞书关键词改由单一 brand 常量派生；去掉 SQLite WAL 依赖（只读沙箱也能读 task db）。
+- 零密钥的 opencode 配置不再误报「必须设置 MINIMAX_API_KEY」。
+
+### 0.1.0（2026-10-14）
+
+首个公开版本：`agent_ex_submit` / `agent_ex_status` / `agent_ex_cancel` / `agent_ex_version` / `agent_ex_restart` 五个 MCP 工具，加上 `agent-ex init` 交互式向导（探测 CLI → 生成 config.json + .env）。
+
 ## 发布（npm）
 
 包名 `agent-ex-mcp`，MIT。发布配置已在 `package.json` 就位：
