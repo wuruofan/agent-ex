@@ -637,30 +637,96 @@ node dist/server.js init    # 即 `agent-ex init`
 | `prepublishOnly` | `build` + `test` | 发布前自动构建并跑全量测试，测试红则发布中止 |
 | `engines.node` | `>=22.5` | 依赖 `node:sqlite`（server 与 runner 都要用） |
 
-```bash
-npm run build && npm test      # prepublishOnly 也会跑，但建议先手动确认
-npm publish --access public
-```
-
-> ⚠️ **必须显式带 `--registry https://registry.npmjs.org`**（或确保 `publishConfig.registry` 生效）。
-> 国内常见的 `registry.npmmirror.com`（淘宝镜像）是**只读**的，不支持 `npm publish`，也不提供注册/登录端点；
-> 带着它发布会在客户端就报 `ENEEDAUTH`。开发者若用镜像装依赖，请在 `~/.npmrc` 之外单独配置发布源。
-
-发布者需自备 npm 账号，并开启 2FA：`npm profile enable-2fa auth-and-writes`。
-
-**关于 token（npm 现行策略）**：发布必须满足二者之一——账号已开 2FA（`npm publish` 时用配置的验证器/安全密钥认证），
-或使用**带 bypass 2FA 权限的 granular access token**。实测（2026-10-14）：账号未开 2FA 时，
-`npm login` 拿到的会话凭据无法完成发布，registry 直接返回 `E403 … Two-factor authentication or granular
-access token with bypass 2fa enabled is required`（此错**不会**提示要 OTP，容易误判为「已登录却仍被拒」）。
-命令行创建方式：`npm token create --bypass-2fa --expires 90 --packages-all --packages-and-scopes-permission read-write`。
-若要走无人值守的 CI，优先用下方的 Trusted Publisher（OIDC），无需长期密钥。
-
-若要接 CI，推荐 [Trusted Publisher（OIDC）](https://docs.npmjs.com/trusted-publishers)（无需长期密钥），
-它需要 npm CLI ≥ 11.5.1、Node ≥ 22.14，且**无法创建新包**：必须先手动发布至少一个版本、包已存在后才能配置。
-
 > ⚠️ **npm 包不含 dispatch skill**：`skills/` 与 `scripts/` 不在 `files` 白名单里。
 > 但这已不再是分发缺口——skill 走 [Agent Skills](https://github.com/agentskills) 规范，
 > 使用者用 `npx skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y` 从 GitHub 直接装（见「安装 dispatch skill」）。
+
+### 发布前 checklist
+
+```bash
+# 1) 版本号：package.json + package-lock.json 一起改（npm version 0.2.0 --no-git-tag-version 会同时改）
+# 2) 构建 + 全量测试（prepublishOnly 也会跑，但先手动确认，别让发布当试验田）
+npm run build && npm test
+
+# 3) 打包，并把包装到**干净目录**里再测一次 —— 这一步不能省
+npm pack
+D=$(mktemp -d) && cd "$D" && npm init -y && npm install <repo>/agent-ex-mcp-0.2.0.tgz
+./node_modules/.bin/agent-ex --help          # 四个子命令都在？
+node <repo>/scripts/smoke-stdio.mjs "$D/node_modules/agent-ex-mcp/dist/server.js"   # MCP 工具面
+```
+
+> 🔥 **第 3 步为什么不能省**：0.1.0（2026-10-14 发布）就是这么漏的——
+> 当时的 CLI 层（`dist/cli.js` / `dist/config-cmd.js` / `dist/doctor.js`）**根本没进包**，
+> 而 0.1.0 的 server 只认 `init`，其余子命令会被**静默吞成 MCP server**。
+> 也就是说：仓库里能跑 ≠ 包里能跑。**装出来测的是包，不是仓库。**
+> 打包后至少确认这三件事：`npm pack --dry-run` 的文件清单里有新增的 `dist/*.js`；
+> 装出来的 `agent-ex --help` 有全部子命令；MCP 的 `tools/list` 有全部生产工具。
+
+### 认证：三种失败态，三种对策
+
+发布前先自查一次，能省掉一轮瞎猜：
+
+```bash
+npm whoami --registry https://registry.npmjs.org   # 打出你的用户名 = token 有效
+```
+
+| 报错 | 真实含义 | 对策 |
+|---|---|---|
+| `E404 … could not be found or you do not have permission` | **多半不是包不存在**——npmjs.org 对「无权限的 PUT」故意回 404（不回 403），不泄露包是否存在 | 查 token 本身：`curl -H "Authorization: Bearer $TOK" https://registry.npmjs.org/-/whoami`。回 401 = token 失效/被撤销/权限范围不含该包；回 200 = token 有效，问题在权限 |
+| `E401 Unauthorized` | token 根本不被官方源接受（过期、被撤、或 scope 不含该包） | 重新 `npm login --registry https://registry.npmjs.org`，或换一枚 scope 覆盖本包的 token |
+| `EOTP … requires a one-time password` | 账号开了 2FA，写操作要过认证 | 二选一：走下面的「网页认证」，或用 granular token |
+
+### 网页认证（EOTP）怎么在非交互环境里走完
+
+npm 的网页认证流程是：CLI 打印一个 `https://www.npmjs.com/auth/cli/<authId>` 链接 →
+你在浏览器里登录并过 2FA → CLI 轮询 `https://registry.npmjs.org/-/v1/done?authId=…` 取回升级后的 token → 自动重试发布。
+
+两个坑（2026-10-26 实测）：
+
+1. **非 TTY 下 npm 会把 authId 打码成 `***`**（为了不把凭据写进 CI 日志）。想拿到真链接，得给它一个伪终端：
+   ```bash
+   script -q /dev/null npm publish agent-ex-mcp-0.2.0.tgz --access public --registry https://registry.npmjs.org
+   ```
+2. **stdin 必须保持打开**。`( sleep 9; printf '\n' ) | script …` 这种写法在 ENTER 之后立刻 EOF，
+   会把 npm 的轮询循环掐断、发布**静默失败**（日志里既没有成功标记也没有错误标记）。
+   要么让管道多挂一会儿，要么干脆自己在终端里跑。
+
+### 该用哪种凭据
+
+| 方式 | 能力 | 适用 |
+|---|---|---|
+| `npm login` 得到的会话 token | 直接发布，但**每次发布都要过 2FA**（EOTP） | 本机手动发版；token 写在 `~/.npmrc`，不在仓库里 |
+| granular token + `read-write` + `bypass-2fa` | 直接发布，无需 2FA | 脚本化发版。⚠️ npm 提示**直发型 bypass-2fa token 将于 2027 年 1 月停止工作** |
+| granular token + `read-write-stage-only` | 发布进**暂存队列**，需在 npm 界面确认后才公开；且**不能覆盖已发布版本** | 想要一道人工闸门时 |
+| [Trusted Publisher（OIDC）](https://docs.npmjs.com/trusted-publishers) | 免长期密钥 | CI 首选。要求 npm CLI ≥ 11.5.1、Node ≥ 22.14，且**无法创建新包**（包存在后才能配） |
+
+创建 granular token：
+
+```bash
+npm token create --bypass-2fa --expires 90 --packages-all --packages-and-scopes-permission read-write
+# 或 npm token create --packages-all --packages-and-scopes-permission read-write-stage-only
+```
+
+> 🔒 **凭据卫生**：token 只写在 `~/.npmrc`（或 CI 的 secret）里，**不要贴进聊天、issue、commit、日志**。
+> 一旦贴出来就当已泄露——`npm token revoke <id>` 撤销（`npm token list` 查 id），
+> 换一枚新的用 `npm token create`（`npm token list` **只列 granular token**，不列 `npm login` 的会话 token）。
+
+### 发布后核验
+
+```bash
+# ⚠️ 必须加 --prefer-online：npm 的本地元数据缓存会在发布后继续返回旧包文档，
+#    表现为「明明发出去了，npm view / npm install 却说没有这个版本」
+npm view agent-ex-mcp versions --registry https://registry.npmjs.org --prefer-online
+npm view agent-ex-mcp@latest version --registry https://registry.npmjs.org --prefer-online
+
+# 线上产物 == 本地构建产物？（registry 的 dist.shasum 是 sha1，不是 sha256）
+curl -sS -o /tmp/reg.tgz https://registry.npmjs.org/agent-ex-mcp/-/agent-ex-mcp-0.2.0.tgz
+shasum -a 1 /tmp/reg.tgz          # 应等于 dist.shasum
+cmp /tmp/reg.tgz ./agent-ex-mcp-0.2.0.tgz   # 应完全一致
+```
+
+最后再从 registry 装一次、跑一遍冒烟（CLI + `tools/list` + `agent_ex_version` 自报版本），
+确认**用户真正装到的那一份**是对的。
 
 ## 后续（planned）
 
