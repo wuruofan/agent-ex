@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { agentExHome, ensureRuntimeDirs } from "./paths.js";
 import { loadConfig, validateConfig, type Config } from "./config.js";
 import { BRAND } from "./brand.js";
-import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
+import { BUILTIN_PROFILES, ZEN_FREE_PROFILE_NAME } from "./config-cmd.js";
 import { diffConfigs, renderChangeWarning } from "./init-changes.js";
 import { ansi } from "./ansi.js";
 import { MARK } from "./marks.js";
@@ -257,6 +257,42 @@ export function buildConfig(a: InitAnswers) {
 }
 
 /**
+ * 纯函数：配置引用了、但 .env 里没有的密钥变量名（没有则 undefined）。
+ *
+ * 只有配置**真的引用了** `{env:VAR}` 占位符时才谈得上"缺密钥"。
+ * opencode 的 zen free 是零密钥的，profile env 里根本没有 `{env:...}`——
+ * 2026-10-26 实测：原先这里兜底成 `{env:MINIMAX_API_KEY}`，导致 opencode + zen free
+ * 跑完 init 必出"去设 MINIMAX_API_KEY，否则任务会失败"的假警报。
+ */
+export function missingTokenKey(env: Record<string, string>, envKeys: ReadonlySet<string>): string | undefined {
+  const m = /^\{env:(.+)\}$/.exec(env.ANTHROPIC_AUTH_TOKEN ?? "");
+  if (!m) return undefined;
+  return envKeys.has(m[1]) ? undefined : m[1];
+}
+
+/**
+ * 纯函数：opencode 分支的问答结果 → profile 名与 env。
+ *
+ * 关键不变量：**zen free 时，名字与 env 都取内置 preset 那一份**。
+ * 于是 `agent-ex init` 产出的 profile 与 `agent-ex profile create opencode-zen-free`
+ * 完全一致（同名、同 env）——用户后面再跑 profile create 会得到"已存在"，
+ * 而不是多出一个同义但名字不同的 profile（init 原先把它叫 "default"，
+ * 且漏掉 ZEN_FREE_PREFER，于是两套配置各说各话）。
+ *
+ * 名字仍可由用户覆盖（nameAnswer 非空即生效）；env 不随改名变——
+ * 它描述的是"用哪套模型配置"，不是"叫什么"。
+ */
+export function planOpencodeProfile(
+  zen: boolean,
+  nameAnswer: string,
+): { profile: string; env: Record<string, string> } {
+  if (!zen) return { profile: nameAnswer.trim() || "default", env: {} };
+  const builtin = BUILTIN_PROFILES[ZEN_FREE_PROFILE_NAME];
+  // 深拷贝：直接挂 builtin.env 会让后续的 `profile set` 原地改到**进程内的常量**上
+  return { profile: nameAnswer.trim() || ZEN_FREE_PROFILE_NAME, env: { ...builtin.env } };
+}
+
+/**
  * 解析当前运行 init 的 node 解释器绝对路径（用于 MCP 配置里）。
  * 刻意不用 process.execPath 之外的手段：execPath 就是真实解释器，天然带 shebang 的
  * `#!/usr/bin/env node` 之外的绝对路径，避免 MCP 客户端 spawn 时依赖 PATH。
@@ -414,12 +450,13 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
     if (!bin && detected) bin = detected;
     if (!bin) { console.error(`${ansi.red(MARK.error)} No binary path provided; aborting.`); process.exit(1); }
 
-    const profile = (await ask(rl, "Profile name", "default")).trim() || "default";
-
     const envUpdates: Record<string, string> = {};
     let env: Record<string, string> = {};
+    let profile: string;
 
     if (executor === "claude") {
+      // claude 分支里 profile 名必须**先**问：custom 的密钥变量名由它派生
+      profile = (await ask(rl, "Profile name", "default")).trim() || "default";
       const presetName = (await ask(rl, "Provider preset (minimax/deepseek/custom)", "minimax")).toLowerCase() || "minimax";
       let tokenVar: string;
       if (presetName === "custom") {
@@ -439,8 +476,16 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
       console.log(`${ansi.dim(MARK.info)} opencode: the provider is managed by opencode itself (opencode auth login / opencode.json); agent-ex only launches it. For extra env vars, add them to the profile's env later.`);
       // zen free：零密钥、模型集会轮换 → 用 {model:zen-free} 占位符让 runner 每次 spawn 时动态解析。
       const zen = await askYesNo(rl, "Use opencode zen free model (auto-resolving, no key needed)", true);
+      // profile 名在 zen **之后**问：zen 决定默认名（内置 preset 名）与 env
+      const nameAnswer = await ask(rl, "Profile name", zen ? ZEN_FREE_PROFILE_NAME : "default");
+      const plan = planOpencodeProfile(zen, nameAnswer);
+      profile = plan.profile;
+      env = plan.env;
       if (zen) {
-        env = { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: ZEN_FREE_PLACEHOLDER, small_model: ZEN_FREE_PLACEHOLDER }) };
+        console.log(
+          `${ansi.dim(MARK.info)} Using built-in profile "${ZEN_FREE_PROFILE_NAME}" — ` +
+            `same config as "agent-ex profile create ${ZEN_FREE_PROFILE_NAME}".`,
+        );
       }
     }
 
@@ -505,10 +550,14 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
     }
 
     // 提示：占位符对应变量不在 .env（也没被采集到）→ 提醒运行时必须有值，否则任务失败
-    const tokenPlaceholder = env.ANTHROPIC_AUTH_TOKEN ?? "{env:MINIMAX_API_KEY}";
-    const tokenKeyMatch = /^\{env:(.+)\}$/.exec(tokenPlaceholder);
-    const tokenKey = tokenKeyMatch ? tokenKeyMatch[1] : undefined;
-    if (tokenKey && !readEnv(join(home, ".env")).map.has(tokenKey)) {
+    //
+    // ⚠️ 只在配置**真的引用了** {env:VAR} 密钥占位符时才提醒。
+    // 原先这里有个兜底 `?? "{env:MINIMAX_API_KEY}"`，于是**没有密钥的 opencode 分支**
+    // （zen free 零密钥）也会被提醒"去设 MINIMAX_API_KEY，否则任务会失败"——
+    // 2026-10-26 实测：opencode + zen free 跑完 init 必出这条假警报。
+    // 假警报比不提醒更坏：它把一个根本不需要密钥的配置说成"缺东西跑不起来"。
+    const tokenKey = missingTokenKey(env, new Set(readEnv(join(home, ".env")).map.keys()));
+    if (tokenKey) {
       console.log(`\n${ansi.yellow(MARK.warn)} ${tokenKey} not set — add it to ${join(home, ".env")} (or export it) before running the server, otherwise tasks will fail.`);
     }
 

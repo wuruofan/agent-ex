@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { isAbsolute } from "node:path";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   apiKeyVarFor,
   buildConfig,
@@ -7,12 +10,16 @@ import {
   DEFAULT_EXTRA_FLAGS,
   detectAgentClis,
   mcpServerSnippet,
+  missingTokenKey,
   nextSteps,
   nodeExecPath,
+  planOpencodeProfile,
   presetEnv,
   renderDetectedClis,
   resolveServerEntry,
 } from "../src/init.js";
+import { BUILTIN_PROFILES, createProfile, readConfig } from "../src/config-cmd.js";
+import { BRAND } from "../src/brand.js";
 
 describe("探测 agent CLI", () => {
   it("只列真正找到的（没找到的不占位）", () => {
@@ -142,6 +149,85 @@ describe("init 的文案语言", () => {
       .filter((line) => !/^\s*(\*|\/\/)/.test(line));
     const chinese = userVisible.filter((line) => /[一-龥]/.test(line));
     expect(chinese).toEqual([]);
+  });
+});
+
+describe("init 的 opencode 分支 —— 与内置 preset 必须同名同 env", () => {
+  /**
+   * 2026-10-26 修复的问题：
+   * init 的 zen-free 分支原先把 profile 叫 "default"、env 只写 OPENCODE_CONFIG_CONTENT
+   * （漏 ZEN_FREE_PREFER），而内置 preset 叫 "opencode-zen-free"、env 多一个偏好字段。
+   * 于是用户先跑 init、再跑 `profile create opencode-zen-free`，会得到**两个语义相同、
+   * 名字不同、env 也不同**的 profile——切来切去各说各话。
+   */
+  it("zen free 且用户不改名 → 名字与 env 都取内置 preset", () => {
+    const plan = planOpencodeProfile(true, "");
+    expect(plan.profile).toBe("opencode-zen-free");
+    expect(plan.env).toEqual(BUILTIN_PROFILES["opencode-zen-free"].env);
+  });
+
+  it("用户改了名：名字跟着改，env 不变（env 描述模型配置，不描述名字）", () => {
+    const plan = planOpencodeProfile(true, "my-zen");
+    expect(plan.profile).toBe("my-zen");
+    expect(plan.env).toEqual(BUILTIN_PROFILES["opencode-zen-free"].env);
+  });
+
+  it("不用 zen free → 普通 profile（default + 空 env）", () => {
+    const plan = planOpencodeProfile(false, "");
+    expect(plan.profile).toBe("default");
+    expect(plan.env).toEqual({});
+  });
+
+  it("env 是深拷贝：改它不会污染进程内的内置常量", () => {
+    const plan = planOpencodeProfile(true, "");
+    plan.env.ZEN_FREE_PREFER = "mutated";
+    expect(BUILTIN_PROFILES["opencode-zen-free"].env.ZEN_FREE_PREFER).toBe("deepseek,glm,mimo");
+  });
+
+  it("不变量：init 产出的 env 与 `profile create opencode-zen-free` 落盘的 env 逐字段相同", () => {
+    const home = mkdtempSync(join(tmpdir(), "aex-init-plan-"));
+    try {
+      mkdirSync(home, { recursive: true });
+      writeFileSync(
+        join(home, "config.json"),
+        JSON.stringify({
+          executors: { opencode: { bin: "/bin/ls" } },
+          profiles: { default: { executor: "opencode", env: {} } },
+          notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: BRAND },
+          defaults: { profile: "default", timeout_sec: 3600 },
+        }, null, 2),
+      );
+      createProfile(home, "opencode-zen-free");
+      const fromCreate = readConfig(home).profiles["opencode-zen-free"];
+      const fromInit = planOpencodeProfile(true, "");
+      expect(fromInit.profile).toBe("opencode-zen-free");
+      expect(fromInit.env).toEqual(fromCreate.env);
+      // 两边都必须带偏好字段（这是当初 init 漏掉的那一个）
+      expect(fromInit.env.ZEN_FREE_PREFER).toBe("deepseek,glm,mimo");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("missingTokenKey —— 零密钥配置不许报假警报", () => {
+  it("opencode zen free（无 ANTHROPIC_AUTH_TOKEN）→ undefined，不提醒", () => {
+    // 2026-10-26 实测：原先兜底成 {env:MINIMAX_API_KEY}，opencode + zen free
+    // 跑完 init 必出"去设 MINIMAX_API_KEY，否则任务会失败"的假警报。
+    const env = { OPENCODE_CONFIG_CONTENT: "{}", ZEN_FREE_PREFER: "deepseek,glm,mimo" };
+    expect(missingTokenKey(env, new Set())).toBeUndefined();
+  });
+
+  it("claude 预设且 .env 里没有 → 报出缺的变量名", () => {
+    expect(missingTokenKey({ ANTHROPIC_AUTH_TOKEN: "{env:MINIMAX_API_KEY}" }, new Set())).toBe("MINIMAX_API_KEY");
+  });
+
+  it("claude 预设且 .env 里已有 → undefined", () => {
+    expect(missingTokenKey({ ANTHROPIC_AUTH_TOKEN: "{env:MINIMAX_API_KEY}" }, new Set(["MINIMAX_API_KEY"]))).toBeUndefined();
+  });
+
+  it("custom 预设的变量名由 profile 派生，照样能报出来", () => {
+    expect(missingTokenKey({ ANTHROPIC_AUTH_TOKEN: "{env:MYPROV_API_KEY}" }, new Set())).toBe("MYPROV_API_KEY");
   });
 });
 

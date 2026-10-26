@@ -260,7 +260,15 @@ describe("profile create —— 物化内置预设（只创建，不切默认）
     createProfile(home, "opencode-zen-free", { bin: "/bin/ls" });
     setProfileValue(home, "opencode-zen-free", "ZEN_FREE_PREFER", "deepseek,mimo");
     // 内置常量本身没被改
-    expect(BUILTIN_PROFILES["opencode-zen-free"].env.ZEN_FREE_PREFER).toBe("mimo,nemotron,ling");
+    expect(BUILTIN_PROFILES["opencode-zen-free"].env.ZEN_FREE_PREFER).toBe("deepseek,glm,mimo");
+  });
+
+  it("内置偏好不含已消失的家族前缀（ling 已在上游下线）", () => {
+    // 2026-10-26 实测实时清单：free 模型只剩 deepseek / glm / mimo / nemotron / beam / flint / jev
+    const prefer = BUILTIN_PROFILES["opencode-zen-free"].env.ZEN_FREE_PREFER;
+    expect(prefer.split(",").map((s) => s.trim())).not.toContain("ling");
+    // 口味顺序：deepseek 优先
+    expect(prefer.split(",")[0].trim()).toBe("deepseek");
   });
 });
 

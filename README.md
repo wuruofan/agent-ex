@@ -222,7 +222,7 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
 
 ### 免费模型动态解析：`{model:zen-free}`
 
-opencode zen 的 free 模型集会**轮换**（`mimo-v2.5-free` → `mimo-v2.6-flash-free` 已发生过，`glm-4.7-free` 已整体消失），硬编码模型名很快就会失效。
+opencode zen 的 free 模型集会**轮换**（`mimo-v2.5-free` → `mimo-v2.6-flash-free` 已发生过，`glm-4.7-free` 曾整体消失、后来又以 `glm-5.3-flash-free` 回来），硬编码模型名很快就会失效。
 把 `{model:zen-free}` 写进 profile 的 env，即可在**每次 spawn 前**动态解析出当前可用的 free 模型：
 
 ```jsonc
@@ -232,7 +232,7 @@ opencode zen 的 free 模型集会**轮换**（`mimo-v2.5-free` → `mimo-v2.6-f
       "executor": "opencode",
       "env": {
         "OPENCODE_CONFIG_CONTENT": "{\"model\":\"{model:zen-free}\",\"small_model\":\"{model:zen-free}\"}",
-        "ZEN_FREE_PREFER": "mimo,nemotron,ling"   // 可选：家族前缀软偏好，逗号分隔、按序匹配
+        "ZEN_FREE_PREFER": "deepseek,glm,mimo"   // 可选：家族前缀软偏好，逗号分隔、按序匹配
       }
     }
   }
@@ -556,7 +556,7 @@ node dist/server.js init    # 即 `agent-ex init`
 交互流程（claude executor 为例）：
 
 1. 用哪个 agent CLI（`claude` / `opencode`，自动探测并提示检测到的路径）；bin 用检测到的绝对路径（回车即采用）；
-2. profile 名（默认 `default`）；
+2. profile 名（默认 `default`；**opencode + zen free 时默认 `opencode-zen-free`**，见下方说明）；
 3. provider 预设（`minimax` / `deepseek` / `custom`）：
    - **预设**：内置 base_url + 默认模型 + 对应密钥变量名（`MINIMAX_API_KEY` / `DEEPSEEK_API_KEY`）。检测到该环境变量时**掩码展示**（`sk-…wXYZ`）并问 `Use this value? [Y/n]`——`Enter`/`Y` 直接采用；`n` 后粘贴新值，或 `Enter` 跳过。
    - **custom**：只问 `ANTHROPIC_BASE_URL` 与模型名；密钥**只粘贴**（无标准变量名可检测），占位符变量名从 profile 名派生（如 `myprov` → `MYPROV_API_KEY`）。
@@ -585,6 +585,13 @@ node dist/server.js init    # 即 `agent-ex init`
 > 别重跑 `init` —— 那会把其它 profile 一起刷掉。
 >
 > opencode executor 不询问 provider——它由 opencode 自己的配置管理（`opencode auth login` / `opencode.json`），agent-ex 只负责拉起。
+>
+> opencode 分支会多问一句 `Use opencode zen free model (auto-resolving, no key needed)`（默认 Yes）：
+> 选 Yes 时写的是**内置 preset** `{model:zen-free}` 占位符 + `ZEN_FREE_PREFER`，
+> profile 名默认取内置名 **`opencode-zen-free`**。
+> 这样 `init` 产出的 profile 与 `agent-ex profile create opencode-zen-free` **同名同 env**——
+> 之后再跑 `profile create` 会得到「已存在」而不是多出一个同义但名字不同的 profile。
+> 名字仍可自己改（改了名 env 不变：env 描述的是「用哪套模型配置」，不是「叫什么」）。
 
 ## 发布（npm）
 

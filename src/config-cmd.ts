@@ -190,15 +190,33 @@ export function setConfigValue(home: string, key: string, rawValue: string): { k
   return { key, value };
 }
 
+/**
+ * 内置 zen-free profile 的名字。
+ *
+ * 为什么提成常量：init 与 `profile create` 必须写**同一个名字**。
+ * 否则用户先跑 init（产出 "default"）、再跑 `profile create opencode-zen-free`，
+ * 就得到两个语义相同、名字不同的 profile——切来切去各带一套 env，还互相覆盖默认。
+ */
+export const ZEN_FREE_PROFILE_NAME = "opencode-zen-free";
+
 /** 已知的内置 profile 名（`profile create <name>` 时物化）。 */
 export const BUILTIN_PROFILES: Record<string, { executor: string; env: Record<string, string>; desc: string }> = {
-  "opencode-zen-free": {
+  [ZEN_FREE_PROFILE_NAME]: {
     executor: "opencode",
     env: {
       OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: ZEN_FREE_PLACEHOLDER, small_model: ZEN_FREE_PLACEHOLDER }),
       // 偏好"家族前缀"（软口味）：命中的 free 模型优先，取不到就退化为不挑食，绝不因此失败。
       // 空 = 不挑食（选稳定排序的第一个）。用户可改 config.json 里的这一行。
-      ZEN_FREE_PREFER: "mimo,nemotron,ling",
+      //
+      // ⚠️ 这份 CSV 是**某一天的清单快照**，不是永久有效的名单：
+      // 2026-10-26 实测 https://opencode.ai/zen/v1/models（85 个条目 / 8 个 free）：
+      //   deepseek-v4.1-flash-free、glm-5.3-flash-free、mimo-v2.6-flash-free、
+      //   nemotron-3.5-{super-vl,lightning}-free、beam-free、flint-40b-free、jev-1.13-free（jev 已被排除）
+      // 上一版 `mimo,nemotron,ling` 里的 `ling` 已在上游消失（`glm-4.7-free` 也曾整体消失、
+      // 后来又以 5.3 回来）——留着只是无效前缀，不会导致失败。
+      // 家族顺序没有客观信号（清单的 created 字段 85 条全同），按口味排；
+      // 全部前缀都没命中时退化为"不挑食"（按 id 稳定排序取第一个可用的）。
+      ZEN_FREE_PREFER: "deepseek,glm,mimo",
     },
     desc: "opencode zen free models (no API key; the model set rotates and is resolved at spawn time)",
   },

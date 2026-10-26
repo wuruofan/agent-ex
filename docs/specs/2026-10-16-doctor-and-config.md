@@ -129,7 +129,7 @@
 **白名单**（D5）：`notify.dry_run`(bool) · `notify.keyword`(str) · `defaults.profile`(str) · `defaults.timeout_sec`(int>0)
 
 **`use` 的自动创建**：profile 不存在且命中内置名 `opencode-zen-free` 时自动创建：
-- profile env = `OPENCODE_CONFIG_CONTENT` 用 `{model:zen-free}` 占位符 + `ZEN_FREE_PREFER=mimo,nemotron,ling`
+- profile env = `OPENCODE_CONFIG_CONTENT` 用 `{model:zen-free}` 占位符 + `ZEN_FREE_PREFER`（家族前缀偏好串；本行记的是 2026-10-16 的取值 `mimo,nemotron,ling`，**当前默认已改为 `deepseek,glm,mimo`**，见 §8 的 Q5）
 - executor `opencode` 不存在时一并注册（`extra_flags: ["--auto"]`）
 - 真实模型名在 **spawn 时**由 `zen-free.ts` 动态解析（模型集会轮换，配置里零硬引用）
 
@@ -217,7 +217,7 @@
 | Q2 | `--fix` 改 `keyword` 是否越权？ | **越权，已收窄**为四态（见 §3.1） | 实测 `--fix` 曾把用户与机器人侧一致的 `my-bot-word` 覆写成 `agent-ex`，把能投递的配置改成不能投递；且与 `brand.ts`「用户显式写 keyword 仍然优先」冲突。19024 的 69 次证据只支持「**陈旧产品名**是错的」，推不出「任何 ≠BRAND 都错」。**缺失**也不是错（运行时 `??= BRAND`），**显式空串**才是（必然 19024） |
 | Q3 | `config set` 白名单（D5）是否够用？ | **不够，裁决已更正**（见 §12.3） | 评审时判"够"，依据是"缺陷都能被现有键修到"。反例：坏 `executor.bin` 是**阻断点**——它会让 `--fix` 的整份校验失败、也让 `config set` 报无关字段的错，而白名单里没有定点入口，唯一出路是跑全量 `init`。修法：加键形状 `executors.<name>.bin`（`<name>` 必须已存在、值必须过 `resolveBinPath`）。另补：`string` 类型拒绝空串/纯空白（否则 `config set notify.keyword ""` 能造出必然 19024 的状态） |
 | Q4 | doctor 是否该**默认**就发卡？ | **不默认**（保持 D2） | `--send` 会真实 POST 到群；MCP 侧 `agent_ex_doctor` 由 agent 自行调用，默认发送等于让 agent 有权刷群 |
-| Q5 | `opencode-zen-free` 内置 profile 的 `ZEN_FREE_PREFER` 默认值 | **保留 `mimo,nemotron,ling`** | 它是**软偏好**：命中前缀就用、未命中退回 `candidates[0]`，清单过期只会退化为"不挑食"，不可能导致失败。补的是可见性：`config list` 现在会列出 profile 的环境变量名 |
+| Q5 | `opencode-zen-free` 内置 profile 的 `ZEN_FREE_PREFER` 默认值 | ~~**保留 `mimo,nemotron,ling`**~~ → **改为 `deepseek,glm,mimo`**（2026-10-26 复核后更新） | 它是**软偏好**：命中前缀就用、未命中退回 `candidates[0]`，清单过期只会退化为"不挑食"，不可能导致失败。补的是可见性：`config list` 现在会列出 profile 的环境变量名。**2026-10-26 更新**：拉实时清单（`https://opencode.ai/zen/v1/models`，85 个条目 / 8 个 free）发现原名单里的 `ling` 已在上游消失（`glm-4.7-free` 也曾消失、后以 `glm-5.3-flash-free` 回来），`nemotron` 仍在（`nemotron-3.5-{super-vl,lightning}-free`）。清单的 `created` 字段 85 条全同 ⇒ 家族顺序无客观信号，按口味排为 `deepseek,glm,mimo`（`nemotron` 仍可用 `profile set` 随时加回） |
 | Q6 | 迁移是否要支持"改已有列类型"（重建表）？ | **不做**（保持现状） | 真实库打开前后逐字节不变；`ADD COLUMN` 天然只增不改，需要改类型时再引入重建表 + `user_version`（§10.2 已记为缺口） |
 
 ---
@@ -265,7 +265,8 @@
 9. **不做 JSON Schema**（2026-10-23 决定）：Schema 只能表达形状，表达不了"`profile.executor` 必须存在""bin 必须可执行"这类跨字段关系，因此是 `collectConfigIssues()` 的严格子集，天然会漂。且 `$schema` 指向不稳定（相对路径落到 `~/.agent-ex/` 下不存在、绝对路径绑死机器、URL 需外部托管）。等 CLI 面稳定后，若仍需要编辑器补全，再以"schema 先跑形状、关系检查后跑"的派生形态引入，并用 fixture 双向钉。
 10. **未使用的 executor 缺失会阻断启动**（待定）：`validateConfig()` 校验**全部** executor，所以哪怕默认 profile 用 claude 且它完全正常，只要残留一个不可用的 `opencode` executor，`loadConfig()` 依旧抛错、server 起不来。实测（2026-10-23）：default=claudecode（bin `/bin/ls` 可用）仍 `THREW: executor "opencode" bin "opencode" not found…`。候选修法：启动只硬校验默认 profile 引用的 executor，其余由 doctor 报 error、派发到该 profile 时再失败。**这会改变启动语义，尚未裁决**。
     - ⚠️ 本轮把 `config set executors.<name>.bin` 做成定点入口后，这条缺口的**可操作性**变好了（能定点改路径），但**启动仍会被它挡住** —— 未裁决的部分没变。
-11. **`ZEN_FREE_PREFER` 是静态软偏好**（待定）：模型 id 每次 spawn 动态解析（2026-10-23 实测清单 85 个），但"挑哪个家族"是创建时写死的 CSV。实测：`mimo,nemotron,ling` → `mimo-v2.6-flash-free`，`deepseek` 前缀 → `deepseek-v4.1-flash-free`，**空值 → `beam-free`**（字母序第一，并非合理默认）。API 的 `created` 字段在全部条目上相同，没有可用的"新度/质量"信号。候选：① 内置默认改 `deepseek,mimo,glm,nemotron`；② 家族内按数字版本降序（否则 `deepseek-v4-*` 与 `deepseek-v4.1-*` 并存时字母序会选中旧版）；③ 给已有 profile 一个显式 `profile set` 入口（§12.1 已实现）。**①②尚未裁决**（③ 已落地：现在可以直接 `agent-ex profile set <profile> ZEN_FREE_PREFER deepseek,mimo,glm`）。
+11. **`ZEN_FREE_PREFER` 是静态软偏好**（**① 已裁决、② 仍未裁决**）：模型 id 每次 spawn 动态解析（2026-10-23 实测清单 85 个），但"挑哪个家族"是创建时写死的 CSV。实测：`mimo,nemotron,ling` → `mimo-v2.6-flash-free`，`deepseek` 前缀 → `deepseek-v4.1-flash-free`，**空值 → `beam-free`**（字母序第一，并非合理默认）。API 的 `created` 字段在全部条目上相同，没有可用的"新度/质量"信号。候选：① 内置默认改 `deepseek,glm,mimo`；② 家族内按数字版本降序（否则 `deepseek-v4-*` 与 `deepseek-v4.1-*` 并存时字母序会选中旧版）；③ 给已有 profile 一个显式 `profile set` 入口（§12.1 已实现）。**① 已裁决（2026-10-26）**：实时清单复核后原名单里的 `ling` 已在上游消失，内置默认改为 `deepseek,glm,mimo`（`nemotron` 仍存活，可用 `profile set` 随时加回）。**② 仍未裁决**：当前清单里 `deepseek` 只有一个成员（`v4.1`）、`nemotron` 两个成员同版本（`3.5`），所以此刻不触发；一旦同家族并存多个版本，字母序会选中旧版。**③ 已落地**：现在可以直接 `agent-ex profile set <profile> ZEN_FREE_PREFER deepseek,mimo,glm`。
+12. **`init` 与 `profile create` 产出必须同名同 env**（2026-10-26 修复）：原先 `init` 的 zen-free 分支把 profile 叫 `default`、env 只写 `OPENCODE_CONFIG_CONTENT`（漏 `ZEN_FREE_PREFER`），与内置 preset `opencode-zen-free` **既不同名也不同 env**。后果：用户先跑 `init`、再跑 `profile create opencode-zen-free` 会得到**两个语义相同、名字不同的 profile**，切来切去各带一套 env。修法：`init` 的 opencode 分支改为直接复用内置 preset 常量（名字默认 `opencode-zen-free`、env 整份照搬），用户仍可改名（改了名 env 不变）。决策逻辑抽成纯函数 `planOpencodeProfile()`（`src/init.ts`）以便单测断言这条不变量。
 
 ---
 

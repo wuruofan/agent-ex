@@ -224,7 +224,7 @@ live 实测输出：
 | **Q2** `--fix` 改 keyword 是否越权 | **越权，需收窄**。实测 `--fix` 把用户与机器人侧一致的 `my-bot-word` 覆写成 `agent-ex`，把能投递的配置改成不能投递；且与 `brand.ts:10-12`「用户显式值优先」的声明冲突。19024 的证据只支持"陈旧产品名是错的" | 见 P1-2 的实测 L/M |
 | **Q3** `config set` 白名单是否够用 | **够**（四个键覆盖了实测的所有需求，拒绝通用点路径是对的）。但要补两点：`string` 类型做非空校验（否则 `config set notify.keyword ""` 能造出必然 19024 的状态）；`config set` 走全量 `validateConfig` 时，无关的坏 executor 会挡住这一键的修改，错误信息应说明"是整体校验拦下的" | 见 P2-7 实测 C/E |
 | **Q4** doctor 是否默认发卡 | **不默认**（保持 D2）。`--send` 会真实 POST 到群；MCP 侧 `agent_ex_doctor` 由 agent 自行调用，默认发送等于让 agent 有权刷群。只读默认 + 显式 `--send` 是正确的成本结构 | 实测 `--send` 真实发出请求（命中远端 19001 拒收） |
-| **Q5** `ZEN_FREE_PREFER` 默认值 | **保留 `mimo,nemotron,ling`**。理由是它是**软偏好**：`pickZenFreeModel` 命中前缀就用、未命中直接退回 `candidates[0]`，清单过期只会退化为"不挑食"，不可能导致任务失败；因此"挑哪个"的默认偏好不影响可用性。唯一要补的是可见性——`config list` 应显示 profile env，否则用户不知道这行存在（P2-5） | `zen-free.ts:40-50` + `:83-84` 的 fail-safe 路径 |
+| **Q5** `ZEN_FREE_PREFER` 默认值 | **保留 `mimo,nemotron,ling`**（⚠️ **2026-10-26 已被 spec §8 的 Q5 取代**：拉实时清单发现 `ling` 已在上游消失，内置默认改为 `deepseek,glm,mimo`；本行保留为评审当时的结论记录）。理由是它是**软偏好**：`pickZenFreeModel` 命中前缀就用、未命中直接退回 `candidates[0]`，清单过期只会退化为"不挑食"，不可能导致任务失败；因此"挑哪个"的默认偏好不影响可用性。唯一要补的是可见性——`config list` 应显示 profile env，否则用户不知道这行存在（P2-5） | `zen-free.ts:40-50` + `:83-84` 的 fail-safe 路径 |
 | **Q6** 迁移是否支持改列类型 | **不做**（保持现状）。独立验证：真实库打开前后逐字节不变；`ADD COLUMN` 的语义天然只增不改，需要改类型时再引入重建表 + `user_version`（spec §10.2 已记为缺口）。预先付"搬 45 行 + 回滚窗口"的复杂度没有当前收益 | 见 §已验证 前两行 |
 
 ---
