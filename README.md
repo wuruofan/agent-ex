@@ -13,7 +13,7 @@
 
 | 形态 | 怎么用 |
 | :--- | :--- |
-| **派发实现** | `submit(prompt=自包含工单)` → worker 独立完成 → `wait-task.mjs` 带回结果 |
+| **派发实现** | `submit(prompt=自包含工单)` → worker 独立完成 → `agent-ex wait` 带回结果 |
 | **独立起草方案** | `submit(prompt="读 docs/ 与代码，产出设计方案写到 docs/plans/xxx.md")` |
 | **相互 review** | `submit(prompt="审阅 docs/plans/xxx.md，按可执行性/遗漏/矛盾列问题")` |
 
@@ -120,7 +120,7 @@ MCP 工具是「底层能力」，dispatch skill 是叠加在上面的**派发�
 ### 路线 A：`npx skills`（推荐给使用者，不依赖本地仓库）
 
 本仓库的 skill 遵循 [Agent Skills](https://github.com/agentskills) 开放规范（`SKILL.md` + `scripts/` + `references/`），
-因此可以直接用 Vercel 的 [`skills` CLI](https://www.npmjs.com/package/skills) 从 GitHub 装——**无需 clone、无需 `npm i -g agent-ex-mcp`**：
+因此可以直接用 Vercel 的 [`skills` CLI](https://www.npmjs.com/package/skills) 从 GitHub 装——**无需 clone 本仓库**：
 
 ```bash
 # 先看这个仓库里有哪些 skill（dry-run，不落盘）
@@ -129,6 +129,10 @@ npx -y skills add wuruofan/agent-ex --list
 # 全局安装单个 skill
 npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y
 ```
+
+> ⚠️ **但 skill 的等待环节需要 `agent-ex` 这个二进制**（skill 用 `agent-ex wait <task_id>` 等结果，
+> 不再自带脚本）。所以走路线 A 还要补一次全局安装：`npm i -g agent-ex-mcp`。
+> 不想装包也行——skill 会退回 `npx -y agent-ex-mcp@latest wait <task_id>`，代价是每次调用都走 npx（更慢、且要联网）。
 
 - 缺省安装到 `~/.agents/skills/`（用户级，**全局生效**，任何项目里都能用）：这是 Agent Skills 规范的共享目录，
   直接读它的 20+ 个宿主（codex / cursor / gemini-cli / amp …）装完即可用，其余宿主由 CLI 顺手建软链。
@@ -400,8 +404,68 @@ agent-ex doctor --send
 | `agent-ex profile use <profile>` | **切**默认 profile（profile 必须已存在）。 |
 | `agent-ex profile create <built-in> [--bin <path>]` | **物化**一个内置预设（当前：`opencode-zen-free`，零密钥的 opencode 免费模型）。只创建，不切默认；`--bin` 用于 executor 不在 PATH 上时指定绝对路径。 |
 | `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段（如 `ZEN_FREE_PREFER`），或用保留字 `executor` 改它用哪个 executor。 |
+| `agent-ex wait <task_id>` | **阻塞等一个任务到终态**（`completed` / `failed` / `cancelled`）或到 `needs_input`，并把 worker 的最终报告提出来。给 agent 派活后用它在后台等结果，见下节。 |
 
 > `doctor` 也有对应的 MCP 工具 `agent_ex_doctor`，让 agent 自己就能排错，不用手抄命令。
+
+### `agent-ex wait`：等任务结果
+
+派完活不必一直轮询——`agent-ex wait` 会自己等到有结论，并把 worker 的最终报告一并带出来：
+
+```bash
+agent-ex wait task_abc123                    # 等到终态或 needs_input
+agent-ex wait task_abc123 --once             # 查一次就返回
+agent-ex wait task_abc123 --max-wait-sec 900 # 自己给等待窗口
+```
+
+stdout 是机器可读的 `KEY=VALUE`（顺序固定，可直接解析）：
+
+```
+TASK_ID=task_abc123
+STATUS=completed
+WAIT=terminal
+MAX_WAIT_SEC=11010
+ELAPSED_SEC=900
+PROJECT_PATH=/path/to/project
+FILES_CHANGED=3
+LOG_PATH=/Users/you/.agent-ex/logs/task_abc123.jsonl
+REPORT_PATH=/tmp/task_abc123.report.md
+REPORT_CHARS=3322
+REPORT_OUTLINE=摘要 | 验收
+REPORT_TEXT=## 摘要 …
+```
+
+**退出码就是判据**：
+
+| `WAIT` | exit | 含义 |
+| :--- | :--- | :--- |
+| `terminal` | 0 | `completed` / `failed` / `cancelled` |
+| `needs_input` | 5 | worker 在等你答复——**不是终态**。答完后对**同一个 task_id** 再起一次 wait |
+| `timeout` | 2 | 等待窗口用尽，任务仍在跑。**不会自动续等** |
+| `not_found` | 3 | 没有这个任务（多半是 id 抄错了） |
+| `db_unreadable` | 6 | 库读不了——**环境问题**（沙箱禁写数据目录），不是任务问题 |
+| — | 4 | 参数用错了 |
+
+> ⚠️ 判据是 stdout 里**有没有 `WAIT=` 行**，不是退出码。老版本 CLI 不认识 `wait` 这个子命令，会走
+> unknown command 分支并返回 **2**，与 `WAIT=timeout` 撞码。想提前探测：`agent-ex wait --help`——
+> 新版本 exit 0，老版本 exit 2。
+
+**常用参数**：
+
+| 参数 | 作用 |
+| :--- | :--- |
+| `--once` | 查一次就返回，不进入等待循环 |
+| `--max-wait-sec N` | 自己指定等待窗口（默认按任务的 `timeout_sec` 推导：`3×timeout_sec+90+120`；`0` = 永不放弃） |
+| `--interval-sec N` | 轮询间隔，默认 20 秒 |
+| `--report-out PATH` | 报告落盘位置，默认写到临时目录 |
+| `--copy-dir PATH` | 数据目录只读时的降级副本落点（沙箱场景） |
+| `--verbose` | 每轮心跳写 stderr |
+| `--no-digest` | 不内联报告摘要（`REPORT_OUTLINE` / `REPORT_TEXT` / `REPORT_HEAD`），报告仍会落盘 |
+
+**沙箱里读不到库怎么办**：宿主 shell 沙箱禁止写数据目录时，SQLite 建不了 `-shm` 就读不了。
+`wait` 会自动降级为「复制一份再读」（stdout 里出现 `DB_SOURCE=copy`）；连副本也读不了就是 exit 6
+`db_unreadable`——**这是环境问题，别当成"任务不存在"**。此时可用 `--copy-dir <可写目录>` 指定落点。
+
 
 ### 作为 MCP Server（stdio）
 

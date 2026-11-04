@@ -388,9 +388,14 @@ export async function runWait(argv: string[], deps: WaitDeps = {}): Promise<Wait
 
       const waited = (now() - t0) / 1000;
       if (effectiveMaxWait > 0 && waited >= effectiveMaxWait) {
+        // ⚠️ 措辞：**不**说"runner 可能死了"。预算是**单轮上界**（3×timeout_sec+90+120），
+        // 过了它只说明"这一轮该结束了"，不能推断 runner 的死活——可能只是 timeout_sec 配得偏小，
+        // 或任务正卡在 needs_input 前的某个环节。推断死活会把环境问题指向错误的方向
+        // （见 docs/designs/2026-10-30-wait-as-cli-subcommand.md §1.2）。
         note(
-          `agent-ex wait: task still ${row.status} after ${Math.round(waited)}s, past the ${effectiveMaxWait}s ` +
-          `budget derived from timeout_sec=${row.timeout_sec} — the runner likely died without finalizing.\n`,
+          `agent-ex wait: task still ${row.status} after ${Math.round(waited)}s — past this round's ` +
+          `upper bound (${effectiveMaxWait}s, derived from timeout_sec=${row.timeout_sec}); ` +
+          `pass --max-wait-sec to widen the window.\n`,
         );
         emit(row, "timeout", ctx, stdout, note);
         return { stdout: stdout.join("\n") + "\n", stderr: stderr.join(""), exitCode: 2 };

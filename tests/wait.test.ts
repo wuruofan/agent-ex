@@ -168,6 +168,35 @@ describe("runWait 状态与输出", () => {
     }
   });
 
+  it("cancelled 是终态：exit 0 + WAIT=terminal（不是 timeout 的 exit 2）", async () => {
+    const home = makeHome({ status: "cancelled", log: [asst("被用户取消")] });
+    const r = await runWait(["task_t1", "--home", home, "--once"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/^STATUS=cancelled$/m);
+    expect(r.stdout).toMatch(/^WAIT=terminal$/m);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("--no-digest：抑制 REPORT_OUTLINE/TEXT/HEAD 三件套，但 REPORT_PATH 与 REPORT_CHARS 仍在", async () => {
+    const home = makeHome({ status: "completed", log: [asst("## 摘要\n改完 2 个文件，0 fail。")] });
+    const r = await runWait(["task_t1", "--home", home, "--once", "--no-digest"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).not.toMatch(/^REPORT_(OUTLINE|TEXT|HEAD)=/m);
+    // 只抑制 digest 内联，不影响报告落盘与字数统计——调用方仍能自己去读文件
+    expect(r.stdout).toMatch(/^REPORT_PATH=/m);
+    expect(r.stdout).toMatch(/^REPORT_CHARS=\d+$/m);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("--verbose：心跳写 stderr 且带 status，不污染 stdout 契约", async () => {
+    const home = makeHome({ status: "running", log: [asst("working")] });
+    const r = await runWait(["task_t1", "--home", home, "--once", "--verbose"]);
+    expect(r.stdout).toMatch(/^STATUS=running$/m);
+    expect(r.stderr).toMatch(/status=running/);
+    expect(r.stdout).not.toMatch(/status=running/);
+    rmSync(home, { recursive: true, force: true });
+  });
+
   it("needs_input：exit 5 + QUESTION 带上问句，且 digest 三件套全部缺席；REPORT_PATH 仍输出", async () => {
     const home = makeHome({
       status: "needs_input", question: "timeout_sec 取哪个值？",
@@ -344,6 +373,8 @@ describe("runWait 只读沙箱（copy 降级）与续跑", () => {
     const { root, home, copy, dbPath } = legacyWalHome("running");
     chmodSync(home, 0o555);
     const out = join(root, "report.md");
+    // 先放一个占位内容：若第二次 wait 没有真写，文件会保持这个旧值而不是变成空串
+    writeFileSync(out, "STALE-CONTENT-FROM-FIRST-ROUND");
     const first = await runWait(["task_x", "--home", home, "--copy-dir", copy, "--once", "--report-out", out]);
     expect(first.exitCode).toBe(2);   // 还在 running ⇒ timeout
     chmodSync(home, 0o755);
@@ -356,7 +387,9 @@ describe("runWait 只读沙箱（copy 降级）与续跑", () => {
     const second = await runWait(["task_x", "--home", home, "--copy-dir", copy, "--report-out", out]);
     expect(second.exitCode).toBe(0);
     expect(second.stdout).toMatch(/^WAIT=terminal$/m);
-    expect((await import("node:fs")).readFileSync(out, "utf8")).toBe("");   // running 时日志为空 ⇒ 覆盖为空串
+    // running 时日志为空 ⇒ 报告是空串；关键是"旧内容被覆盖掉了"，不是"文件恰好是空的"
+    expect((await import("node:fs")).readFileSync(out, "utf8")).toBe("");
+    expect((await import("node:fs")).readFileSync(out, "utf8")).not.toContain("STALE-CONTENT");
     chmodSync(home, 0o755);
     rmSync(root, { recursive: true, force: true });
   });
