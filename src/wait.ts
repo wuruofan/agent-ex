@@ -1,11 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { createRequire } from "node:module";
+import type { DatabaseSync } from "node:sqlite";
 import { openReadonlyStore } from "./store.js";
-// 别顶层 import "node:sqlite"：vitest 的 vite resolver 会剥掉前缀（Failed to load url sqlite），
-// 与 src/store.ts:4-8 同一约定；tests/wait.test.ts 同理走 createRequire。
-const require = createRequire(import.meta.url);
-const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
 
 export interface TaskRow {
   id: string; status: string; project_path: string | null; log_path: string;
