@@ -98,7 +98,7 @@ export async function submit(args: SubmitArgs): Promise<SubmitResult> {
       return { error: `project_path "${project_path}" not accessible` };
     }
 
-    // ---- 同目录活跃任务警告：把"同目录禁止并发"从纪律变成被检查的事实 ----
+    // ---- 同目录活跃任务警告：把"同目录写任务禁止并发"从纪律变成被检查的事实 ----
     // 不阻断（合法场景由调度方判断，如刻意接续工作），只随结果带出 warning 让调度方看见。
     const sameDirActive = store.listActive().filter((t) => t.project_path === project_path);
     const warning = sameDirActive.length

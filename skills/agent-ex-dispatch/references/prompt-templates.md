@@ -85,7 +85,7 @@ worker（后台 agent CLI）不共享调度会话的任何上下文。以下模�
 
 - [ ] prompt 里出现了目标项目绝对路径（或 project_path 已显式传）？
 - [ ] 没有依赖"调度会话里说过的话"？关键事实都已写进 prompt？
-- [ ] 同 `project_path` 没有并发任务？
+- [ ] 同 `project_path` 没有**写**任务并发？（只读任务（模板 C）不受限，可并行）
 - [ ] Git Discipline 已按用户意图写明（默认不 commit/push）？
 - [ ] 未包含任何密钥/token/私密信息？
 

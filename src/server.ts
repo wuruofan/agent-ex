@@ -48,7 +48,7 @@ async function main(): Promise<void> {
       "派发编码任务给外部 worker（detached runner），立即返回 task_id，不阻塞。",
       "prompt 需包含完整上下文、约束与验收标准——worker 不共享当前会话上下文。",
       "任务已提交，卡住/完成会推飞书，无需轮询。",
-      "多个任务写同一 project_path 会互相踩文件——plan 负责串行派发或确保改动文件不重叠。",
+      "同一 project_path 的写任务并发会互相踩文件——plan 负责串行派发或确保改动文件不重叠；只读分析任务不受此限，可并行。",
       "对 needs_input 任务答疑续跑时传 continue_of=task_id，prompt 填答案，worker 将带着原上下文继续。",
     ].join("\n"),
     {
