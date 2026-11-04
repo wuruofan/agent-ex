@@ -4,10 +4,28 @@ import { createRequire } from "node:module";
 // 与 src/store.ts:4-8 / tests/store.test.ts 同一约定，别改成顶层 import
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import { TaskReader, sourceSig, runWait, deriveMaxWait } from "../src/wait.js";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** 用仓库本地的 tsx 跑真 CLI（别走 npx：每用例起一次进程，npx 拖慢且可能触网）。 */
+function runCli(args: string[], env?: Record<string, string>) {
+  return new Promise<{ code: number | null; out: string; err: string }>((resolve) => {
+    const tsx = join(ROOT, "node_modules", ".bin", "tsx");
+    // env 只用来盖 AGENT_EX_HOME（paths.ts:7）；其余继承当前进程
+    const p = spawn(tsx, ["src/server.ts", ...args], { cwd: ROOT, env: { ...process.env, ...env } });
+    let out = "";
+    let err = "";
+    p.stdout.on("data", (d) => (out += d));
+    p.stderr.on("data", (d) => (err += d));
+    p.on("close", (code) => resolve({ code, out, err }));
+  });
+}
 
 const SCHEMA = `CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, project_path TEXT,
   log_path TEXT, files_changed TEXT, started_at INTEGER, ended_at INTEGER, error TEXT,
@@ -408,4 +426,106 @@ describe("TaskReader", () => {
     chmodSync(copy, 0o755);
     rmSync(root, { recursive: true, force: true });
   });
+});
+
+// ---------------------------------------------------------------------------
+// 真 CLI 的进程级断言：老测试断言的就是进程退出码，而 skill 依赖的恰恰是退出码
+// （单测只看 runWait 返回值，覆盖不到「return exitCode → process.exit」这一段）。
+// 用合成 home ⇒ 绝不碰真实 ~/.agent-ex；走 AGENT_EX_HOME 而不是 --home：
+// skill 侧就是靠这个环境变量定位数据目录，别只测一条它不走的路径。
+// ---------------------------------------------------------------------------
+describe("agent-ex wait 子命令（真 CLI）", () => {
+  it("--help 打印用法并 exit 0", async () => {
+    const r = await runCli(["wait", "--help"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("usage: agent-ex wait");
+  });
+
+  it("缺 task_id ⇒ exit 4（不是 unknown command 的 2，也不是异常的 1）", async () => {
+    const r = await runCli(["wait"]);
+    expect(r.code).toBe(4);
+  });
+
+  it("未知选项 ⇒ exit 4", async () => {
+    const r = await runCli(["wait", "--bogus"]);
+    expect(r.code).toBe(4);
+  });
+
+  it("terminal ⇒ 进程 exit 0", async () => {
+    const home = makeHome({ status: "completed", log: [asst("## 报告\n改完。")] });
+    const r = await runCli(["wait", "task_t1", "--once"], { AGENT_EX_HOME: home });
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^WAIT=terminal$/m);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("needs_input ⇒ 进程 exit 5", async () => {
+    const home = makeHome({ status: "needs_input", question: "选哪个方案？" });
+    const r = await runCli(["wait", "task_t1", "--once"], { AGENT_EX_HOME: home });
+    expect(r.code).toBe(5);
+    expect(r.out).toMatch(/^WAIT=needs_input$/m);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("timeout ⇒ 进程 exit 2", async () => {
+    const home = makeHome({ status: "running" });
+    const r = await runCli(["wait", "task_t1", "--once"], { AGENT_EX_HOME: home });
+    expect(r.code).toBe(2);
+    expect(r.out).toMatch(/^WAIT=timeout$/m);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("not_found ⇒ 进程 exit 3", async () => {
+    const home = makeHome({ status: "running" });
+    const r = await runCli(["wait", "task_missing", "--once"], { AGENT_EX_HOME: home });
+    expect(r.code).toBe(3);
+    expect(r.out).toBe("TASK_ID=task_missing\nSTATUS=unknown\nWAIT=not_found\n");
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("db_unreadable（库与副本目录都不可写）⇒ 进程 exit 6，不是 3", async () => {
+    // 必须是**遗留 WAL 库**（目录里只剩 tasks.db）：这种库只读打开要做 WAL recovery ⇒ 需要写 ⇒ 0555 下必失败。
+    // 普通库（journal_mode=delete，如 makeHome）在 0555 目录里**能**直读成功，构造不出这个场景。
+    const { root, home, copy } = legacyWalHome("running");
+    chmodSync(home, 0o555);
+    chmodSync(copy, 0o555);
+    const r = await runCli(["wait", "task_x", "--once", "--copy-dir", copy], { AGENT_EX_HOME: home });
+    expect(r.code).toBe(6);
+    expect(r.out).toMatch(/^WAIT=db_unreadable$/m);
+    expect(r.out).not.toMatch(/WAIT=not_found/);
+    chmodSync(home, 0o755);
+    chmodSync(copy, 0o755);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("SIGINT ⇒ 进程 exit 130、只结束自己、副本被清掉", async () => {
+    // 进程级才能测：handler 里是 process.exit(130)，在 vitest 进程内触发会把 worker 一起带走
+    const { root, home, copy } = legacyWalHome("running");   // 0555 + WAL ⇒ 必走 copy
+    chmodSync(home, 0o555);
+    const p = spawn(join(ROOT, "node_modules", ".bin", "tsx"), ["src/server.ts", "wait", "task_x",
+      "--copy-dir", copy, "--interval-sec", "5"],
+      { cwd: ROOT, env: { ...process.env, AGENT_EX_HOME: home } });
+    let err = "";
+    p.stderr.on("data", (d) => (err += d));
+    // 等它真的进了 copy 模式（stderr 有降级说明）再发信号，别用固定 sleep 赌时序。
+    // ⚠️ 这条能成立依赖 cli.ts 注入 writeStderr 的**实时**落盘——若 runWait 把 stderr
+    // 攒到返回才 flush，这里永远等不到那一行 ⇒ 测试死锁到超时。
+    await new Promise<void>((resolve) => {
+      const t = setInterval(() => {
+        if (err.includes("reading a copy")) { clearInterval(t); resolve(); }
+      }, 25);
+      p.on("close", () => { clearInterval(t); resolve(); });   // 子进程提前挂了也别把测试挂死
+    });
+    p.kill("SIGINT");
+    const code = await new Promise<number | null>((resolve) => p.on("close", (c) => resolve(c)));
+    expect(code).toBe(130);
+    expect(err).toContain("SIGINT received");
+    expect(readdirSync(copy)).toHaveLength(0);   // mkdtemp 出来的副本目录已被删
+    chmodSync(home, 0o755);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  // exit 1（未预期异常 → server.ts 的 catch）没有 wait 专属用例：runWait 的每条路径都把错误
+  // 收成 exit 6/4/3/2/0，走不到 catch；硬造只能加故障注入口子（为测试改产品面，不值）。
+  // 这个分支与 config/doctor 共用同一段 catch，已被 tests/cli-env.test.ts 的 "config failed" 用例钉住。
 });

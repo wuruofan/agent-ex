@@ -134,6 +134,7 @@ const USAGE = [
   "  doctor [--fix] [--send]         check the notification path",
   "  config [list|set]               global settings",
   "  profile [list|use|create|set]   profiles (executor + env a task runs with)",
+  "  wait <task_id>                  block until a task is terminal (or needs input)",
   "",
   "no command: start the MCP server on stdio (how MCP clients launch it)",
 ].join("\n");
@@ -170,6 +171,16 @@ if (sub === "init") {
     process.exit(code);
   } catch (e) {
     console.error(`[agent-ex] ${sub} failed: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+} else if (sub === "wait") {
+  // wait **不**调用 loadEnvFile()：它不解析 {env:VAR}，也不需要密钥。
+  // 但异常体验必须与其它 CLI 子命令对等（CLI 侧没人接异常 → 一屏栈 + exit 1）。
+  try {
+    const { runWait } = await import("./cli.js");
+    process.exit(await runWait(process.argv.slice(3)));
+  } catch (e) {
+    console.error(`[agent-ex] wait failed: ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
 } else if (sub === "--help" || sub === "-h") {

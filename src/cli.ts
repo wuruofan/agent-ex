@@ -213,3 +213,23 @@ export function runProfile(args: string[]): number {
   console.error(`${ansi.red(MARK.error)} Unknown subcommand "${sub}" — usage: agent-ex profile [list|use|create|set]`);
   return 2;
 }
+
+/** `agent-ex wait <task_id>`：等任务到终态或 needs_input，并给出完整报告路径。 */
+export async function runWait(args: string[]): Promise<number> {
+  // ⚠️ 必须**动态** import：wait.ts 顶层要加载 node:sqlite，静态 import 会把 SQLite 带进
+  // doctor/config/profile（它们经 server.ts 动态 import cli.js）——违反 AGENTS 硬约束 7
+  // 与 tests/cli-env.test.ts 的懒加载断言。
+  const { runWait: runWaitImpl } = await import("./wait.js");
+  // 信号监听由**本层显式开启**（deps.installSignals），实际安装/卸载在 wait.ts 内：
+  // 库函数不主动装全局监听，单测默认 false（spec §3.2）。
+  // writeStderr 同理由本层注入：copy 降级说明 / --verbose / 预算超限要**等待中途**就可见
+  // （攒到返回才 flush 的话，SIGINT 测试没有任何带内信号可等，--verbose 也形同虚设）。
+  // 注入后 r.stderr 恒为空 ⇒ 下面那道兜底不会重复打印。
+  const r = await runWaitImpl(args, {
+    installSignals: true,
+    writeStderr: (s) => process.stderr.write(s),
+  });
+  if (r.stderr) process.stderr.write(r.stderr);   // r.stderr 自带换行；console.error 会多打一个空行
+  if (r.stdout) process.stdout.write(r.stdout);
+  return r.exitCode;
+}
