@@ -112,7 +112,7 @@ agent-ex init        # 交互式配置：探测 CLI、收集密钥、生成 conf
 ### 可选：安装 dispatch skill（推荐）
 
 MCP 工具是「底层能力」，dispatch skill 是叠加在上面的**派发规范**：什么时候该派、prompt 怎么写才自包含、
-同一目录为什么禁止并发、`needs_input` 怎么续跑、什么时候干脆别派（返工量小且强依赖当前会话上下文时，
+同一目录的**写**任务为什么禁止并发、`needs_input` 怎么续跑、什么时候干脆别派（返工量小且强依赖当前会话上下文时，
 自己更快更准）。装了它，你只说「把 X 派给 worker」，它会按规范把任务拆好、检查并发、拼好 prompt 再提交。
 
 两条路线，按「你是使用者还是本仓库开发者」选一条，**不要两条都装**（目标路径会互相打架）。
@@ -130,10 +130,22 @@ npx -y skills add wuruofan/agent-ex --list
 npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y
 ```
 
-- 缺省安装到 `~/.agents/skills/`（用户级，**全局生效**，任何项目里都能用）。
-- 只给某一个宿主装（如只给 Claude Code）：去掉 `-g`，按 CLI 提示选目标。
+- 缺省安装到 `~/.agents/skills/`（用户级，**全局生效**，任何项目里都能用）：这是 Agent Skills 规范的共享目录，
+  直接读它的 20+ 个宿主（codex / cursor / gemini-cli / amp …）装完即可用，其余宿主由 CLI 顺手建软链。
+- 只给某一个宿主装（如只给 Claude Code）：去掉 `-g`，或 `-a claude-code`。
 - 更新：`npx skills update -g`；已装列表：`npx skills list -g`。
 - ⚠️ 若你机器上 `~/.npm/_npx` 不可写，报权限错，加临时 cache：`npm_config_cache=/tmp/npm-cache npx -y skills add …`。
+
+**WorkBuddy 装完还要补一条软链**：它只扫 `~/.workbuddy/skills`，不读 `~/.agents/skills`
+（`skills` CLI 宿主表里最接近的 `codebuddy` 指向 `~/.codebuddy/skills`，也不是 WorkBuddy 的路径，`-a` 没有可选项）：
+
+```bash
+ln -s ~/.agents/skills/agent-ex-dispatch ~/.workbuddy/skills/agent-ex-dispatch
+```
+
+> ⚠️ `ln` 对**已存在的目录**目标不会报错——它会把软链塞进那个目录里（`…/agent-ex-dispatch/agent-ex-dispatch`），
+> 看着成功、实际没生效。链之前先 `ls -la ~/.workbuddy/skills/`：若那里已有路线 B 留下的软链或实体目录，删掉再链。
+> 软链指向的是路径不是内容，所以 `npx skills update -g` 之后不用重链。
 
 ### 路线 B：`install-skill.sh`（开发者路线，软链到本地仓库）
 
@@ -150,8 +162,9 @@ npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y
 > 能独立分发但要手动 `update`。同一目标目录只能有一种——若想从 A 切到 B（或反过来），
 > 先删掉旧的那份再装。
 
-**生效范围是全局的，不是当前仓库**：入口落在用户级 skills 目录（`~/.agents/skills`、`~/.workbuddy/skills`），
-WorkBuddy 会扫描这些路径，所以在任何项目里都能用。仓库里的 `./skills/` 是普通目录，**不是**项目级 skill 路径
+**生效范围是全局的，不是当前仓库**：入口必须落在**宿主自己**的用户级 skills 目录——WorkBuddy 只扫
+`~/.workbuddy/skills`；`~/.agents/skills` 是跨工具共享的中转站（多数宿主读它，WorkBuddy 不读），
+所以两个目录默认都链。仓库里的 `./skills/` 是普通目录，**不是**项目级 skill 路径
 （那会是 `./.workbuddy/skills`），因此既不会只在本仓库生效，也不会与项目级 skill 冲突。
 
 > **Trae**：它的用户级 skills 目录因安装版本而异（本机 `TRAE SOLO CN` 用 `~/.trae-cn/skills`），
