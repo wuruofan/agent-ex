@@ -22,7 +22,8 @@ const require = createRequire(import.meta.url);
  *
  * 改成"真正要开库时才 require"：警告只在真的要开库时出现，而不是每次启动都出现。
  */
-type DatabaseSyncCtor = new (path: string) => DatabaseSync;
+// 放宽：DatabaseSync 真实签名接受 (path, options)，只读连接需要 options.readOnly
+type DatabaseSyncCtor = new (path: string, options?: { readOnly?: boolean }) => DatabaseSync;
 let ctor: DatabaseSyncCtor | null = null;
 function databaseSyncCtor(): DatabaseSyncCtor {
   if (!ctor) {
@@ -232,6 +233,19 @@ export class Store {
 
 export function openStore(dbPath: string): Store {
   return new Store(dbPath);
+}
+
+/**
+ * 只读打开任务库。
+ *
+ * ⚠️ 为什么不用 Store 类：它的构造函数会 mkdir、设 busy_timeout、**切 journal_mode**、
+ * CREATE TABLE、ALTER TABLE 补列 —— 全是写/锁操作。wait 的定义是"绝不干扰 MCP server
+ * 与活着的 runner"，所以只读路径必须绕开它，只留一条 SELECT 能用的连接。
+ *
+ * 只读打开失败（沙箱禁写目录 ⇒ SQLite 建不了 -shm）由调用方降级为"复制到可写目录再读"。
+ */
+export function openReadonlyStore(dbPath: string): DatabaseSync {
+  return new (databaseSyncCtor())(dbPath, { readOnly: true });
 }
 
 function buildUpdate(patch: TaskPatch, setExtra: string, whereExtra: string): [string, (string | number | bigint | null)[]] {
