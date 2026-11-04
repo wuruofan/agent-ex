@@ -26,6 +26,20 @@
    - **commit B**：删 `scripts/wait-task.mjs` + 改 SKILL.md —— **必须在 publish 之后**
 3. **本机自测 skill 必须先 `npm link`**：publish 之前 `npm i -g agent-ex-mcp` 装回来的还是 0.2.0。
 
+### 版本错配的实际表现（2026-11-04 实测，commit B 写门槛时照此判读）
+
+registry 上的 0.2.0 **不认识 `wait`** ⇒ `agent-ex wait --help` 落进「有非选项参数但认不出」分支：
+
+```
+$ npx -y agent-ex-mcp@latest wait --help
+no command: start the MCP server on stdio (how MCP clients launch it)
+exit=2      stdout 里 0 行 "WAIT="
+```
+
+⚠️ 症状是**静默起 MCP server**（挂住等 stdin），不是报错——和 0.1.0「其余子命令被静默吞成 MCP server」同一类事故。
+所以判据必须是：**stdout 有没有 `WAIT=` 行**，而不是退出码（老版 exit 2 与 `WAIT=timeout` 撞码）。
+提前探测用 `agent-ex wait --help`：新版 exit 0 且打印用法，老版 exit 2 且无 `WAIT=` 行。
+
 ## 执行顺序
 
 ### ① 认证（每台机器一次）
