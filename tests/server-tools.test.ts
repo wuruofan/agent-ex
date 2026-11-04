@@ -22,7 +22,9 @@ function listTools(extra: Record<string, string>): Promise<string[]> {
   });
   return new Promise<string[]>((resolve, reject) => {
     let buf = "";
-    const timer = setTimeout(() => { child.kill(); reject(new Error("tools/list timeout")); }, 25000);
+    // 60s 而不是原来的 25s：server 启动要加载整个 MCP SDK（连带 express/hono/ajv），
+    // 文件 open 慢的机器上单次就 10s 量级；这里是"挂死"的上界，收得太紧只会误报。
+    const timer = setTimeout(() => { child.kill(); reject(new Error("tools/list timeout")); }, 60_000);
     const done = (err: Error | null, names?: string[]) => {
       clearTimeout(timer);
       child.kill();
@@ -54,6 +56,9 @@ function listTools(extra: Record<string, string>): Promise<string[]> {
 }
 
 describe("MCP server tool registration", () => {
+  // 用例级超时写 120s 而不是 30s：每次 spawn 都要起一个完整 server（加载 MCP SDK →
+  // express/hono/ajv，几百个模块）。并行跑其它 spawn 类测试文件时单次可到 30s+，
+  // 30s 会让"慢"伪装成"工具没注册"。真正的挂死由 listTools 内部的 60s deadline 报错。
   it("registers the 6 production tools and no test helper", async () => {
     const names = (await listTools({ AGENT_EX_TEST_MODE: "0" })).sort();
     expect(names).toEqual([
@@ -64,12 +69,12 @@ describe("MCP server tool registration", () => {
       "agent_ex_submit",
       "agent_ex_version",
     ]);
-  }, 30000);
+  }, 120_000);
 
   it("registers set_started_at exactly once when test mode is on", async () => {
     const names = await listTools({ AGENT_EX_TEST_MODE: "1" });
     expect(names.filter((n) => n === "agent_ex_set_started_at")).toHaveLength(1);
     expect(new Set(names).size).toBe(names.length);
     expect(names).toHaveLength(7);
-  }, 30000);
+  }, 120_000);
 });

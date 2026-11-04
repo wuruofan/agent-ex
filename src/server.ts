@@ -1,31 +1,36 @@
 #!/usr/bin/env node
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-import { version } from "./tools/version.js";
-import { restart } from "./tools/restart.js";
-import { setStartedAt, isTestMode } from "./tools/test-helpers.js";
-import { ensureRuntimeDirs } from "./paths.js";
 import { loadEnvFile } from "./env-file.js";
 import { BRAND } from "./brand.js";
 import { ansi } from "./ansi.js";
 import { MARK } from "./marks.js";
 
 /**
- * ⚠️ 这里的 import 是**故意不全**的：
- * `submit` / `status` / `cancel` / `doctor` 都在 `main()` 里动态 import。
+ * ⚠️ 顶层只留**每个分支都要用**的便宜模块（env-file / brand / ansi / marks）。
+ * 其余一律在 `main()` 里动态 import，理由有两条，都实测过：
  *
- * 原因：submit.js → store.js → node:sqlite 是**顶层**加载链，一旦静态 import，
- * 连 `agent-ex init`（根本不碰数据库）也会在启动时加载 SQLite ——
- * Node 的 "ExperimentalWarning: SQLite is an experimental feature" 是异步打印的，
- * 会插进 readline 的第一个提示符中间，把交互式 init 的界面搅乱。
+ * 1. MCP SDK（`@modelcontextprotocol/sdk`）+ zod 只在 server 路径用，但它是**顶层静态 import 时
+ *    每个进程 ~5.5-6s 的启动税**（2026-11-04 实测：全部顶层 import 6.28s，去掉 SDK 两项 0.56s；
+ *    `NODE_COMPILE_CACHE` 无效，不是编译缓存问题）。CLI 子命令一个都不需要它 ——
+ *    `agent-ex wait` 每次调用都要付这笔钱，spawn 类测试更是 8 worker 并行下必然撞 30s 超时。
+ * 2. `submit` / `status` / `cancel` / `doctor` / `test-helpers` 的加载链会拖进
+ *    store.js → node:sqlite。一旦静态 import，连 `agent-ex init`（根本不碰数据库）也会加载 SQLite ——
+ *    "ExperimentalWarning: SQLite is an experimental feature" 是异步打印的，
+ *    会插进 readline 的第一个提示符中间，把交互式 init 的界面搅乱。
  *
- * 保持动态 import 还有一个好处：`init` / `doctor` / `config` 三个子命令启动更快
- * （不必加载 SDK、SQLite、runner 相关的全部模块）。
+ * 改动时注意：往顶层加 import 之前，先问它是不是真的每个分支都要用。
  */
 const json = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }] });
 
 async function main(): Promise<void> {
+  // SDK / zod / 工具模块都只服务 MCP 路径，全部懒加载（见上方注释）。
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+  const { z } = await import("zod");
+  const { version } = await import("./tools/version.js");
+  const { restart } = await import("./tools/restart.js");
+  const { setStartedAt, isTestMode } = await import("./tools/test-helpers.js");
+  const { ensureRuntimeDirs } = await import("./paths.js");
+
   // 先灌 $AGENT_EX_HOME/.env（真实密钥所在）→ runner 子进程自动继承，任务期占位符可解析。
   loadEnvFile();
   ensureRuntimeDirs();

@@ -30,6 +30,11 @@ if (!existsSync(serverEntry)) {
   process.exit(1);
 }
 
+// ⚠️ 等待方式：**不**用固定时长（老版本写死 2000ms）——server 端要加载 MCP SDK
+// （连带 express / hono / ajv），在文件 open 慢的机器上要好几秒；固定窗口会把它误判成
+// "没收到 tools/list"。这里改成"收到 tools/list 响应就结束，否则等到截止时间"。
+const DEADLINE_MS = Number(process.env.SMOKE_TIMEOUT_MS ?? 60_000);
+
 const server = spawn(process.execPath, [serverEntry], {
   env: { ...process.env, AGENT_EX_HOME: home },
   stdio: ["pipe", "pipe", "pipe"],
@@ -37,9 +42,6 @@ const server = spawn(process.execPath, [serverEntry], {
 
 let stderr = "";
 server.stderr.on("data", (d) => { stderr += d.toString(); });
-
-const buf = [];
-server.stdout.on("data", (d) => { buf.push(d); });
 
 const send = (obj) => server.stdin.write(JSON.stringify(obj) + "\n");
 
@@ -60,44 +62,56 @@ const PRODUCTION_TOOLS = [
 ];
 const TEST_ONLY_TOOLS = ["agent_ex_set_started_at"];
 
-setTimeout(() => {
-  server.kill();
-  const stdout = Buffer.concat(buf).toString();
-  let failed = false;
-  let sawTools = false;
+let tools = null;
+let pending = "";
+let finished = false;
 
-  for (const line of stdout.split("\n")) {
+server.stdout.on("data", (d) => {
+  pending += d.toString();
+  let i;
+  while ((i = pending.indexOf("\n")) >= 0) {
+    const line = pending.slice(0, i).trim();
+    pending = pending.slice(i + 1);
+    if (!line) continue;
     try {
       const j = JSON.parse(line);
-      if (j.id === 2 && j.result?.tools) {
-        sawTools = true;
-        const names = j.result.tools.map((t) => t.name);
-        console.log("server:", serverEntry);
-        console.log("tools:", names.join(", "));
-
-        const missing = PRODUCTION_TOOLS.filter((n) => !names.includes(n));
-        if (missing.length === 0) {
-          console.log(`OK: ${PRODUCTION_TOOLS.length} 个生产工具全部注册`);
-        } else {
-          console.error("FAIL: 缺工具", missing);
-          failed = true;
-        }
-
-        const leaked = TEST_ONLY_TOOLS.filter((n) => names.includes(n));
-        if (leaked.length === 0) {
-          console.log("OK: 未暴露 TEST ONLY 工具");
-        } else {
-          console.error("FAIL: 暴露了 TEST ONLY 工具", leaked);
-          failed = true;
-        }
-      }
+      if (j.id === 2 && j.result?.tools) tools = j.result.tools.map((t) => t.name);
     } catch {}
   }
+  if (tools) finish();
+});
 
-  if (!sawTools) {
-    console.error("FAIL: 没收到 tools/list 的响应");
+const finish = () => {
+  if (finished) return;
+  finished = true;
+  clearTimeout(deadline);
+  server.kill();
+
+  let failed = false;
+  if (tools) {
+    console.log("server:", serverEntry);
+    console.log("tools:", tools.join(", "));
+
+    const missing = PRODUCTION_TOOLS.filter((n) => !tools.includes(n));
+    if (missing.length === 0) {
+      console.log(`OK: ${PRODUCTION_TOOLS.length} 个生产工具全部注册`);
+    } else {
+      console.error("FAIL: 缺工具", missing);
+      failed = true;
+    }
+
+    const leaked = TEST_ONLY_TOOLS.filter((n) => tools.includes(n));
+    if (leaked.length === 0) {
+      console.log("OK: 未暴露 TEST ONLY 工具");
+    } else {
+      console.error("FAIL: 暴露了 TEST ONLY 工具", leaked);
+      failed = true;
+    }
+  } else {
+    console.error(`FAIL: 没收到 tools/list 的响应（等了 ${DEADLINE_MS}ms）`);
     failed = true;
   }
+
   if (stderr.includes("mcp server ready")) {
     console.log("OK: server 启动就绪");
   } else {
@@ -107,4 +121,6 @@ setTimeout(() => {
 
   console.log(failed ? "FAIL" : "ALL OK");
   process.exit(failed ? 1 : 0);
-}, 2000);
+};
+
+const deadline = setTimeout(finish, DEADLINE_MS);
