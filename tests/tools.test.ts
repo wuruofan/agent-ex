@@ -137,6 +137,58 @@ describe("status", () => {
     const v = status({ task_id: "task_to" }) as { timeout_sec?: number };
     expect(v.timeout_sec).toBe(120);
   });
+  describe("include_terminal", () => {
+    // 宿主的兜底查询要在会话重启/上下文压缩后认回「上次派的任务」——
+    // 那通常已经是终态，而 listActive() 查不到终态任务。这是这个开关存在的唯一理由。
+    const seedTerminal = (store: ReturnType<typeof openStore>, id: string, created_at: number) => {
+      store.createTask({
+        id, prompt: "x", project_path: home, executor: "fake", profile: "fake",
+        timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker", created_at,
+      });
+      store.claimToRunning(id, process.pid);
+      store.transition(id, ["running"], "completed", { result: "done" });
+    };
+    it("no-arg still hides terminal tasks (back-compat)", () => {
+      const store = openStore(join(home, "tasks.db"));
+      seedTerminal(store, "task_done", 1);
+      expect(status({})).toEqual([]);
+    });
+    it("include_terminal lists terminal tasks with their status", () => {
+      const store = openStore(join(home, "tasks.db"));
+      seedTerminal(store, "task_done", 1);
+      const v = status({ include_terminal: true }) as { task_id: string; status: string }[];
+      expect(v.map((t) => t.task_id)).toContain("task_done");
+      expect(v.find((t) => t.task_id === "task_done")?.status).toBe("completed");
+    });
+    it("include_terminal orders by created_at desc (newest first)", () => {
+      const store = openStore(join(home, "tasks.db"));
+      seedTerminal(store, "task_old", 100);
+      seedTerminal(store, "task_new", 200);
+      const v = status({ include_terminal: true }) as { task_id: string }[];
+      const ids = v.map((t) => t.task_id);
+      expect(ids.indexOf("task_new")).toBeLessThan(ids.indexOf("task_old"));
+    });
+    it("limit caps the returned list", () => {
+      const store = openStore(join(home, "tasks.db"));
+      seedTerminal(store, "task_a", 100);
+      seedTerminal(store, "task_b", 200);
+      seedTerminal(store, "task_c", 300);
+      const v = status({ include_terminal: true, limit: 2 }) as unknown[];
+      expect(v.length).toBe(2);
+    });
+    it("active tasks are still included alongside terminal ones", () => {
+      const store = openStore(join(home, "tasks.db"));
+      seedTerminal(store, "task_done", 1);
+      store.createTask({
+        id: "task_live", prompt: "x", project_path: home, executor: "fake", profile: "fake",
+        timeout_sec: 60, log_path: join(home, "logs", "live.jsonl"), role: "worker", created_at: 2,
+      });
+      const v = status({ include_terminal: true }) as { task_id: string }[];
+      const ids = v.map((t) => t.task_id);
+      expect(ids).toContain("task_done");
+      expect(ids).toContain("task_live");
+    });
+  });
 });
 
 describe("cancel", () => {

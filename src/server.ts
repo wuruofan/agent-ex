@@ -41,8 +41,17 @@ async function main(): Promise<void> {
 
   server.tool(
     "agent_ex_status",
-    ["查询任务状态。无参数调用返回全部活跃任务，用于一次性概览；", "needs_input 任务会返回 question 字段。"].join("\n"),
-    { task_id: z.string().optional().describe("任务 id；缺省返回全部活跃任务") },
+    [
+      "查询任务状态。无参数调用返回全部活跃任务，用于一次性概览；",
+      "needs_input 任务会返回 question 字段。",
+      "include_terminal=true 时连已终态（completed/failed/cancelled）一起列，按创建时间倒序——",
+      "会话重启或上下文压缩后要认回「上次派的任务」时用它（活跃列表里查不到终态任务）。",
+    ].join("\n"),
+    {
+      task_id: z.string().optional().describe("任务 id；缺省返回全部活跃任务"),
+      include_terminal: z.boolean().optional().describe("是否包含已终态任务；缺省只返回活跃任务"),
+      limit: z.number().int().positive().max(200).optional().describe("配合 include_terminal：返回最近 N 个（默认 20）"),
+    },
     async (args) => json(status(args))
   );
 

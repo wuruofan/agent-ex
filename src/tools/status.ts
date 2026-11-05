@@ -1,7 +1,19 @@
 import { openStore, type Task } from "../store.js";
 import { dbPath } from "../paths.js";
 
-export interface StatusArgs { task_id?: string }
+export interface StatusArgs {
+  task_id?: string;
+  /**
+   * 是否把**已终态**的任务也列出来（默认只列活跃的）。
+   *
+   * 为什么需要它：默认的 listActive() 只列 queued/running/needs_input，
+   * **已终态的任务查不到**。而宿主的兜底查询需要在会话重启 / 上下文压缩之后
+   * 认回「我上次派的那个任务」—— 那通常已经是终态。没有这个开关，宿主无法恢复现场。
+   */
+  include_terminal?: boolean;
+  /** 配合 include_terminal：返回最近 N 个任务（默认 20，上限 200）。 */
+  limit?: number;
+}
 
 interface TaskView {
   task_id: string;
@@ -44,6 +56,10 @@ export function status(args: StatusArgs): TaskView | TaskView[] | { error: strin
       const t = store.getTask(args.task_id);
       if (!t) return { error: `task ${args.task_id} not found` };
       return view(t);
+    }
+    // 无参 = 只列活跃任务（保持旧行为）；include_terminal = 连已终态的一起列（按时间倒序）。
+    if (args.include_terminal) {
+      return store.listRecent(args.limit ?? 20).map(view);
     }
     return store.listActive().map(view);
   } finally {

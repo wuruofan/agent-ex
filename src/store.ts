@@ -154,6 +154,19 @@ export class Store {
       .all() as Record<string, unknown>[];
     return rows.map(fromRow);
   }
+  /**
+   * 最近任务（含终态），按 created_at 倒序。
+   *
+   * 为什么需要它：listActive() 只列活跃任务，**已终态的查不到**。而宿主的兜底查询
+   * （见 skills/agent-ex-dispatch/SKILL.md「[回来先查]」）需要在会话重启 / 上下文压缩之后
+   * 认回"我上次派的那个任务" —— 而那通常已经是终态。没有这个方法，宿主无法恢复现场。
+   */
+  listRecent(limit = 20): Task[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?`)
+      .all(Math.max(1, Math.min(200, limit))) as Record<string, unknown>[];
+    return rows.map(fromRow);
+  }
   close(): void {
     this.db.close();
   }
