@@ -1,6 +1,6 @@
 ---
 name: agent-ex-dispatch
-description: 通过 agent-ex MCP server（agent_ex_submit / agent_ex_status / agent_ex_cancel）把编码任务派发给后台 worker agent（claude/opencode）执行。当用户想「派个任务给 claude 后台跑」「把 X 丢给 worker 做」「dispatch a task to the worker agent」「agent-ex 派活」「后台任务跑完了没」时使用本 skill。用户希望任务不阻塞当前对话、由独立 runner 进程在指定项目目录里干活、终态推飞书通知的场景都适用。在派发前先用本 skill 的规范拼出自包含的任务 prompt（worker 不共享会话上下文），并遵守同目录不并发、needs_input 续跑等约束。
+description: 通过 agent-ex MCP server（agent_ex_submit / agent_ex_status / agent_ex_cancel）把编码任务派发给后台 worker agent（claude/opencode）执行。当用户想「派个任务给 claude 后台跑」「把 X 丢给 worker 做」「dispatch a task to the worker agent」「agent-ex 派活」「后台任务跑完了没」时使用本 skill。用户希望任务不阻塞当前对话、由独立 runner 进程在指定项目目录里干活、终态推飞书通知的场景都适用。用户提到「连续跑一批任务」「让 worker 依次做完这几件事」「起个 loop 自主推进」时**同样使用本 skill**——连续派发必须由本 skill 的规范裁决（批量连发 vs 有人值守的连续推进），不要裸发多个 submit。在派发前先用本 skill 的规范拼出自包含的任务 prompt（worker 不共享会话上下文），并遵守同目录不并发、needs_input 续跑等约束。
 agent_created: true
 ---
 
@@ -40,7 +40,7 @@ agent_created: true
 1. **prompt 必须自包含**：worker 看不到本会话内容。prompt 里必须写全：任务目标、项目路径、相关文件路径与现状事实、技术栈/约束、验收标准、Git 纪律、交付物格式。缺上下文 = worker 瞎猜 = 返工。
 2. **同一 `project_path` 禁止并发**：多个任务写同一目录会互相踩文件。派发前先查活跃任务；同目录已有 running/queued 任务时必须串行（等它终态）或换目录，或向用户确认。
 3. **worker 不做会话外动作**：默认在 prompt 中指示 worker **不要 git commit / push / 发通知**，只改文件并汇报变更摘要——除非用户在任务里显式授权。worker 以 `--dangerously-skip-permissions` 运行，没有二次确认。
-4. **不轮询**：任务提交后返回 `task_id` 即结束本轮；终态会推飞书。只在用户主动问进度、或收到飞书/需要续跑时再查 `agent_ex_status`。
+4. **不轮询**：任务提交后返回 `task_id` 即结束本轮；终态会推飞书。只在用户主动问进度、或收到飞书/需要续跑时再查 `agent_ex_status`。**唯一豁免**：为「会话内定时等待」起的后台 wait-task 进程，每个新 turn 最多查一次（见该节「[回来先查]」）——那是**接续**，不是盯进度。
 
 ## 前置检查（Preflight）
 
@@ -158,7 +158,7 @@ agent_created: true
 
 ### Step 4 — 提交后
 
-派发后立即把 `task_id` 与任务摘要报给用户，结束本轮。**不轮询、不主动 status**——终态会推飞书唤醒。
+派发后立即把 `task_id` 与任务摘要报给用户，结束本轮。**不轮询、不主动 status**——终态会推飞书唤醒。（唯一豁免：若为该任务起了后台 wait-task 进程，本 turn 结束前把它登记进「待消费清单」，好让下一个 turn 的「[回来先查]」兜底接上；见「会话内定时等待」一节。）
 
 **收到飞书终态卡后的核验流程（防假阳性约定）**：worker 报告**默认不完全采信**。按 `references/confidence-check.md` 走 5 问核对（worker 自报的数字/路径/行号每条能否定位到证据；不能定位即标低置信度）+ 置信度三档（高/中/低）分级。低/中 → 取**完整**报告复核（⚠️ `agent_ex_status` 返回的 `result` **会被截断**，长报告拿不到；全文在 `~/.agent-ex/logs/task_<task_id>.jsonl`，见排错表）；不能闭环 → `agent_ex_submit({ continue_of, prompt: <反问> })` 走 needs_input 反问或 `agent_ex_cancel` 重派。**不要把"看起来完成"的报告直接转给用户**。
 
@@ -211,6 +211,11 @@ agent_created: true
 
 与 Step 1 反对的"批量连发"的区别：这里**一次只有一个任务在跑**（铁律 2 仍生效），且每个任务之后仍有复核。它省掉的是"用户回来触发"，不是复核本身。
 
+> **本节的续跑不依赖宿主唤醒能力**：唤醒是**预期行为，不是保证**——有些宿主不会在后台进程完成后主动开新 turn
+> （例证与探针见 `docs/diagnostics/2026-10-20-trae-no-wake-channel.md`）。下面「[回来先查]」给出一条
+> 宿主无关的兜底：**每个新 turn 先查一次未消费的 wait-task 进程**，查到什么就接什么。
+> 唤醒正常时它是空操作；唤醒缺失时它自愈。
+
 **为什么必须是后台进程、而不是会话内轮询**（设计红线，不是风格偏好）：会话内每轮询一次就是一次完整 API 往返，而**一次往返要把整段会话上下文重新发一遍**。所以轮询成本 ≈ **(任务时长 ÷ 轮询间隔) × 整个会话**，与「状态行有多长」毫无关系 —— 中位 22min 的任务按 60s 轮询 ≈ **22 次全量重放**，p75（39min）≈ 39 次。它同时还占住会话，等待期间用户没法跟主 agent 说话。⇒ 会话内轮询**两头都输**：既贵，又丢掉了「唤醒后带着上下文继续」这个最该保住的东西。
 
 要用 `scripts/wait-task.mjs` 起**后台进程**：等待发生在独立进程里，模型完全不参与 ⇒ **等待期间成本精确为零**，唤醒时**只发生一次**上下文重放，且这次重放落在**原会话**里（前序任务的事实、当前 plan 的约束、用户期间说过的话都还在）。
@@ -246,6 +251,49 @@ node --disable-warning=ExperimentalWarning \
 
 以 `run_in_background` 方式启动，**不要**前台跑。
 
+> **[回来先查] 宿主无关的兜底**：唤醒是**预期行为，不是保证** —— 后台进程活着 ≠ 我被叫醒了。
+> 有些宿主**不会**在后台进程完成后主动开新 turn（例证与探针见
+> `docs/diagnostics/2026-10-20-trae-no-wake-channel.md`）。所以本 skill 的续跑**不依赖唤醒**：
+> **每个新 turn 开始时**（用户说了任何话、或我被别的事件拉起），先看本会话里有没有**还没消费**的
+> wait-task 进程，**有就先查它再往下走**。
+>
+> **怎么查（只用跨宿主都成立的手段）**：重跑
+> `node --disable-warning=ExperimentalWarning "$SKILL_DIR/scripts/wait-task.mjs" <task_id> --once`
+> —— 幂等、**不改任务状态、不重派任务**（只 `SELECT` 任务库；副作用仅限落一份 `REPORT_PATH`、
+> 以及只读沙箱下把 `tasks.db` 复制到可写目录，见上一段的 `DB_SOURCE=copy`）。
+> 宿主若另提供「查后台任务状态」的工具（各宿主工具名不同），可作为等价手段用它；**不要依赖某一个
+> 宿主专有的工具名**——那在别的宿主上不存在或不可用。
+>
+> **查到之后按 `WAIT=` 分流**（`WAIT=` 是权威字段，退出码会被沙箱改写）：
+> - `WAIT=terminal`（exit 0）→ 走下面「**终态到手后必须走的流程**」1–4 步。
+> - `WAIT=needs_input`（exit 5）→ **最该被立刻发现的一支**：任务没结束，worker 在等答复。
+>   读 `QUESTION`（完整问题在 `agent_ex_status` 的 `question`），能自己答就
+>   `agent_ex_submit({ continue_of: <task_id>, prompt: <答案> })`，需要用户拍板就停下问用户。
+>   答复后**对同一 task_id 重新起一次 wait-task**（任务已回到 `running`）。
+> - `WAIT=timeout`（exit 2）→ 任务**还在 `running`**，不是终态。多半是 runner 过了自己允许的最坏情况
+>   仍未 finalize（多半已死）。此时**由我决定**继续等（重起 wait-task）／`cancel`／重派，不自动续等。
+> - `WAIT=not_found`（exit 3）→ 本会话记错了 task_id，或库被换过（见下一条）。
+> - `WAIT=db_unreadable`（exit 6）→ **环境问题，不是任务问题**：只读沙箱里加 `--copy-dir <可写目录>`，
+>   或让该命令在沙箱外跑（见上一段）。
+>
+> **task_id 丢了**（会话重启、上下文被压缩、换会话）：调 `agent_ex_status` **带
+> `include_terminal: true`**（可配 `limit`）—— 它会连**已终态**的任务一起列出来（按创建时间倒序），
+> 默认的活跃列表**查不到终态任务**，而「上次派的那个」通常已经是终态了。按 `project_path` +
+> `started_at` 认回自己派的那个。仍认不回就问用户，别猜。
+>
+> **标记「已消费」，避免重复复核**：复核完成后**在会话里明确记一笔**「`task_xxx` 已消费」（写进
+> 回复正文或待办清单并划掉，不要只靠隐式记忆）。否则用户隔天问个无关问题，兜底会把昨天已经
+> 复核过的终态报告再拉一遍（重读报告是 token 大头，且可能误当成新变更再报一次）。
+> **兜底只对「没被消费的」任务生效。**（若 task_id 已随上下文压缩一起消失，反而不必担心——
+> 没有 id 就无从再查；这也是把标记写进会话文本而非只存心里的理由。）
+>
+> **与「不轮询」的关系**：铁律 4 / Step 4 的「不轮询」指的是**不要为了盯进度反复查**（那是每轮
+> 全量重放会话上下文，昂贵且占住会话）。本兜底**不违反**它——它**每个 turn 最多查一次**，
+> 只针对**已知待消费的 wait-task 进程**，查完就消费掉，不重复。
+>
+> 这样「唤醒成功」时这一步是空操作，「没被唤醒」时也能自愈，**完全不依赖宿主是否具备唤醒能力**
+> —— 宿主将来补上，这个兜底自然什么都不做。
+
 **为什么这样可行（已实测）**：
 
 - **能等多久：三层，只有中间那层是脚本的事**（9/23 查清）：
@@ -253,11 +301,11 @@ node --disable-warning=ExperimentalWarning \
   - **脚本层 —— `--max-wait-sec`，默认由任务自己的 `timeout_sec` 推导**：`3 × timeout_sec + 90 + 120`。依据是 runner 的真实上界：每次尝试**各自计时**（`runner.ts:133` 的 `setTimeout(..., timeout_sec*1000)` 包在 `runAgent` 内），瞬时错误最多重试 3 次、退避 30s/60s（`runner.ts:24-26`），而**真超时本身不重试** ⇒ 任务不可能活过 `3 × timeout_sec + 90s`。等到比这再往后 2 分钟，超时才变成**有信息量的信号**（"runner 活过了它自己允许的最坏情况，多半是没 finalize 就死了"），而不是噪音。`--max-wait-sec 0` = **永不放弃**。真实例：`timeout_sec=5400` 的任务 → 预算 `16410s`（已在真实任务上验证输出 `MAX_WAIT_SEC=16410`）。
   - **任务层 —— 每个任务都会自己结束**：runner 一定 finalize 到 `completed` / `failed` / `needs_input`，`queued` 也会被立刻 spawn 的 runner 认领。唯一能永久停在 `running` 的情形就是 **runner 未 finalize 而死** —— 那正是上面这个推导预算要抓的东西。
 - **超时后不会自动再等**（这是刻意的）：脚本 exit 2 就结束，**重起等待 / `cancel` / 重派由主 agent 决定** —— 只有主 agent 知道该等还是该放弃。而按上面的推导预算，超时本身已经是「可能卡死」的信号，不该无条件续等。要"等到天荒地老"就显式传 `--max-wait-sec 0`。
-- 等待期间**不占会话、不消耗 token**；进程在**「终态 或 需要我」**时退出 → **自动唤醒我**（后台任务完成会通知）。
-- **被唤醒的两种状态**（9/23 修）：`WAIT=terminal`（exit 0）与 `WAIT=needs_input`（**exit 5**）。后者**不是终态**（答复后任务回到 `running`），但 worker 已经停下等答复，**只有我能让它继续**。早期版本把它当「继续等」：判别性实测中，一个已经在问问题的任务把 30s 时钟等满才退出，默认情形下就是**白等 2 小时再报一个无用的 `timeout`**，恰好把最该被唤醒的那一刻吞掉。
+- 等待期间**不占会话、不消耗 token**；进程在**「终态 或 需要我」**时退出 → **唤醒我**（后台任务完成会通知；**宿主可能不具备唤醒能力**，那种情况下由上面「[回来先查]」兜底接上 —— 唤醒是预期行为，不是保证）。
+- **终态到手的两种状态**（9/23 修）：`WAIT=terminal`（exit 0）与 `WAIT=needs_input`（**exit 5**）。后者**不是终态**（答复后任务回到 `running`），但 worker 已经停下等答复，**只有我能让它继续**。早期版本把它当「继续等」：判别性实测中，一个已经在问问题的任务把 30s 时钟等满才退出，默认情形下就是**白等 2 小时再报一个无用的 `timeout`**，恰好把最该被唤醒的那一刻吞掉。
 - 终态直接给出复核所需的全部字段：`STATUS` / `ELAPSED_SEC` / `FILES_CHANGED` / `LOG_PATH` / `REPORT_PATH` / `REPORT_CHARS`，外加一个**自带的报告摘要**（见下一小节）。
 - **报告提取已内置，覆盖两种 executor 的日志形状**：claude 的 `type=="assistant"` + `message.role=="assistant"` + `message.content[]`，以及 opencode 的扁平 `{"type":"text","text":…}`（`executors/opencode.ts:45-47`）。claude 侧两道过滤缺一不可——compaction 摘要挂在 `role:"user"` 上、可能是报告的几十倍长（`task_mu9jj2zd_9b3341`：摘要 12 936 字符 vs 终报 3 322 字符）。**9/23 修**：此前只认 claude 形状，opencode 任务会**静默返回空串**（同一份报告文本实测：claude 440 字符 / opencode 0），已补齐并加守卫。
-- 退出码：`0` 终态 / `5` **需要我（needs_input，附 `QUESTION`）** / `2` 超时（含 `--once` 查到但未终态）/ `3` 无此任务或 DB 不可读 / `4` 用法错。只想查一次状态时加 `--once`。
+- 退出码：`0` 终态 / `5` **需要我（needs_input，附 `QUESTION`）** / `2` 超时（含 `--once` 查到但未终态）/ `3` 无此任务 / `6` **库不可读（环境问题，非任务问题）** / `4` 用法错。只想查一次状态时加 `--once`。**判据以 `STATUS`/`WAIT` 字段为准，退出码不是**——沙箱拒绝会让宿主把退出码报成 1。
 
 **终态下实际能拿到什么（9/23 逐类真实任务验证）**：
 
@@ -283,7 +331,7 @@ node --disable-warning=ExperimentalWarning \
 - **为什么这条重要**：报告全文一旦进入主上下文，**后续每一轮都会重复计费**。一个 5000 字符的报告若后面还有 10 轮，实际成本是 5 万字符量级，远超读它那一次。digest 挡掉的正是这一块。
 - **不要把复核（更不要把唤醒）外包给 subagent**。那会丢掉最贵的东西：唤醒之所以值钱，正是因为主 agent 带着**前序任务的事实 + 当前 plan 的约束 + 用户期间说过的话**回来判断（9/23 用户明确要求这条不能省）。subagent 只有 `REPORT_PATH` 和一句指令，它的结论不能替代这个判断。只在一种窄场景下可用：疑点**纯局部**（如「这个数字和文件里对得上吗」）且**不涉及任何前序依赖** —— 即便如此，结论仍需主 agent 自己确认后才算闭环。
 
-**被唤醒后必须走的流程（这就是闸门，不许省）**：
+**终态到手后必须走的流程（这就是闸门，不许省）**：
 
 1. **先看 `WAIT=`**：
    - `WAIT=needs_input`（exit 5）→ 任务**没结束**，worker 在等答复。读 `QUESTION`（完整问题在 `agent_ex_status` 的 `question`）→ **用本会话上下文去回答**：能自己答就直接 `agent_ex_submit({ continue_of: <task_id>, prompt: <答案> })`；需要用户拍板（选项取舍之类）则停下问用户 → 答复后**对同一 task_id 重新起一次 wait-task**（任务已回到 `running`）。
@@ -295,7 +343,9 @@ node --disable-warning=ExperimentalWarning \
 #### 自主推进 loop 协议（9/28 定稿：升级制闸门）
 
 - **入口（唯一的人工闸门）**：用户把**整个任务序列**作为一个 plan 批准（含每个任务的验收标准与 commit 授权）——即上节制定期结束时的批准动作。没有这个批准就没有 loop——退化为单任务派发。
-- **Loop 一步** = Step 1 并发检查 → Step 3 submit → 后台 wait-task → 被唤醒走上面 1–4 步 → 回到 Step 1，直到 plan 跑完。
+- **Loop 一步** = Step 1 并发检查 → Step 3 submit → 后台 wait-task → 终态到手走上面 1–4 步 → 回到 Step 1，直到 plan 跑完。
+  **唤醒没来也不阻塞**：上面「[回来先查]」兜底保证每个 turn 都能接上没被唤醒的那一支
+  —— loop 的**进度由任务状态驱动，不由唤醒驱动**，所以宿主唤醒能力变化不影响协议本身。
 - **放行规则（升级制）**：高置信 → commit（不 push）+ 派下一个；中/低置信、plan 偏离、或 needs_input 中只有用户能答的（选项取舍/方向）→ 停下问；连续 2 次中置信 → 停（见上）。needs_input 中能自己答的，用 `continue_of` 续跑不中断 loop。
 - **终态**：plan 全部跑完 → 交最终报告（汇总各任务的 commit、验收结果与遗留），loop 结束。
 - **为什么敢自主**：5 问防假阳性协议正是从三类真实缺陷（spec 断言自相矛盾、假参数、"0 fail" 实为沙箱有 `ps`）长出来的；里程碑 commit 让任何一步可回退；submit 同目录 warning 防踩。**代价是复核一步绝不允许为"让 loop 跑下去"而省略**——复核被跳过的 loop 比人工逐个派更危险。
