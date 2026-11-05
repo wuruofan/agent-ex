@@ -6,7 +6,7 @@
  * 完成后用 loadConfig() 自校验，并提示可编辑 config.json 调整模型别名/默认 env。
  *
  * 密钥处理策略：
- *   - preset（minimax/deepseek）：检测对应环境变量 → 掩码展示 → [Y/n]（Enter=Y）；
+ *   - preset（minimax/deepseek）：检测对应环境变量 → 掩码展示 → 问 "Use this value? (Y/n)"（Enter=Y）；
  *     拒绝后粘贴新值或 Enter=skip。config 占位符沿用预设的 token_var。
  *   - custom：只粘贴（无标准变量名可检测）；占位符变量名从 profile 名派生（apiKeyVarFor）。
  *   - 检测到/粘贴到的值写入 .env（幂等）；config.json 始终是 {env:VAR}。
@@ -17,11 +17,17 @@ import { createInterface } from "node:readline/promises";
 import { join, dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentExHome, ensureRuntimeDirs } from "./paths.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, validateConfig, type Config } from "./config.js";
 import { BRAND } from "./brand.js";
-import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
+import { BUILTIN_PROFILES, ZEN_FREE_PROFILE_NAME } from "./config-cmd.js";
+import { diffConfigs, renderChangeWarning } from "./init-changes.js";
+import { ansi } from "./ansi.js";
+import { MARK } from "./marks.js";
 
 type RL = ReturnType<typeof createInterface>;
+
+/** 本工具支持的 agent CLI（名字 = config 里的 executor 名）。 */
+export const AGENT_CLIS = ["claude", "opencode"] as const;
 
 function which(name: string): string | null {
   try {
@@ -31,9 +37,73 @@ function which(name: string): string | null {
   }
 }
 
+export interface DetectedCli {
+  name: string;
+  /** 绝对路径（`command -v` 的结果）。 */
+  bin: string;
+}
+
+/**
+ * 探测可用的 agent CLI。
+ *
+ * `whichFn` 可注入：测试不能依赖开发机装了什么（§9 的"PATH 巧合"同款问题）。
+ */
+export function detectAgentClis(whichFn: (name: string) => string | null = which): DetectedCli[] {
+  const out: DetectedCli[] = [];
+  for (const name of AGENT_CLIS) {
+    const bin = whichFn(name);
+    if (bin) out.push({ name, bin });
+  }
+  return out;
+}
+
+/**
+ * 探测结果的展示。
+ *
+ * 原先是 `detected: claude=(not found)  opencode=/path` —— 给机器看的：
+ * "没找到"与"找到了"平铺在同一行，用户得自己分辨哪个可用。
+ *
+ * 现在两个候选**都列出来**，用颜色区分（找到=绿、没找到=暗）：
+ * 只列找到的那个会让人看不出"另一个到底是没有、还是压根不支持"。
+ */
+export function renderDetectedClis(found: DetectedCli[]): string {
+  const lines = AGENT_CLIS.map((name) => {
+    const hit = found.find((f) => f.name === name);
+    return hit
+      ? `  ${ansi.green(MARK.ok)} ${name.padEnd(9)} ${hit.bin}`
+      : `  ${ansi.dim(MARK.error)} ${ansi.dim(name.padEnd(9) + "not found on PATH")}`;
+  });
+  const header = found.length === 0
+    ? ansi.yellow("No agent CLI found on PATH")
+    : ansi.bold("Agent CLIs on PATH");
+  return `${header}\n${lines.join("\n")}`;
+}
+
 async function ask(rl: RL, prompt: string, def?: string): Promise<string> {
-  const suffix = def !== undefined ? ` [${def}]` : "";
-  return (await rl.question(`${prompt}${suffix}: `)).trim();
+  // 默认值用暗色：它是"回车即可"的提示，不该和正题一样抢注意力
+  const suffix = def !== undefined ? ` ${ansi.dim(`[${def}]`)}` : "";
+  return (await rl.question(`${ansi.cyan(prompt)}${suffix}${ansi.dim(":")} `)).trim();
+}
+
+/**
+ * yes/no 型提问。
+ *
+ * 为什么不用普通 `ask` + `[Y/n]` 后缀：
+ *  - `[N]` 只说"默认值是 N"，没说还能按什么。Unix 惯例是 `(y/N)`——
+ *    **小写=可选的答案，大写=回车即取的默认值**，一眼看出"按 N 就是不"。
+ *  - 返回值直接是 boolean，调用方不会各写一遍大小写/空串的归一化（漏一处就是 bug）。
+ *
+ * 非法输入不重问而是按默认值处理：重问意味着在 readline 里循环，
+ * 一旦输入流已经 EOF（管道/脚本场景），第二次 question() 会抛 "readline was closed"。
+ */
+async function askYesNo(rl: RL, prompt: string, defaultYes: boolean): Promise<boolean> {
+  const hint = defaultYes ? "(Y/n)" : "(y/N)";
+  const answer = (await rl.question(`${ansi.cyan(prompt)} ${ansi.dim(hint)}${ansi.dim(":")} `)).trim().toLowerCase();
+  if (answer === "") return defaultYes;
+  if (answer === "y" || answer === "yes") return true;
+  if (answer === "n" || answer === "no") return false;
+  console.log(ansi.dim(`  (please answer y or n — treating it as "${defaultYes ? "yes" : "no"}")`));
+  return defaultYes;
 }
 
 /** 通用 claude 环境变量默认值：自动并入每个 claude profile，用户可事后编辑 config.json 调整。 */
@@ -99,7 +169,7 @@ function maskSecret(v: string): string {
 
 /**
  * 密钥/URL 采集（两步语义各自自洽）：
- *   detect=true 且环境里有值 → 掩码展示，问 "Use this value? [Y/n]"（Enter=Y，符合默认值惯例）；
+ *   detect=true 且环境里有值 → 掩码展示，问 "Use this value? (Y/n)"（Enter=Y，符合默认值惯例）；
  *     拒绝（n）才进入下一步 → 粘贴新值，或 Enter=skip。
  *   detect=false（custom）→ 直接粘贴或跳过。
  * 返回解析到的真实值；undefined 表示跳过（保留占位符，不写 .env）。
@@ -110,8 +180,9 @@ async function collectSecret(
 ): Promise<string | undefined> {
   const detected = opts.detect ? process.env[opts.varName] : undefined;
   if (detected) {
-    const a = (await ask(rl, `Detected ${opts.varName} = ${maskSecret(detected)}\nUse this value? [Y/n]`, "Y")).trim();
-    if (a === "" || /^y(es)?$/i.test(a)) return detected;
+    // "Detected X = sk-abc…wxyz" 单独一行，问题另起一行 ⇒ 两件事都看得清
+    console.log(`Detected ${opts.varName} = ${maskSecret(detected)}`);
+    if (await askYesNo(rl, "Use this value?", true)) return detected;
   }
   const b = (await ask(rl, `Paste ${opts.label} (or Enter to skip)`)).trim();
   return b || undefined;
@@ -186,6 +257,42 @@ export function buildConfig(a: InitAnswers) {
 }
 
 /**
+ * 纯函数：配置引用了、但 .env 里没有的密钥变量名（没有则 undefined）。
+ *
+ * 只有配置**真的引用了** `{env:VAR}` 占位符时才谈得上"缺密钥"。
+ * opencode 的 zen free 是零密钥的，profile env 里根本没有 `{env:...}`——
+ * 2026-10-26 实测：原先这里兜底成 `{env:MINIMAX_API_KEY}`，导致 opencode + zen free
+ * 跑完 init 必出"去设 MINIMAX_API_KEY，否则任务会失败"的假警报。
+ */
+export function missingTokenKey(env: Record<string, string>, envKeys: ReadonlySet<string>): string | undefined {
+  const m = /^\{env:(.+)\}$/.exec(env.ANTHROPIC_AUTH_TOKEN ?? "");
+  if (!m) return undefined;
+  return envKeys.has(m[1]) ? undefined : m[1];
+}
+
+/**
+ * 纯函数：opencode 分支的问答结果 → profile 名与 env。
+ *
+ * 关键不变量：**zen free 时，名字与 env 都取内置 preset 那一份**。
+ * 于是 `agent-ex init` 产出的 profile 与 `agent-ex profile create opencode-zen-free`
+ * 完全一致（同名、同 env）——用户后面再跑 profile create 会得到"已存在"，
+ * 而不是多出一个同义但名字不同的 profile（init 原先把它叫 "default"，
+ * 且漏掉 ZEN_FREE_PREFER，于是两套配置各说各话）。
+ *
+ * 名字仍可由用户覆盖（nameAnswer 非空即生效）；env 不随改名变——
+ * 它描述的是"用哪套模型配置"，不是"叫什么"。
+ */
+export function planOpencodeProfile(
+  zen: boolean,
+  nameAnswer: string,
+): { profile: string; env: Record<string, string> } {
+  if (!zen) return { profile: nameAnswer.trim() || "default", env: {} };
+  const builtin = BUILTIN_PROFILES[ZEN_FREE_PROFILE_NAME];
+  // 深拷贝：直接挂 builtin.env 会让后续的 `profile set` 原地改到**进程内的常量**上
+  return { profile: nameAnswer.trim() || ZEN_FREE_PROFILE_NAME, env: { ...builtin.env } };
+}
+
+/**
  * 解析当前运行 init 的 node 解释器绝对路径（用于 MCP 配置里）。
  * 刻意不用 process.execPath 之外的手段：execPath 就是真实解释器，天然带 shebang 的
  * `#!/usr/bin/env node` 之外的绝对路径，避免 MCP 客户端 spawn 时依赖 PATH。
@@ -209,7 +316,13 @@ export function mcpServerSnippet(serverEntry: string): string {
   );
 }
 
-/** init 末尾的收尾指引：MCP 注册 + skill 安装 + 宿主差异提示。 */
+/**
+ * init 结束后打印"下一步"，含飞书通知的自检提示。
+ *
+ * 为什么要专门提示 dry_run：init 写出的 config 一律 `dry_run: true`（安全默认），
+ * 于是"配好了却没收到通知"是最常见的第一手困惑 —— 卡片只打到 stderr。
+ * 这里把这一句和它的修复命令直接摆出来。
+ */
 export function nextSteps(home: string, serverEntry: string): string {
   return [
     "",
@@ -233,11 +346,55 @@ export function nextSteps(home: string, serverEntry: string): string {
     "   Skill dirs differ per host; if the load does not take effect, find yours with:",
     "     find ~ -maxdepth 4 -type d -name skills -path '*<host>*' 2>/dev/null",
     "",
-    "4) Optional: edit " + join(home, "config.json") + " to tune model aliases / env.",
+    "4) Feishu notifications are in dry-run mode (nothing is delivered yet).",
+    "   When the bot's keyword matches, turn delivery on:",
+    "     agent-ex config set notify.dry_run false",
+    "   Then verify with a clean self-check card (body must not contain the",
+    "   product name, or the keyword gate may pass by accident):",
+    "     agent-ex doctor --send",
+    "",
+    "5) Optional: edit " + join(home, "config.json") + " to tune model aliases / env.",
+    "   Or use the targeted commands: agent-ex config set <key> <value> / agent-ex profile set <profile> <KEY> <value>",
   ].join("\n");
 }
 
-export async function runInit(input: NodeJS.ReadableStream = process.stdin): Promise<void> {
+/**
+ * 读既有 config（宽容解析）。
+ *
+ * 宽容是刻意的：config 可能已经坏了（手改出错 / 迁移写坏），而 init 的职责是**修复**它，
+ * 不能因为 JSON 解析失败就崩在门口——那种情况下用户看到的是"init 报了个语法错误"，
+ * 而不是"你的 config 坏了，init 会重写它"。因此解析失败按 null 处理（=当成没有旧 config），
+ * 但把警告留给变更预告那一段去说。
+ */
+function readExistingConfig(cfgPath: string): Config | null {
+  if (!existsSync(cfgPath)) return null;
+  try {
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Config;
+    return cfg && typeof cfg === "object" ? cfg : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 备份文件后缀：20261016-142530（本地时间，排序友好）。 */
+function timestampSuffix(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+export interface InitOptions {
+  /**
+   * 探测 agent CLI 的实现（默认走 `command -v`）。
+   *
+   * 可注入是为了让测试**不依赖开发机装了什么**：init 的问答流程会随
+   * "探测到几个 CLI"变化（只找到一个就不再问"用哪个"），若探测结果依赖
+   * 开发机环境，测试就会变成"这台机器恰好装了 X"的巧合。
+   */
+  which?: (name: string) => string | null;
+}
+
+export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts: InitOptions = {}): Promise<void> {
   const home = agentExHome();
   ensureRuntimeDirs();
   const cfgPath = join(home, "config.json");
@@ -245,30 +402,61 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
 
   try {
     if (existsSync(cfgPath)) {
-      const ow = (await ask(rl, `${cfgPath} already exists. Overwrite?`, "N")).toLowerCase();
-      if (ow !== "y" && ow !== "yes") { console.log("aborted."); return; }
+      // 这里只做"廉价退出"，不做"知情同意"：此刻还不知道新 config 长什么样（问答还没开始），
+      // 所以问"要不要覆盖"是在让用户对一个未知后果点头。知情同意放在写盘前那一刻
+      // （那时新旧两份都在手上，能逐项列出差异）。
+      //
+      // 提示分三行：一行长文本会顶满终端宽度、还把问题挤在末尾。
+      console.log(`${ansi.yellow(MARK.warn)} ${ansi.bold(cfgPath)} already exists.`);
+      console.log(ansi.dim("  Re-running init REWRITES it — you will see exactly what changes before anything is written."));
+      if (!(await askYesNo(rl, "Continue?", false))) { console.log("Aborted."); return; }
     }
 
-    const claudeBin = which("claude");
-    const opencodeBin = which("opencode");
-    console.log(`detected: claude=${claudeBin ?? "(not found)"}  opencode=${opencodeBin ?? "(not found)"}`);
+    // ---- 探测可用的 agent CLI ----
+    // 只列真正找到的；**只找到一个时不再问"用哪个"**（答案已经唯一），
+    // 找到多个才问。
+    const found = detectAgentClis(opts.which);
+    console.log(renderDetectedClis(found));
 
-    let executor = (await ask(rl, "Executor to configure (claude/opencode)", "claude")).toLowerCase() || "claude";
-    if (executor !== "claude" && executor !== "opencode") {
-      console.log(`unknown executor "${executor}", falling back to claude`);
-      executor = "claude";
+    let executor: string;
+    let detected: string | null = null;
+    if (found.length === 1) {
+      // 只有一个可用项 ⇒ 问"claude 还是 opencode"是白问（默认还是 claude 的话更糟：
+      // 用户直接回车就会配出一个**根本没装**的 executor，还得再手打一遍它的路径）。
+      executor = found[0].name;
+      detected = found[0].bin;
+      // 说清"为什么是它"：用户得知道这是**唯一**可用的，而不是我们随便挑的
+      const missing = AGENT_CLIS.filter((n) => n !== executor).join(", ");
+      console.log(`${ansi.green(MARK.ok)} Using ${ansi.bold(executor)} ${ansi.dim(`(${detected}) — the only one installed; ${missing} not found`)}\n`);
+    } else if (found.length > 1) {
+      const names = found.map((f) => f.name);
+      const answer = (await ask(rl, `Which agent CLI to use? (${names.join("/")})`, found[0].name)).toLowerCase();
+      const chosen = found.find((f) => f.name === answer);
+      if (!chosen) {
+        console.log(`${ansi.yellow(MARK.warn)} Unknown agent CLI "${answer}" — using ${found[0].name}`);
+      }
+      executor = (chosen ?? found[0]).name;
+      detected = (chosen ?? found[0]).bin;
+    } else {
+      // 一个都没找到：只能问用户要绝对路径
+      executor = (await ask(rl, "Agent CLI to configure (claude/opencode)", "claude")).toLowerCase() || "claude";
+      if (executor !== "claude" && executor !== "opencode") {
+        console.log(`${ansi.yellow(MARK.warn)} Unknown agent CLI "${executor}", falling back to claude`);
+        executor = "claude";
+      }
     }
-    const detected = executor === "claude" ? claudeBin : opencodeBin;
+
     let bin = (await ask(rl, `Absolute path to ${executor} binary`, detected ?? "")).trim();
     if (!bin && detected) bin = detected;
-    if (!bin) { console.error("no binary path provided; aborting."); process.exit(1); }
-
-    const profile = (await ask(rl, "Profile name", "default")).trim() || "default";
+    if (!bin) { console.error(`${ansi.red(MARK.error)} No binary path provided; aborting.`); process.exit(1); }
 
     const envUpdates: Record<string, string> = {};
     let env: Record<string, string> = {};
+    let profile: string;
 
     if (executor === "claude") {
+      // claude 分支里 profile 名必须**先**问：custom 的密钥变量名由它派生
+      profile = (await ask(rl, "Profile name", "default")).trim() || "default";
       const presetName = (await ask(rl, "Provider preset (minimax/deepseek/custom)", "minimax")).toLowerCase() || "minimax";
       let tokenVar: string;
       if (presetName === "custom") {
@@ -285,11 +473,19 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
       const secret = await collectSecret(rl, { label: "API key", varName: tokenVar, detect: presetName !== "custom" });
       if (secret) envUpdates[tokenVar] = secret;
     } else {
-      console.log("opencode: provider 由 opencode 自己的配置管理（opencode auth login / opencode.json），agent-ex 只负责拉起；如需额外环境变量，稍后加到 config.json 的 profile.env。");
+      console.log(`${ansi.dim(MARK.info)} opencode: the provider is managed by opencode itself (opencode auth login / opencode.json); agent-ex only launches it. For extra env vars, add them to the profile's env later.`);
       // zen free：零密钥、模型集会轮换 → 用 {model:zen-free} 占位符让 runner 每次 spawn 时动态解析。
-      const zen = (await ask(rl, "Use opencode zen free model (auto-resolving, no key needed)", "Y")).trim();
-      if (zen === "" || /^y(es)?$/i.test(zen)) {
-        env = { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: ZEN_FREE_PLACEHOLDER, small_model: ZEN_FREE_PLACEHOLDER }) };
+      const zen = await askYesNo(rl, "Use opencode zen free model (auto-resolving, no key needed)", true);
+      // profile 名在 zen **之后**问：zen 决定默认名（内置 preset 名）与 env
+      const nameAnswer = await ask(rl, "Profile name", zen ? ZEN_FREE_PROFILE_NAME : "default");
+      const plan = planOpencodeProfile(zen, nameAnswer);
+      profile = plan.profile;
+      env = plan.env;
+      if (zen) {
+        console.log(
+          `${ansi.dim(MARK.info)} Using built-in profile "${ZEN_FREE_PROFILE_NAME}" — ` +
+            `same config as "agent-ex profile create ${ZEN_FREE_PROFILE_NAME}".`,
+        );
       }
     }
 
@@ -302,30 +498,67 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin): Pro
 
     const config = buildConfig({ executor, bin, profile, env, notify, timeout_sec: timeout });
 
+    // ---- 覆盖前的变更预告：让用户知道"要放弃什么"再决定 ----
+    // 位置在这里（而不是流程开头）是因为"要变成什么"必须等问答结束才知道；
+    // 而"现在有什么"在读旧 config 时就有了。两份信息齐了才谈得上预告。
+    const oldCfg = readExistingConfig(cfgPath);
+    const changes = diffConfigs(oldCfg, config as Config);
+    if (changes.length > 0) {
+      console.log(renderChangeWarning(changes));
+      const proceed = await askYesNo(rl, "Apply these changes?", false);
+      if (!proceed) { console.log("Aborted."); return; }
+    }
+
+    // ---- 先校验、后落盘 ----
+    // 原先是"先写盘再校验"，校验失败时坏 config 已落盘、旧 config 已被覆盖且无法恢复
+    // （实测：bin 路径不存在 → "config written but self-check failed" + exit 1，
+    //   用户手里只剩一个坏文件）。改成写前校验，失败则旧 config 原封不动。
+    try {
+      validateConfig(config as Config);
+    } catch (e) {
+      console.error(`${ansi.red(MARK.error)} Config is invalid, nothing written: ${(e as Error).message}`);
+      process.exit(1);
+    }
+
+    // 备份旧 config（覆盖是不可逆的，留一份回退路径）
+    if (oldCfg) {
+      const bak = `${cfgPath}.bak.${timestampSuffix()}`;
+      try {
+        writeFileSync(bak, readFileSync(cfgPath));
+        console.log(`${ansi.dim(MARK.info)} Backed up existing config -> ${bak}`);
+      } catch (e) {
+        console.error(`${ansi.red(MARK.error)} Could not back up existing config: ${(e as Error).message}`);
+      }
+    }
+
     writeFileSync(cfgPath, JSON.stringify(config, null, 2) + "\n");
-    console.log(`\nwrote ${cfgPath}`);
+    console.log(`\n${ansi.dim(MARK.info)} Wrote ${cfgPath}`);
 
     const written = writeEnvFile(home, envUpdates);
     if (written.length > 0) {
-      console.log(`wrote ${join(home, ".env")} (chmod 600): ${written.join(", ")}`);
+      console.log(`${ansi.dim(MARK.info)} Wrote ${join(home, ".env")} (chmod 600): ${written.join(", ")}`);
     } else {
-      console.log(".env unchanged (no new secrets written)");
+      console.log(`${ansi.dim(MARK.info)} .env unchanged (no new secrets written)`);
     }
 
     try {
       loadConfig(home);
-      console.log("config valid \u2713");
+      console.log(`${ansi.green(MARK.ok)} Config valid`);
     } catch (e) {
-      console.error("config written but self-check failed:", (e as Error).message);
+      console.error(`${ansi.red(MARK.error)} Config written but self-check failed: ${(e as Error).message}`);
       process.exit(1);
     }
 
     // 提示：占位符对应变量不在 .env（也没被采集到）→ 提醒运行时必须有值，否则任务失败
-    const tokenPlaceholder = env.ANTHROPIC_AUTH_TOKEN ?? "{env:MINIMAX_API_KEY}";
-    const tokenKeyMatch = /^\{env:(.+)\}$/.exec(tokenPlaceholder);
-    const tokenKey = tokenKeyMatch ? tokenKeyMatch[1] : undefined;
-    if (tokenKey && !readEnv(join(home, ".env")).map.has(tokenKey)) {
-      console.log(`\n\u26a0 ${tokenKey} not set — add it to ${join(home, ".env")} (or export it) before running the server, otherwise tasks will fail.`);
+    //
+    // ⚠️ 只在配置**真的引用了** {env:VAR} 密钥占位符时才提醒。
+    // 原先这里有个兜底 `?? "{env:MINIMAX_API_KEY}"`，于是**没有密钥的 opencode 分支**
+    // （zen free 零密钥）也会被提醒"去设 MINIMAX_API_KEY，否则任务会失败"——
+    // 2026-10-26 实测：opencode + zen free 跑完 init 必出这条假警报。
+    // 假警报比不提醒更坏：它把一个根本不需要密钥的配置说成"缺东西跑不起来"。
+    const tokenKey = missingTokenKey(env, new Set(readEnv(join(home, ".env")).map.keys()));
+    if (tokenKey) {
+      console.log(`\n${ansi.yellow(MARK.warn)} ${tokenKey} not set — add it to ${join(home, ".env")} (or export it) before running the server, otherwise tasks will fail.`);
     }
 
     console.log(nextSteps(home, resolveServerEntry()));

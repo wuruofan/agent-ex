@@ -1,8 +1,18 @@
 // stdio 冒烟 #2：调 tools/call agent_ex_status 无参，期望 []
+//
+// 用法：node scripts/smoke-status.mjs [server.js 路径]（默认用本仓库的 dist/server.js）
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const serverEntry = process.argv[2] || join(scriptDir, "..", "dist", "server.js");
+if (!existsSync(serverEntry)) {
+  console.error(`FAIL: server entry not found: ${serverEntry}`);
+  process.exit(1);
+}
 
 const home = mkdtempSync(join(tmpdir(), "afex-smoke-"));
 mkdirSync(join(home, "logs"), { recursive: true });
@@ -13,7 +23,7 @@ writeFileSync(join(home, "config.json"), JSON.stringify({
   defaults: { profile: "fake", timeout_sec: 60 },
 }));
 
-const server = spawn("/usr/local/bin/node", ["/Users/meow/workspace/agent-ex/dist/server.js"], {
+const server = spawn(process.execPath, [serverEntry], {
   env: { ...process.env, AGENT_EX_HOME: home },
   stdio: ["pipe", "pipe", "pipe"],
 });

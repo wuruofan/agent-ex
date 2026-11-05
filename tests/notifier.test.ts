@@ -14,35 +14,46 @@ function mockFetch(sequence: Array<{ ok: boolean; status?: number; code?: number
 describe("sendFeishuText", () => {
   it("sends text message payload once on success", async () => {
     const fetchMock = mockFetch([{ ok: true }]);
-    const ok = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, delays: [] });
-    expect(ok).toBe(true);
+    const r = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, delays: [] });
+    expect(r.ok).toBe(true);
+    expect(r.code).toBe(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const body = JSON.parse((fetchMock.mock.calls[0] as unknown[])[1]!.body as string);
     expect(body).toEqual({ msg_type: "text", content: { text: "hello" } });
   });
   it("retries 3 times with backoff then gives up", async () => {
     const fetchMock = mockFetch([{ ok: false, status: 500 }, { ok: false, status: 500 }, { ok: false, status: 500 }]);
-    const ok = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
-    expect(ok).toBe(false);
+    const r = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
+    expect(r.ok).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
   it("succeeds on second attempt", async () => {
     const fetchMock = mockFetch([{ ok: false, status: 429 }, { ok: true }]);
-    const ok = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, delays: [0] });
-    expect(ok).toBe(true);
+    const r = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, delays: [0] });
+    expect(r.ok).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
-  it("dry_run skips HTTP entirely and returns true", async () => {
+  it("dry_run skips HTTP entirely and reports success", async () => {
     const fetchMock = vi.fn();
-    const ok = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, dryRun: true });
-    expect(ok).toBe(true);
+    const r = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, dryRun: true });
+    expect(r.ok).toBe(true);
     expect(fetchMock).not.toHaveBeenCalled();
   });
   it("treats HTTP 200 with non-zero feishu code as failure (regression: 19021 bot not in group was silent)", async () => {
     const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ code: 19021, msg: "bot is not in the group" }) }) as Response);
-    const ok = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
-    expect(ok).toBe(false);
+    const r = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
+    expect(r.ok).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+  // 2026-10-22：code 必须进返回值（doctor 的 --send 靠它区分"改关键词"与"换地址"，
+  // MCP 侧拿不到 stderr，此前只能看到一个布尔值）
+  it("returns the feishu code and msg instead of swallowing them (doctor --send 依赖它)", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ code: 19024, msg: "Key Words Not Found" }) }) as Response);
+    const r = await sendFeishuText("https://hook/x", "hello", { fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe(19024);
+    expect(r.msg).toBe("Key Words Not Found");
+    expect(r.httpStatus).toBe(200);
   });
   it("times out a hanging request and counts it as a failed attempt (regression: no timeout hung for minutes until TCP layer)", async () => {
     // fetch stub 永不 resolve，只响应 abort signal——模拟飞书慢响应/半开
@@ -51,12 +62,14 @@ describe("sendFeishuText", () => {
         (init.signal as AbortSignal).addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
       }),
     );
-    const ok = await sendFeishuText("https://hook/x", "hello", {
+    const r = await sendFeishuText("https://hook/x", "hello", {
       fetchImpl: fetchMock as unknown as typeof fetch,
-      delays: [0, 0],
+      delays: [0,  0],
       timeoutMs: 20,
     });
-    expect(ok).toBe(false);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBeNull();          // 网络层失败没有飞书业务码
+    expect(r.msg).toContain("timed out");
     expect(fetchMock).toHaveBeenCalledTimes(3); // 3 次全超时 → 放弃
   });
   it("succeeds on retry after a timeout", async () => {
@@ -69,12 +82,12 @@ describe("sendFeishuText", () => {
       }
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ code: 0 }) } as Response);
     });
-    const ok = await sendFeishuText("https://hook/x", "hello", {
+    const r = await sendFeishuText("https://hook/x", "hello", {
       fetchImpl: fetchMock as unknown as typeof fetch,
       delays: [0],
       timeoutMs: 20,
     });
-    expect(ok).toBe(true);
+    expect(r.ok).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -9,11 +9,13 @@
 # drift the moment SKILL.md is edited; a symlink makes repo edits take effect
 # immediately with no sync step.
 #
-# Scope — the links land in USER-level skill dirs (~/.agents/skills, ~/.workbuddy/skills),
-# both of which WorkBuddy scans (verified against its path allowlist). So the skill is
-# visible from every project, not just this repo. The repo's own ./skills/ dir is NOT
-# a project-level skill path (that would be ./.workbuddy/skills), so it is never
-# picked up as a project-scoped skill and never shadows this install.
+# Scope — the links land in USER-level skill dirs, so the skill is visible from every
+# project, not just this repo. The two default targets are NOT interchangeable per host:
+# WorkBuddy only scans ~/.workbuddy/skills, while ~/.agents/skills is the cross-tool shared
+# dir that most other hosts (codex / cursor / gemini-cli / ...) read directly. That is why
+# both are linked by default. The repo's own ./skills/ dir is NOT a project-level skill path
+# (that would be ./.workbuddy/skills), so it is never picked up as a project-scoped skill
+# and never shadows this install.
 #
 # Default targets: ~/.agents/skills (shared, tool-agnostic convention on this machine)
 # and ~/.workbuddy/skills.

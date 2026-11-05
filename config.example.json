@@ -46,7 +46,7 @@
       "executor": "opencode",
       "env": {
         "OPENCODE_CONFIG_CONTENT": "{\"model\":\"{model:zen-free}\",\"small_model\":\"{model:zen-free}\"}",
-        "ZEN_FREE_PREFER": "mimo,nemotron,ling"
+        "ZEN_FREE_PREFER": "deepseek,glm,mimo"
       }
     }
   },

@@ -13,7 +13,7 @@
 
 | 形态 | 怎么用 |
 | :--- | :--- |
-| **派发实现** | `submit(prompt=自包含工单)` → worker 独立完成 → `wait-task.mjs` 带回结果 |
+| **派发实现** | `submit(prompt=自包含工单)` → worker 独立完成 → `agent-ex wait` 带回结果 |
 | **独立起草方案** | `submit(prompt="读 docs/ 与代码，产出设计方案写到 docs/plans/xxx.md")` |
 | **相互 review** | `submit(prompt="审阅 docs/plans/xxx.md，按可执行性/遗漏/矛盾列问题")` |
 
@@ -112,7 +112,7 @@ agent-ex init        # 交互式配置：探测 CLI、收集密钥、生成 conf
 ### 可选：安装 dispatch skill（推荐）
 
 MCP 工具是「底层能力」，dispatch skill 是叠加在上面的**派发规范**：什么时候该派、prompt 怎么写才自包含、
-同一目录为什么禁止并发、`needs_input` 怎么续跑、什么时候干脆别派（返工量小且强依赖当前会话上下文时，
+同一目录的**写**任务为什么禁止并发、`needs_input` 怎么续跑、什么时候干脆别派（返工量小且强依赖当前会话上下文时，
 自己更快更准）。装了它，你只说「把 X 派给 worker」，它会按规范把任务拆好、检查并发、拼好 prompt 再提交。
 
 两条路线，按「你是使用者还是本仓库开发者」选一条，**不要两条都装**（目标路径会互相打架）。
@@ -120,7 +120,7 @@ MCP 工具是「底层能力」，dispatch skill 是叠加在上面的**派发�
 ### 路线 A：`npx skills`（推荐给使用者，不依赖本地仓库）
 
 本仓库的 skill 遵循 [Agent Skills](https://github.com/agentskills) 开放规范（`SKILL.md` + `scripts/` + `references/`），
-因此可以直接用 Vercel 的 [`skills` CLI](https://www.npmjs.com/package/skills) 从 GitHub 装——**无需 clone、无需 `npm i -g agent-ex-mcp`**：
+因此可以直接用 Vercel 的 [`skills` CLI](https://www.npmjs.com/package/skills) 从 GitHub 装——**无需 clone 本仓库**：
 
 ```bash
 # 先看这个仓库里有哪些 skill（dry-run，不落盘）
@@ -130,10 +130,26 @@ npx -y skills add wuruofan/agent-ex --list
 npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y
 ```
 
-- 缺省安装到 `~/.agents/skills/`（用户级，**全局生效**，任何项目里都能用）。
-- 只给某一个宿主装（如只给 Claude Code）：去掉 `-g`，按 CLI 提示选目标。
+> ⚠️ **但 skill 的等待环节需要 `agent-ex` 这个二进制**（skill 用 `agent-ex wait <task_id>` 等结果，
+> 不再自带脚本）。所以走路线 A 还要补一次全局安装：`npm i -g agent-ex-mcp`。
+> 不想装包也行——skill 会退回 `npx -y agent-ex-mcp@latest wait <task_id>`，代价是每次调用都走 npx（更慢、且要联网）。
+
+- 缺省安装到 `~/.agents/skills/`（用户级，**全局生效**，任何项目里都能用）：这是 Agent Skills 规范的共享目录，
+  直接读它的 20+ 个宿主（codex / cursor / gemini-cli / amp …）装完即可用，其余宿主由 CLI 顺手建软链。
+- 只给某一个宿主装（如只给 Claude Code）：去掉 `-g`，或 `-a claude-code`。
 - 更新：`npx skills update -g`；已装列表：`npx skills list -g`。
 - ⚠️ 若你机器上 `~/.npm/_npx` 不可写，报权限错，加临时 cache：`npm_config_cache=/tmp/npm-cache npx -y skills add …`。
+
+**WorkBuddy 装完还要补一条软链**：它只扫 `~/.workbuddy/skills`，不读 `~/.agents/skills`
+（`skills` CLI 宿主表里最接近的 `codebuddy` 指向 `~/.codebuddy/skills`，也不是 WorkBuddy 的路径，`-a` 没有可选项）：
+
+```bash
+ln -s ~/.agents/skills/agent-ex-dispatch ~/.workbuddy/skills/agent-ex-dispatch
+```
+
+> ⚠️ `ln` 对**已存在的目录**目标不会报错——它会把软链塞进那个目录里（`…/agent-ex-dispatch/agent-ex-dispatch`），
+> 看着成功、实际没生效。链之前先 `ls -la ~/.workbuddy/skills/`：若那里已有路线 B 留下的软链或实体目录，删掉再链。
+> 软链指向的是路径不是内容，所以 `npx skills update -g` 之后不用重链。
 
 ### 路线 B：`install-skill.sh`（开发者路线，软链到本地仓库）
 
@@ -150,23 +166,17 @@ npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y
 > 能独立分发但要手动 `update`。同一目标目录只能有一种——若想从 A 切到 B（或反过来），
 > 先删掉旧的那份再装。
 
-**生效范围是全局的，不是当前仓库**：入口落在用户级 skills 目录（`~/.agents/skills`、`~/.workbuddy/skills`），
-WorkBuddy 会扫描这些路径，所以在任何项目里都能用。仓库里的 `./skills/` 是普通目录，**不是**项目级 skill 路径
+**生效范围是全局的，不是当前仓库**：入口必须落在**宿主自己**的用户级 skills 目录——WorkBuddy 只扫
+`~/.workbuddy/skills`；`~/.agents/skills` 是跨工具共享的中转站（多数宿主读它，WorkBuddy 不读），
+所以两个目录默认都链。仓库里的 `./skills/` 是普通目录，**不是**项目级 skill 路径
 （那会是 `./.workbuddy/skills`），因此既不会只在本仓库生效，也不会与项目级 skill 冲突。
 
 > **Trae**：它的用户级 skills 目录因安装版本而异（本机 `TRAE SOLO CN` 用 `~/.trae-cn/skills`），
 > 所以不在默认目标里，显式传进去即可：`./install-skill.sh ~/.trae-cn/skills`（路线 A 则去掉 `-g`，按 CLI 提示选 Trae）。
 > 2026-10-10 实测：软链装好后 skill 在 Trae 里正常加载，派发 → 后台等待 → 完成后**开新 turn** 整条链路都通。
 
-## 安装（从源码，开发者路线）
-
-```bash
-git clone https://github.com/wuruofan/agent-ex && cd agent-ex
-npm install
-npm run build        # tsc → 生成 dist/
-npm run init         # 开发模式跑 init（tsx）
-./scripts/install-skill.sh   # 可选：装 dispatch skill
-```
+> 🛠️ **要从源码装、或者想给这个仓库改代码** → 看 [`AGENTS.md`](https://github.com/wuruofan/agent-ex/blob/main/AGENTS.md)：
+> 里面有构建/测试命令、改代码前必读的硬约束、改动时的连带规则，以及发版流程。
 
 ## 配置
 
@@ -222,7 +232,7 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
 
 ### 免费模型动态解析：`{model:zen-free}`
 
-opencode zen 的 free 模型集会**轮换**（`mimo-v2.5-free` → `mimo-v2.6-flash-free` 已发生过，`glm-4.7-free` 已整体消失），硬编码模型名很快就会失效。
+opencode zen 的 free 模型集会**轮换**（`mimo-v2.5-free` → `mimo-v2.6-flash-free` 已发生过，`glm-4.7-free` 曾整体消失、后来又以 `glm-5.3-flash-free` 回来），硬编码模型名很快就会失效。
 把 `{model:zen-free}` 写进 profile 的 env，即可在**每次 spawn 前**动态解析出当前可用的 free 模型：
 
 ```jsonc
@@ -232,7 +242,7 @@ opencode zen 的 free 模型集会**轮换**（`mimo-v2.5-free` → `mimo-v2.6-f
       "executor": "opencode",
       "env": {
         "OPENCODE_CONFIG_CONTENT": "{\"model\":\"{model:zen-free}\",\"small_model\":\"{model:zen-free}\"}",
-        "ZEN_FREE_PREFER": "mimo,nemotron,ling"   // 可选：家族前缀软偏好，逗号分隔、按序匹配
+        "ZEN_FREE_PREFER": "deepseek,glm,mimo"   // 可选：家族前缀软偏好，逗号分隔、按序匹配
       }
     }
   }
@@ -351,28 +361,21 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
 #### 4. 验证（别拿真实任务报告当探针）
 
 ```bash
-# 发一张正文刻意不含产品名的自检卡，看飞书返回的 code
-node -e '
-(async () => {
-  const {loadEnvFile} = await import("./dist/env-file.js");
-  const {loadConfig, resolveEnvPlaceholders} = await import("./dist/config.js");
-  const {buildFeishuCard, sendFeishuCard} = await import("./dist/notifier.js");
-  loadEnvFile();
-  const cfg = loadConfig();
-  const url = resolveEnvPlaceholders({url: cfg.notify.feishu_webhook_url}).url;
-  const card = buildFeishuCard("completed", "task_selfcheck", "自检卡片：正文不含产品名", cfg.notify.keyword);
-  console.log("SENT_OK =", await sendFeishuCard(url, card, {dryRun: cfg.notify.dry_run}));
-})();'
+agent-ex doctor --send
 ```
 
-`SENT_OK = true` ⇒ 请求被飞书接受（**前提是 `dry_run` 已是 `false`**——dry-run 时 `post()` 直接返回 `true` 却不投递，见文末提示）。`false` 时看 stderr 的 `code`：
+这条命令会发一张**正文刻意不含产品名**的自检卡，并打印飞书返回的 `code` 与含义。
+（想先看配置体检而不真发消息，跑 `agent-ex doctor` —— 它只读，不改任何东西。）
+
+失败时看 stderr 的 `code`：
 
 | `code` | 含义 | 处置 |
 | :--- | :--- | :--- |
 | `0` | 已投递（注意飞书出错也返 HTTP 200，**判定必须看 `code`，不能看 HTTP 状态码**） | — |
-| `19024` | 关键词校验失败 | 机器人侧的关键词与 `notify.keyword` 不一致。⚠️ **闸门是对整张卡片做子串匹配**——worker 的报告正文里只要偶然出现该词，卡也能过。配置错了却可能长期"看起来正常"，所以**只认上面这张正文干净的自检卡**。 |
+| `19024` | 关键词校验失败 | 机器人侧的关键词与 `notify.keyword` 不一致。⚠️ **闸门是对整张卡片做子串匹配**——worker 的报告正文里只要偶然出现该词，卡也能过。配置错了却可能长期"看起来正常"，所以**只认自检卡**。 |
 | `19021` | **签名校验失败**（或时间戳距今超过 1 小时） | 机器人勾选了「加签」而本工具不发送 `timestamp`/`sign` ⇒ **去机器人安全设置里取消勾选加签**。 |
 | `19022` | IP 校验失败 | 机器人勾选了「IP 白名单」而本机出口 IP 不在其中 ⇒ 取消勾选，或把出口 IP 加进白名单。 |
+| `19001` | **webhook token 无效**（地址本身失效：机器人被删/重建/地址轮换） | ⚠️ 与 `19024` **修法完全不同**：这个要**换 webhook 地址**（去机器人后台重新复制，更新 `.env` 里的 `FEISHU_WEBHOOK_URL`），改关键词没用。 |
 | `9499` | 请求体格式错误 | 卡片 JSON 不合 schema。注意官方限制：**请求体不得超过 20 KB**。 |
 | `11232` | 触发限流 | 单机器人 **100 次/分钟、5 次/秒**；密集派发会撞上，尽量避开整点/半点发送。 |
 | 其他 / 无 `code` | 网络或服务端问题 | 检查出口网络与代理。 |
@@ -381,9 +384,88 @@ node -e '
 >
 > **机器人不在群**没有专属错误码——webhook 地址与群绑定，飞书通常**静默丢弃**。要换群必须重建机器人并换新地址。
 
-> 上面的自检卡用的是**当前配置里的 `dry_run`**——`dry_run=true` 时它只打印不投递（这是安全默认值）。要真正验证投递，先把 `notify.dry_run` 改成 `false`。
+> `doctor` 还会扫 `logs/runner-*.log` 里**历史上**的拒收记录并按 `code` 聚合 —— 2026-10-13→10-15 那次连续 23 个任务零通知，证据当时就已经躺在日志里，只是没人看。现在一条命令就能看到。
 
 ## 运行
+
+### 命令行工具
+
+`agent-ex` 既是 MCP server，也是几个运维子命令的入口：
+
+| 命令 | 作用 |
+| :--- | :--- |
+| `agent-ex init` | 首次安装向导（探测 CLI、生成 config.json + .env）。**重跑会重写 config.json**，覆盖前会逐项列出将要变化的设置并要求确认，旧文件自动备份成 `config.json.bak.<时间戳>`。 |
+| `agent-ex doctor` | 体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。**只读**，不改任何东西。 |
+| `agent-ex doctor --fix` | 自动修**确定性缺陷**（显式空串关键词、改名前的旧产品名、明文 webhook 落在 config.json）。**不动 `dry_run`** ——那是你的偏好，不是缺陷；**也不动自定义关键词** ——机器人登记什么词是用户的界面。 |
+| `agent-ex doctor --send` | 额外实发一张**正文不含产品名**的自检卡，验证真实投递。 |
+| `agent-ex config list` | 列出 profiles / executors / notify / defaults 现状。 |
+| `agent-ex config set <key> <value>` | 改单个字段。白名单：`notify.dry_run`、`notify.keyword`、`defaults.timeout_sec`，以及 `executors.<name>.bin`（定点修 bin 路径）。 |
+| `agent-ex profile list` | 列出所有 profile（标出默认的那个）。 |
+| `agent-ex profile use <profile>` | **切**默认 profile（profile 必须已存在）。 |
+| `agent-ex profile create <built-in> [--bin <path>]` | **物化**一个内置预设（当前：`opencode-zen-free`，零密钥的 opencode 免费模型）。只创建，不切默认；`--bin` 用于 executor 不在 PATH 上时指定绝对路径。 |
+| `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段（如 `ZEN_FREE_PREFER`），或用保留字 `executor` 改它用哪个 executor。 |
+| `agent-ex wait <task_id>` | **阻塞等一个任务到终态**（`completed` / `failed` / `cancelled`）或到 `needs_input`，并把 worker 的最终报告提出来。给 agent 派活后用它在后台等结果，见下节。 |
+
+> `doctor` 也有对应的 MCP 工具 `agent_ex_doctor`，让 agent 自己就能排错，不用手抄命令。
+
+### `agent-ex wait`：等任务结果
+
+派完活不必一直轮询——`agent-ex wait` 会自己等到有结论，并把 worker 的最终报告一并带出来：
+
+```bash
+agent-ex wait task_abc123                    # 等到终态或 needs_input
+agent-ex wait task_abc123 --once             # 查一次就返回
+agent-ex wait task_abc123 --max-wait-sec 900 # 自己给等待窗口
+```
+
+stdout 是机器可读的 `KEY=VALUE`（顺序固定，可直接解析）：
+
+```
+TASK_ID=task_abc123
+STATUS=completed
+WAIT=terminal
+MAX_WAIT_SEC=11010
+ELAPSED_SEC=900
+PROJECT_PATH=/path/to/project
+FILES_CHANGED=3
+LOG_PATH=/Users/you/.agent-ex/logs/task_abc123.jsonl
+REPORT_PATH=/tmp/task_abc123.report.md
+REPORT_CHARS=3322
+REPORT_OUTLINE=摘要 | 验收
+REPORT_TEXT=## 摘要 …
+```
+
+**退出码就是判据**：
+
+| `WAIT` | exit | 含义 |
+| :--- | :--- | :--- |
+| `terminal` | 0 | `completed` / `failed` / `cancelled` |
+| `needs_input` | 5 | worker 在等你答复——**不是终态**。答完后对**同一个 task_id** 再起一次 wait |
+| `timeout` | 2 | 等待窗口用尽，任务仍在跑。**不会自动续等** |
+| `not_found` | 3 | 没有这个任务（多半是 id 抄错了） |
+| `db_unreadable` | 6 | 库读不了——**环境问题**（沙箱禁写数据目录），不是任务问题 |
+| — | 4 | 参数用错了 |
+
+> ⚠️ 判据是 stdout 里**有没有 `WAIT=` 行**，不是退出码。老版本 CLI 不认识 `wait` 这个子命令，会走
+> unknown command 分支并返回 **2**，与 `WAIT=timeout` 撞码。想提前探测：`agent-ex wait --help`——
+> 新版本 exit 0，老版本 exit 2。
+
+**常用参数**：
+
+| 参数 | 作用 |
+| :--- | :--- |
+| `--once` | 查一次就返回，不进入等待循环 |
+| `--max-wait-sec N` | 自己指定等待窗口（默认按任务的 `timeout_sec` 推导：`3×timeout_sec+90+120`；`0` = 永不放弃） |
+| `--interval-sec N` | 轮询间隔，默认 20 秒 |
+| `--report-out PATH` | 报告落盘位置，默认写到临时目录 |
+| `--copy-dir PATH` | 数据目录只读时的降级副本落点（沙箱场景） |
+| `--verbose` | 每轮心跳写 stderr |
+| `--no-digest` | 不内联报告摘要（`REPORT_OUTLINE` / `REPORT_TEXT` / `REPORT_HEAD`），报告仍会落盘 |
+
+**沙箱里读不到库怎么办**：宿主 shell 沙箱禁止写数据目录时，SQLite 建不了 `-shm` 就读不了。
+`wait` 会自动降级为「复制一份再读」（stdout 里出现 `DB_SOURCE=copy`）；连副本也读不了就是 exit 6
+`db_unreadable`——**这是环境问题，别当成"任务不存在"**。此时可用 `--copy-dir <可写目录>` 指定落点。
+
 
 ### 作为 MCP Server（stdio）
 
@@ -424,7 +506,7 @@ npm run runner <task_id>     # = tsx src/runner.ts <task_id>
 ### 跑测试
 
 ```bash
-npm run build && npm test            # 单元 + 集成 = 139 全绿
+npm run build && npm test            # 单元 + 集成 = 196 全绿
 npm run test:integration            # 只跑集成（会自动先build）
 npm run typecheck                   # 仅类型检查
 ```
@@ -468,6 +550,21 @@ npm run typecheck                   # 仅类型检查
 ### `version`
 
 无参数。返回构建元数据 `{ version, gitSha, buildTime }`，用于确认重启后新代码已生效；`dist/build-meta.json` 缺失时返回 `{ unknown: true, note }`。
+
+### `doctor`
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `send` | ❌ | 是否实发自检卡（默认 `false`，只读体检）。 |
+
+把「通知到底通不通」的证据聚合成结论：config 自身（关键词 / dry_run / webhook / 默认 profile）、
+executor 的 bin 是否可执行、以及**历史上**的通知失败（扫 `logs/runner-*.log` 里的飞书拒收记录，按 `code` 聚合）。
+每条 finding 带 `severity` / `detail` / `fix`（可复制的修复命令）。
+
+> `send=true` 发的是**正文不含产品名**的自检卡 —— 飞书关键词闸门匹配整张卡片，
+> 拿真实任务报告当探针会假通过。
+> 被拒收时，**飞书返回的 `code` 与 `msg` 会直接写进结论**（不是只留在 stderr）——
+> agent 据此就能区分"改关键词"（19024）与"换 webhook 地址"（19001），不必去翻日志。
 
 ### `restart`
 
@@ -529,7 +626,7 @@ node dist/server.js init    # 即 `agent-ex init`
 交互流程（claude executor 为例）：
 
 1. 用哪个 agent CLI（`claude` / `opencode`，自动探测并提示检测到的路径）；bin 用检测到的绝对路径（回车即采用）；
-2. profile 名（默认 `default`）；
+2. profile 名（默认 `default`；**opencode + zen free 时默认 `opencode-zen-free`**，见下方说明）；
 3. provider 预设（`minimax` / `deepseek` / `custom`）：
    - **预设**：内置 base_url + 默认模型 + 对应密钥变量名（`MINIMAX_API_KEY` / `DEEPSEEK_API_KEY`）。检测到该环境变量时**掩码展示**（`sk-…wXYZ`）并问 `Use this value? [Y/n]`——`Enter`/`Y` 直接采用；`n` 后粘贴新值，或 `Enter` 跳过。
    - **custom**：只问 `ANTHROPIC_BASE_URL` 与模型名；密钥**只粘贴**（无标准变量名可检测），占位符变量名从 profile 名派生（如 `myprov` → `MYPROV_API_KEY`）。
@@ -541,48 +638,79 @@ node dist/server.js init    # 即 `agent-ex init`
 - 写 `config.json`（**只含 `{env:VAR}` 占位符**，零明文）并自动用 `loadConfig()` 自校验；
 - 把确认/粘贴到的密钥写进 `$AGENT_EX_HOME/.env`（**chmod 600**，幂等——同值不重写）；
 - 若密钥最终没进 `.env`，会打印 ⚠ 提醒「运行时必须有该变量，否则任务失败」；
-- 打印 4 步收尾指引：`AGENT_EX_HOME` 怎么设、**可直接粘贴的 MCP 注册片段（绝对路径）**、
-  dispatch skill 的安装方式与各宿主 skills 目录的 `find` 查法、以及调 `config.json` 的提示。
+- 打印收尾指引：`AGENT_EX_HOME` 怎么设、**可直接粘贴的 MCP 注册片段（绝对路径）**、
+  dispatch skill 的安装方式与各宿主 skills 目录的 `find` 查法、**以及怎么打开真实通知**（`config set notify.dry_run false` + `doctor --send`）。
 
-> 已有 `config.json` 时 `init` 会先确认是否覆盖。opencode executor 不询问 provider——它由opencode 自己的配置管理（`opencode auth login` / `opencode.json`），agent-ex 只负责拉起。
+> 已有 `config.json` 时 `init` 的行为：
+>
+> 1. 开头先问一次「要重写吗」（此时还不知道会改成什么样，只是给个廉价退出点）；
+> 2. **问答结束后、写盘前**，把新旧配置的差异逐项列出来（哪些 profile 会消失、哪些字段被改写），
+>    并解释后果（例：`notify.dry_run false → true` 意味着终态通知不再投递），让你**知情同意**；
+> 3. 你同意后：先校验新配置（**校验不过就不写盘**，旧 config 原封不动），
+>    再把旧 config 备份成 `config.json.bak.<时间戳>`，最后才写入。
+>
+> `.env` 是**增量合并**（只补/更新采集到的 key），所以重跑 `init` **不会丢密钥**。
+>
+> ⚠️ 但 `init` 是**全量覆盖**的：只想改一个字段（比如开通知）请用 `agent-ex config set`，
+> 别重跑 `init` —— 那会把其它 profile 一起刷掉。
+>
+> opencode executor 不询问 provider——它由 opencode 自己的配置管理（`opencode auth login` / `opencode.json`），agent-ex 只负责拉起。
+>
+> opencode 分支会多问一句 `Use opencode zen free model (auto-resolving, no key needed)`（默认 Yes）：
+> 选 Yes 时写的是**内置 preset** `{model:zen-free}` 占位符 + `ZEN_FREE_PREFER`，
+> profile 名默认取内置名 **`opencode-zen-free`**。
+> 这样 `init` 产出的 profile 与 `agent-ex profile create opencode-zen-free` **同名同 env**——
+> 之后再跑 `profile create` 会得到「已存在」而不是多出一个同义但名字不同的 profile。
+> 名字仍可自己改（改了名 env 不变：env 描述的是「用哪套模型配置」，不是「叫什么」）。
+
+## 版本历史
+
+### 0.2.0（2026-10-26）
+
+面向「配置改不动、通知不通」这两个高频痛点的版本。
+
+**新增 MCP 工具**
+- `agent_ex_doctor`：把「通知到底通不通」的证据聚合成**结论 + 病因 + 可复制的修复命令**；`send=true` 会实发一张正文不含产品名的自检卡。验证飞书关键词闸门必须用它——拿真实任务报告当探针会假通过。
+
+**新增 CLI 子命令**（0.1.0 的 server 只认 `init`，其余子命令一律被静默吞成 MCP server）
+- `agent-ex doctor [--fix] [--send]`：体检。`--fix` 自动修**确定性缺陷**（显式空串关键词、过期产品名、明文 webhook 落在 config.json），但**不动 `dry_run`**（那是偏好不是缺陷）、**不动自定义关键词**（机器人登记什么词是用户的界面）。
+- `agent-ex config [list|set]`：改全局字段（`notify.dry_run` / `notify.keyword` / `defaults.timeout_sec` / `executors.<name>.bin`）。写入口是**白名单**——只改一个字段不必重跑 `init`。
+- `agent-ex profile [list|use|create|set]`：profile 生命周期。`profile create opencode-zen-free` 物化零密钥的内置免费模型预设。
+- 拼错的子命令现在**明确报错并打印用法**，不再静默变成 MCP server。
+
+**免费模型**
+- zen 免费模型**动态解析** `{model:zen-free}`：每次 spawn 前拉实时清单（免鉴权），配置里零硬引用模型名；撞限流的模型进排除集后自动路由到下一个。
+- 内置偏好默认 `deepseek,glm,mimo`（实时清单快照；清单的 `created` 字段无区分度，家族顺序是口味）。
+
+**修复**
+- init 的 opencode+zen-free 分支与内置 preset 统一：**同名同 env**。原先它叫 `default` 且漏了 `ZEN_FREE_PREFER`，于是「先 init、再 profile create」会得到两个同义但名字与 env 都不同的 profile。
+- CLI 与 MCP 的 `.env` 加载路径统一：此前 CLI 侧解析 `{env:VAR}` **必失败**（同一份配置，agent 查得通、命令行查不通）。
+- `init` / `doctor` / `config` 懒加载 `node:sqlite`：不再有实验性警告插进交互提示符中间。
+- `doctor --fix` 不再在坏 config 上崩溃。
+- 飞书关键词改由单一 brand 常量派生；去掉 SQLite WAL 依赖（只读沙箱也能读 task db）。
+- 零密钥的 opencode 配置不再误报「必须设置 MINIMAX_API_KEY」。
+
+### 0.1.0（2026-10-14）
+
+首个公开版本：`agent_ex_submit` / `agent_ex_status` / `agent_ex_cancel` / `agent_ex_version` / `agent_ex_restart` 五个 MCP 工具，加上 `agent-ex init` 交互式向导（探测 CLI → 生成 config.json + .env）。
 
 ## 发布（npm）
 
-包名 `agent-ex-mcp`，MIT。发布配置已在 `package.json` 就位：
+包名 `agent-ex-mcp`，MIT。
 
 | 字段 | 值 | 说明 |
 |---|---|---|
 | `name` | `agent-ex-mcp` | 带 `-mcp` 规避 registry 包名相似度保护（`agent-ex` 撞已占用的 `agentex`），见「快速开始」下的说明 |
 | `bin` | `agent-ex` → `dist/server.js` | **命令名不带 `-mcp`**：全局安装后 `agent-ex` 可直接跑 server |
 | `files` | `dist` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包 |
-| `publishConfig.registry` | `https://registry.npmjs.org` | 锁定发布目标为官方源（见下） |
-| `prepublishOnly` | `build` + `test` | 发布前自动构建并跑全量测试，测试红则发布中止 |
 | `engines.node` | `>=22.5` | 依赖 `node:sqlite`（server 与 runner 都要用） |
-
-```bash
-npm run build && npm test      # prepublishOnly 也会跑，但建议先手动确认
-npm publish --access public
-```
-
-> ⚠️ **必须显式带 `--registry https://registry.npmjs.org`**（或确保 `publishConfig.registry` 生效）。
-> 国内常见的 `registry.npmmirror.com`（淘宝镜像）是**只读**的，不支持 `npm publish`，也不提供注册/登录端点；
-> 带着它发布会在客户端就报 `ENEEDAUTH`。开发者若用镜像装依赖，请在 `~/.npmrc` 之外单独配置发布源。
-
-发布者需自备 npm 账号，并开启 2FA：`npm profile enable-2fa auth-and-writes`。
-
-**关于 token（npm 现行策略）**：发布必须满足二者之一——账号已开 2FA（`npm publish` 时用配置的验证器/安全密钥认证），
-或使用**带 bypass 2FA 权限的 granular access token**。实测（2026-10-14）：账号未开 2FA 时，
-`npm login` 拿到的会话凭据无法完成发布，registry 直接返回 `E403 … Two-factor authentication or granular
-access token with bypass 2fa enabled is required`（此错**不会**提示要 OTP，容易误判为「已登录却仍被拒」）。
-命令行创建方式：`npm token create --bypass-2fa --expires 90 --packages-all --packages-and-scopes-permission read-write`。
-若要走无人值守的 CI，优先用下方的 Trusted Publisher（OIDC），无需长期密钥。
-
-若要接 CI，推荐 [Trusted Publisher（OIDC）](https://docs.npmjs.com/trusted-publishers)（无需长期密钥），
-它需要 npm CLI ≥ 11.5.1、Node ≥ 22.14，且**无法创建新包**：必须先手动发布至少一个版本、包已存在后才能配置。
 
 > ⚠️ **npm 包不含 dispatch skill**：`skills/` 与 `scripts/` 不在 `files` 白名单里。
 > 但这已不再是分发缺口——skill 走 [Agent Skills](https://github.com/agentskills) 规范，
 > 使用者用 `npx skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y` 从 GitHub 直接装（见「安装 dispatch skill」）。
+
+> 🔧 **发版流程（认证、2FA、打包校验、发布后核验）见 [`AGENTS.md`](https://github.com/wuruofan/agent-ex/blob/main/AGENTS.md#发布npm)**
+> —— 那是维护者文档，不随 npm 包分发。
 
 ## 后续（planned）
 

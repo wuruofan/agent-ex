@@ -12,6 +12,25 @@ export interface NotifyOptions {
 
 export type FeishuStatus = "needs_input" | "completed" | "failed" | "quota_warning";
 
+/**
+ * 一次发送的结果。
+ *
+ * 为什么不让 post() 只回 boolean：飞书的失败信息**只在响应体的 code 字段里**
+ * （出错也是 HTTP 200），而 code 恰恰是"该改关键词还是该换 webhook 地址"的唯一判据
+ * （见 doctor.ts 的 FEISHU_ERRORS）。压成 boolean 等于把病因扔掉、只留一行 stderr 日志——
+ * CLI 用户得多看一眼终端，MCP 侧（agent_ex_doctor）则完全拿不到。
+ */
+export interface FeishuResult {
+  /** 是否投递成功（HTTP 200 且 body.code === 0）。 */
+  ok: boolean;
+  /** 飞书业务码（成功为 0）；网络异常/超时时为 null。 */
+  code: number | null;
+  /** 飞书返回的 msg；网络异常/超时时是失败原因。 */
+  msg: string;
+  /** HTTP 状态码；网络异常/超时时为 null。 */
+  httpStatus: number | null;
+}
+
 /** 飞书自定义机器人消息负载（text / interactive 共用通用发送）。 */
 type FeishuPayload = Record<string, unknown>;
 
@@ -27,14 +46,16 @@ type FeishuPayload = Record<string, unknown>;
  * 若无超时单次请求会无限挂起直到 OS TCP 层超时（分钟级），表现就是任务已终态、
  * 通知还在路上（9/3 实测迟到约 2 分钟）。超时按一次失败计数，走 delays 重试。
  */
-async function post(webhookUrl: string, payload: FeishuPayload, opts: NotifyOptions = {}): Promise<boolean> {
+async function post(webhookUrl: string, payload: FeishuPayload, opts: NotifyOptions = {}): Promise<FeishuResult> {
   if (opts.dryRun) {
     console.error(`[notifier:dry-run] → ${webhookUrl}\n${JSON.stringify(payload, null, 2)}\n---`);
-    return true;
+    return { ok: true, code: 0, msg: "dry-run（未发送）", httpStatus: null };
   }
   const doFetch = opts.fetchImpl ?? fetch;
   const delays = opts.delays ?? [1000, 4000];
   const timeoutMs = opts.timeoutMs ?? 10_000;
+  // 最后一次尝试的结果：三次都失败时把它带出去（code 就是病因）
+  let last: FeishuResult = { ok: false, code: null, msg: "没有发出任何请求", httpStatus: null };
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -47,26 +68,28 @@ async function post(webhookUrl: string, payload: FeishuPayload, opts: NotifyOpti
       });
       const body = (await res.json().catch(() => ({}))) as { code?: number; msg?: string };
       const code = typeof body.code === "number" ? body.code : res.ok ? 0 : -1;
-      if (code === 0) return true;
+      if (code === 0) return { ok: true, code: 0, msg: body.msg ?? "", httpStatus: res.status };
+      last = { ok: false, code, msg: body.msg ?? "", httpStatus: res.status };
       console.error(`[notifier] feishu rejected: HTTP ${res.status} code=${code} msg=${body.msg ?? ""} (attempt ${attempt}/${MAX_ATTEMPTS})`);
     } catch (e) {
       const reason = e instanceof Error && e.name === "AbortError" ? `timed out after ${timeoutMs}ms` : String(e);
+      last = { ok: false, code: null, msg: reason, httpStatus: null };
       console.error(`[notifier] ${reason} (attempt ${attempt}/${MAX_ATTEMPTS})`);
     } finally {
       clearTimeout(timer);
     }
     if (attempt < MAX_ATTEMPTS) await sleep(delays[attempt - 1] ?? 4000);
   }
-  return false;
+  return last;
 }
 
 /** 发送纯文本消息（保留，单测覆盖 post 的 HTTP/code 逻辑；正式通知已改用卡片）。 */
-export async function sendFeishuText(webhookUrl: string, text: string, opts: NotifyOptions = {}): Promise<boolean> {
+export async function sendFeishuText(webhookUrl: string, text: string, opts: NotifyOptions = {}): Promise<FeishuResult> {
   return post(webhookUrl, { msg_type: "text", content: { text } }, opts);
 }
 
 /** 发送交互卡片消息。 */
-export async function sendFeishuCard(webhookUrl: string, card: Record<string, unknown>, opts: NotifyOptions = {}): Promise<boolean> {
+export async function sendFeishuCard(webhookUrl: string, card: Record<string, unknown>, opts: NotifyOptions = {}): Promise<FeishuResult> {
   return post(webhookUrl, { msg_type: "interactive", card }, opts);
 }
 

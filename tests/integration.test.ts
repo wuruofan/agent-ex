@@ -139,7 +139,10 @@ afterEach(() => {
   delete process.env.AGENT_EX_RUNNER;
 });
 
-async function waitForTerminal(id: string, timeoutMs = 8_000): Promise<string> {
+// 阈值说明：这些是"挂死"的上界，不是性能断言——条件一满足就立刻返回，所以放宽只影响
+// 真失败时的耗时。取值依据：本机一次 node 进程启动要加载上百个模块，文件 open 慢的机器上
+// （实测 25-50ms/次 open）光启动就是 10s 级；原来的 8s/4s/5s 会把它误判成"没完成"。
+async function waitForTerminal(id: string, timeoutMs = 25_000): Promise<string> {
   const db = join(home, "tasks.db");
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -152,7 +155,7 @@ async function waitForTerminal(id: string, timeoutMs = 8_000): Promise<string> {
   throw new Error(`timeout (${timeoutMs}ms) waiting terminal state for ${id}`);
 }
 
-async function waitForPidfile(path: string, timeoutMs = 4_000): Promise<number> {
+async function waitForPidfile(path: string, timeoutMs = 15_000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (existsSync(path)) return Number(require("node:fs").readFileSync(path, "utf8"));
@@ -166,7 +169,7 @@ function hbLines(path: string): number {
   return readFileSync(path, "utf8").split("\n").filter(Boolean).length;
 }
 
-async function waitForHbLines(path: string, min: number, timeoutMs = 5_000): Promise<void> {
+async function waitForHbLines(path: string, min: number, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (hbLines(path) >= min) return;
