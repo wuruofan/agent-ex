@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { openStore } from "../src/store.js";
 
 // 真实 spawn MCP server 走 stdio JSON-RPC，断言注册出来的工具集。
 //
@@ -143,10 +144,29 @@ describe("MCP server tool registration", () => {
     expect(r.text).toMatch(/Unrecognized key/i);
   }, 120_000);
 
-  it("accepts the documented arguments", async () => {
-    const r = await callTool({}, "agent_ex_status", { include_finished: true, limit: 3 });
-    expect(r.error).toBeUndefined();
-    expect(r.isError).toBeFalsy();
-    expect(Array.isArray(JSON.parse(r.text!))).toBe(true);
+  it("accepts the documented arguments and actually applies them", async () => {
+    // 在独立 home 里先造一条已终态任务：若 include_finished 被静默剥离，status 会走
+    // listActive() 返回 []，下面的 toContain 就会红。早先只断言 Array.isArray 时，
+    // 空库和「参数没生效」都返回 []，断言无法区分——正是 .strict() 要防的失败模式。
+    const home = mkdtempSync(join(tmpdir(), "afex-status-"));
+    const store = openStore(join(home, "tasks.db"));
+    store.createTask({
+      id: "task_done_fixture", prompt: "x", project_path: home, executor: "fake", profile: "fake",
+      timeout_sec: 60, log_path: join(home, "logs", "done.jsonl"), role: "worker", created_at: 1,
+    });
+    store.claimToRunning("task_done_fixture", process.pid);
+    store.transition("task_done_fixture", ["running"], "completed", { result: "done" });
+    store.close();
+
+    try {
+      const r = await callTool({ AGENT_EX_HOME: home }, "agent_ex_status", { include_finished: true, limit: 3 });
+      expect(r.error).toBeUndefined();
+      expect(r.isError).toBeFalsy();
+      const v = JSON.parse(r.text!) as { task_id: string; status: string }[];
+      expect(v.map((t) => t.task_id)).toContain("task_done_fixture");
+      expect(v.find((t) => t.task_id === "task_done_fixture")?.status).toBe("completed");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   }, 120_000);
 });

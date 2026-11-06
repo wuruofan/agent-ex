@@ -1,14 +1,13 @@
 # 把 wait-task 收进 CLI：`agent-ex wait`
 
 **文档编号**：2026-10-30-wait-as-cli-subcommand
-**状态**：设计定稿；**CLI 侧已实施**（commit `f7fcbd5`…`989a411` + `29f60a2`），skill 侧迁移（§6 第 3 步）待 publish 后执行
-**实施现状（2026-11-04 核对）**：
+**状态**：设计定稿并**全部实施完成**；`agent-ex-mcp@0.3.0` 已发布（tag `v0.3.0`），skill 侧迁移在 publish 之后由 `f7a66b3` 落地
+**实施现状（2026-11-06 更新；下方 2026-11-04 的逐轮评审记录保留原貌）**：
 - ✅ `src/report.ts`、`src/wait.ts`、`tests/wait.test.ts`（42 条用例）已落地；`src/server.ts` 已接上 `wait` 分支。
 - ✅ 退出码与 stdout 契约按 §3.2 / §3.3 实现；金标准对照（completed / running / needs_input / failed / not_found + 遗留 WAL 的 copy 路径）**stdout 逐行一致**。
 - ✅ D1 已修：copy 模式每轮按 `db`+`-wal`+`-journal` 整组签名重建副本（复制前后双签名校验）。
 - ⚠️ **超时文案实现时保留了老措辞**（"the runner likely died"），与 §1.2 要求不符 → 已在 `7c2fa17` 改为「本轮上界已过 + 指向 `--max-wait-sec`」。
-- ⏳ 未做：§6 第 3 步（删 `wait-task.mjs` + 改 SKILL.md）、§6 第 4 步（skill 版本门槛写死具体版本号）——**必须等 publish 之后**，
-  否则新 skill 会去调还不存在的 CLI。
+- ✅ 已完成（2026-11-05，在 publish 之后）：§6 第 3 步（删 `wait-task.mjs` + 改 SKILL.md）、§6 第 4 步（skill 版本门槛写死具体版本号）—— 由 `f7a66b3` 落地。门槛现为 `agent-ex-mcp >= 0.3.1`：0.3.0 有 `agent-ex wait`，但兜底查询要用的 `include_finished` 是 0.3.1 才加的。
 **修订**：
 2026-10-30 一轮评审——纠正"npm 用户拿不到脚本"的论据、把既有缺陷移出"冻结"范围、§3.3 补按状态的字段表与 exit 1、只读路径不复用 `Store` 类、wait 单独分支不载 `.env`、补测试落位与发布顺序。
 2026-10-30 二次评审（对着代码逐条核验行号与语义）——**撤回 D2**（§1.2：单次 wait 观察不到轮次推进，按轮数缩放是把预算放大约 5 倍，代价方向反了）；逐项修订：D1 的源签名必须覆盖 `-wal`/`-journal`（§4）、`report.ts` 改为复用 `executor.parseEvent` 而非自造形状解析（§4）、新增 `--help`（exit 0）并让它兼任版本探针（§3.1/§3.2/§5.4）、`ELAPSED_SEC` 的语义必须先定性（§3.3）、`MAX_WAIT_SEC=never` 进字段表、skill 侧步骤并入 §6 并修正删除顺序、发布顺序改成「两个 commit，中间 publish」（§7）。
@@ -16,7 +15,7 @@
 2026-11-03 四轮评审（会话复核第二轮，全部按证据落地）——信号监听改挂 **CLI 边界**（`runWait` 保持纯函数，`deps.installSignals` 注入）；`STATUS=unknown` 定性为失败路径哨兵（非 `TaskStatus` 枚举）；`--report-out` 写失败仍输出路径的契约补注；copy 逐文件复制的**撕裂窗口**（复制前后双签名校验）；发布顺序改为 **commit A → `npm version` 提交 + push + tag → publish → commit B → push**（约束是"被 push 的那批不含 skill 改动"）；新增「**包未发布时本机自测必须先 `npm link`**」的补救路径（§5.2、§6.8、`install-skill.sh`），因为此时升级命令装回来的仍是旧版。
 2026-11-04 五轮评审（对着上一轮改动再核）——修正两处自相矛盾：§4 副本复制口径统一为**整组**（`db`+`-wal`+`-journal`，源侧缺失要删副本同名文件），§5.2 的"不找 `dist`"改成"**不自动探测** `dist`"（`node dist/server.js` 是人工指定的开发期命令）；测试补三处：信号用例**只能进程级**（挪到真进程组）、Task 2 的 D1 单测必须在改完源库后**恢复 0555** 才会走重拷路径（否则退化成直读恢复）、真进程组补 exit 6 与 SIGINT/130，并写明 exit 1 为何不做 wait 专属用例。
 2026-11-04 六轮（复核五轮改动）——**stderr 流式语义**（§3.2）：copy 降级说明 / `--verbose` 进度 / 预算超限必须**等待中途**就可见，`runWait` 经 `deps.writeStderr` 注入实时落盘（CLI 传 `process.stderr.write`），不注入则攒进返回值（单测 `r.stderr` 口径不变）；攒到返回才 flush 会让 SIGINT 测试等不到任何带内信号而死锁。`scripts/install-skill.sh` 正式纳入 Task 6 的提交清单（收尾提示的 npm link 行此前只改了文件没登记）。
-**相关**：`skills/agent-ex-dispatch/SKILL.md`（Phase 2 loop）、`skills/agent-ex-dispatch/scripts/wait-task.mjs`（待迁移，**删除动作待 publish 后**）
+**相关**：`skills/agent-ex-dispatch/SKILL.md`（Phase 2 loop）；`scripts/wait-task.mjs` 已于 `f7a66b3` 删除（在 0.3.0 publish 之后），等待环节现由 `agent-ex wait` 提供
 
 ## 1. 问题
 

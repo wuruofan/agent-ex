@@ -60,7 +60,7 @@ npm i -g agent-ex-mcp    # 或免安装：npx -y agent-ex-mcp@latest init
 agent-ex init        # 交互式配置：探测 CLI、收集密钥、生成 config + .env
 ```
 
-> 包已发布到公共 registry（当前 `agent-ex-mcp@0.3.0`）。
+> 包已发布到公共 registry（当前 `agent-ex-mcp@0.3.1`）。
 > **包名带 `-mcp` 后缀、命令名不带**：npm 上 `agent-ex` 与已被他人占用的 `agentex` 过于相似，
 > 触发 registry 的包名相似度保护而无法发布，故加限定词规避；`bin` 仍为 `agent-ex`，
 > 所以安装后命令是 `agent-ex init`（不是 `agent-ex-mcp init`）。数据目录 `~/.agent-ex` 同理保持不变。
@@ -173,7 +173,8 @@ ln -s ~/.agents/skills/agent-ex-dispatch ~/.workbuddy/skills/agent-ex-dispatch
 
 > **Trae**：它的用户级 skills 目录因安装版本而异（本机 `TRAE SOLO CN` 用 `~/.trae-cn/skills`），
 > 所以不在默认目标里，显式传进去即可：`./install-skill.sh ~/.trae-cn/skills`（路线 A 则去掉 `-g`，按 CLI 提示选 Trae）。
-> 2026-10-10 实测：软链装好后 skill 在 Trae 里正常加载，派发 → 后台等待 → 完成后**开新 turn** 整条链路都通。
+> 2026-10-10 实测：软链装好后 skill 在 Trae 里正常加载，派发 → 后台等待 → 用户回话后推进整条链路都通。
+> ⚠️ 2026-10-21 复测（见 [`docs/diagnostics/2026-10-20-trae-no-wake-channel.md`](docs/diagnostics/2026-10-20-trae-no-wake-channel.md) §9）：Trae **不会**因后台进程完成自动开新 turn，MCP 主动通知通道也不能替代；loop 只能是「用户每次回话推进一轮」，靠 SKILL.md 的「[回来先查]」兜底接上。
 
 > 🛠️ **要从源码装、或者想给这个仓库改代码** → 看 [`AGENTS.md`](https://github.com/wuruofan/agent-ex/blob/main/AGENTS.md)：
 > 里面有构建/测试命令、改代码前必读的硬约束、改动时的连带规则，以及发版流程。
@@ -506,7 +507,7 @@ npm run runner <task_id>     # = tsx src/runner.ts <task_id>
 ### 跑测试
 
 ```bash
-npm run build && npm test            # 单元 + 集成 = 196 全绿
+npm run build && npm test            # 单元 + 集成，全绿
 npm run test:integration            # 只跑集成（会自动先build）
 npm run typecheck                   # 仅类型检查
 ```
@@ -535,8 +536,12 @@ npm run typecheck                   # 仅类型检查
 | 参数 | 说明 |
 |---|---|
 | `task_id` | 不填则返回所有活跃任务；填了返回单条。 |
+| `include_finished` | 仅 0.3.1+：置 `true` 时连已结束的任务一起列（按创建时间倒序，默认 20 条）。会话重启 / 上下文压缩后用它认回「上次派的那个」——那通常已经终态。**0.3.0 会静默忽略该参数并返回空列表**，别把空列表当成「没有任务」。 |
+| `limit` | 配合 `include_finished`，返回最近 N 条（默认 20，上限 200，1–200 的整数）。 |
 
-返回字段含 `status / rounds / profile / elapsed_sec / progress / files_changed`，终态时含 `result` / `error`，`needs_input` 时含 `question`，通知失败时含 `notify_failed`。
+返回字段含 `status / rounds / profile / project_path / started_at / created_at / elapsed_sec / progress / files_changed`，终态时含 `result` / `error`，`needs_input` 时含 `question`，通知失败时含 `notify_failed`。
+
+> ⚠️ 全局单库：`tasks.db` 在 `$AGENT_EX_HOME` 下由所有项目共用，`include_finished` 会跨项目列出（含绝对路径与完整终报），用 `project_path` / `started_at` 认回自己的任务。
 
 ### `cancel`
 

@@ -1,9 +1,9 @@
 # MCP 唤醒通道探针 —— 测宿主会不会被 server 的主动通知叫醒
 
 **文档编号**：probe-mcp-wake-channel
-**状态**：🟡 **探针已就绪 + 自检通过，等待在 Trae 上跑一次**
+**状态**：✅ **2026-10-21 P7 已在 Trae 实测，Q3 = 否**（日志与判定见 `2026-10-20-trae-no-wake-channel.md` §9）。本文与 `probe-prompt-for-trae.md` 作为**复验 runbook** 保留，探针与自检脚本可随时重跑。
 **问题**：Trae 上「后台进程完成 → 宿主开新 turn」实测不存在（见 `2026-10-20-trae-no-wake-channel.md` P2）。
-MCP 协议本身有 server→client 的主动通道，**能不能替代宿主唤醒，从没测过**。
+MCP 协议本身有 server→client 的主动通道，**实测不能替代宿主唤醒**：`client_capabilities: {}` 让 sampling 在协议层就不可用，logging / resources 通知虽发出、宿主零反应，三条通道都未产生新 turn。
 
 ---
 
@@ -146,18 +146,14 @@ ALL PASS
 
 ---
 
-## 6. 结论（待填）
+## 6. 结论（2026-10-21 P7 已填）
 
-Trae 实测跑完后，在此记录：
+完整日志、观测窗口与判定边界见 `2026-10-20-trae-no-wake-channel.md` §9；这里只留速查。
 
-- [ ] Q1 客户端能力声明：____
-- [ ] Q2 三条通道结果：logging ____ / resources ____ / sampling ____
-- [ ] Q3 是否自动产生新 turn：____
+- [x] Q1 客户端能力声明：`client_capabilities: {}` —— Trae 不声明 sampling / roots / elicitation。
+- [x] Q2 三条通道结果：logging 发出成功（`logging_sent`）/ resources 发出成功（`resource_updated_sent`）/ sampling **握手阶段即排除**（`sampling_skipped`，客户端未声明能力）。
+- [x] Q3 是否自动产生新 turn：**否**。`delay_ms=5000` 之后 60s 静默窗口内探针无新入站请求、会话无非用户触发的 turn；探针进程仍存活、stdin 未断 ⇒ 不是「送达失败」。
 
-**若 Q3 = 否**（通知不翻译成新 turn）：Trae 下只能走**方案 A（兜底查询）**，
-loop 退化为「用户每次回话推进一轮」，不是真自动 loop。
-此时 MCP 侧再加工���也改变不了这件事——**能力在宿主，不在 server**。
+⇒ **Q3 = 否**：Trae 下只能走**方案 A（兜底查询）**，loop 退化为「用户每次回话推进一轮」，不是真自动 loop。MCP 侧再加工也改变不了这件事——**能力在宿主，不在 server**。
 
-**若 Q3 = 是**：那 MCP notification 就能替代宿主唤醒，agent-ex 可在任务终态时主动推，
-Trae 下的真自动 loop 成为可能。届时再讨论「谁来监听 tasks.db 状态变化」
-（server 内轮询 vs runner 终态时直推）。
+> 复验：本探针与 `probe-prompt-for-trae.md` 保留用于换会话 / 升级 Trae 后重跑；判定方法见 §2/§3，宿主侧两个坑（`delay_ms` 类型、嵌套 `run_mcp` 不可见）见 §9.5。

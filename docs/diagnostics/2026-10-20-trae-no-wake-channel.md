@@ -146,9 +146,10 @@ P5/P6 能直读 `~/.agent-ex/tasks.db`（**未**走副本降级——`DB_SOURCE`
 #   timeout: 600000 → 期望 timed_out_moved_to_background
 
 # P5/P6：装备自检
-SKILL_DIR=/Users/meow/workspace/agent-flow-ex/skills/agent-ex-dispatch
-node --disable-warning=ExperimentalWarning "$SKILL_DIR/scripts/wait-task.mjs" <bogus_id> --once          # 期望 exit 3
-node --disable-warning=ExperimentalWarning "$SKILL_DIR/scripts/wait-task.mjs" <real_task_id> --once      # 期望 exit 0
+# 2026-11-06 更新：等待脚本已随 f7a66b3 删除，改用 agent-ex CLI（>= 0.3.0）。
+# 旧现场记录（§2/§3/§5.1 表格与 P5/P6 正文）仍保留 wait-task.mjs 原貌，勿据此执行。
+agent-ex wait <bogus_id> --once          # 期望 exit 3 + WAIT=not_found
+agent-ex wait <real_task_id> --once      # 期望 exit 0 + WAIT=terminal
 ```
 
 探针现场已清理（`/tmp/probe_wake_marker.txt`、`/tmp/probe_wake2.txt` 删除；P4 进程 `StopCommand` 停掉）。
@@ -162,7 +163,7 @@ node --disable-warning=ExperimentalWarning "$SKILL_DIR/scripts/wait-task.mjs" <r
 3. **端到端联调缺失**：`mcp_agent-ex` 不可见，故本次是「submit 由 MCP」+「等待由脚本」两条腿里**只验了后一条**。
 4. ~~**`SKILL.md` 未改**：第 5 节的三处候选修法等用户拍板~~ → **10/21 已改**，见 §5.1（新增宿主无关的兜底查询）+ §5.2（另两条候选被否的理由）。
 5. **兜底路径本身未做端到端实测**：§5.1 的兜底只用 `wait-task.mjs --once` 单侧验证（P5/P6），**没有**在 Trae 上跑一次「submit → 兜底查询 → 复核 → 续跑」的完整闭环（`mcp_agent-ex` 在该宿主不可见，见遗留 3）。skill 侧的规范已经写好，但闭环行为未经验证。
-6. **「已消费」标记的落地方式未定**：§5.1 要求复核后把 task_id 划掉，但**存在哪里**（会话上下文里的清单 / 任务库 / 外部文件）没有定。目前定的是「写进回复正文或待办清单」——纯靠上下文有被压缩丢失的风险（届时 task_id 消失，反而不会重复复核；已终态的任务也无法用 `agent_ex_status` 无参列出，它只列 queued/running/needs_input）。
+6. **「已消费」标记的落地方式未定**：§5.1 要求复核后把 task_id 划掉，但**存在哪里**（会话上下文里的清单 / 任务库 / 外部文件）没有定。目前定的是「写进回复正文或待办清单」——纯靠上下文有被压缩丢失的风险（届时 task_id 消失，反而不会重复复核；0.3.0 的 `agent_ex_status` 无参只列 queued/running/needs_input，已终态查不到 —— **0.3.1 起**可带 `include_finished: true` 连终态一起列出，见 §5.1 的兜底查询）。
 
 ---
 

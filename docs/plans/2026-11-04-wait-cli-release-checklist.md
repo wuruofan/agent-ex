@@ -4,18 +4,39 @@
 > 步骤依据 [`docs/plans/2026-10-30-wait-cli-implementation-plan.md`](2026-10-30-wait-cli-implementation-plan.md) 的 Task 5 / Task 6。
 > **本文只是一份执行清单**，具体命令的权威版本在 `AGENTS.md` 的「发布（npm）」一节。
 
-## 当前状态（2026-11-05 发布完成；2026-11-06 commit B 已推送）
+## 当前状态（2026-11-05 发布 0.3.0；2026-11-06 追加 0.3.1 发版）
 
 | 项 | 状态 |
 | :--- | :--- |
 | 代码提交 | ✅ 14 个提交已 push 到 `origin/main`（含 `dad791a chore(release): 0.3.0`），`v0.3.0` tag 已推送 |
 | `npm run typecheck` / `npm run build` | ✅ |
-| `npm test` | ✅ 26 files / 359 passed / 4 skipped |
+| `npm test` | ✅ 26 files / 368 passed / 4 skipped（0.3.1 前重跑，含新增的 status 用例） |
 | 打包干跑 | ✅ 干净目录装 `agent-ex-mcp-0.3.0.tgz`：`wait --help` exit 0、`WAIT=not_found` exit 3、MCP 工具面 6/6 |
 | npm 认证 | ✅ `npm whoami` → `demonsimon`；publish 仍需一次网页 2FA（见下方执行记录） |
 | npm publish | ✅ `agent-ex-mcp@0.3.0`，`dist.shasum` = `3b2ca1e1ba96578bf0ff7a58fe58b0a3f8cdca08`，线上 tgz 与本地 `cmp` 一致 |
 | 从 registry 装回 | ✅ `npm i agent-ex-mcp@0.3.0` → `wait --help` exit 0 + MCP 6/6 `ALL OK` |
 | commit B（skill 迁移） | ✅ publish 之后完成：删旧脚本 / 去 `vitest.config.ts` 的 exclude / `SKILL.md` 加 `agent-ex >= 0.3.0` 门槛与版本探针 / `npm test` 26 files 359 passed / 已 push（见 ⑨） |
+| 0.3.1 后续发版 | ✅ 代码与文档已提交并 push 到 `origin/main`；publish 与上线核验见下方「0.3.1 执行记录」 |
+
+### 0.3.1 执行记录（2026-11-06：补发 `include_finished` 所在版本）
+
+**起因**：pull 到 `a29f2da` 后 review 发现「新 skill + 旧包」错配重演——`SKILL.md` 的
+「[回来先查]」兜底调 `agent_ex_status({ include_finished: true })`，而该参数在 `v0.3.0` 里
+**零命中**；0.3.0 的 `server.tool` 用默认 strip ⇒ 静默吞掉参数、只回活跃任务的空列表，
+宿主分不清「不支持」与「真的没任务」。本机 `dist/build-meta.json` 也仍是 `0.3.0/dad791a`。
+`d4dcb52` 的 `.strict()` 只在新进程生效，救不了正在跑的旧构建。
+
+**处理**：
+
+1. 版本门槛 `>= 0.3.0` ⇒ **`>= 0.3.1`**；`SKILL.md` 前置检查加 MCP server 能力探测
+   （`agent_ex_version` / `tools/list` 的 status schema），兜底段加旧版降级（别把空列表当结论；
+   改用已知 id 的 `agent-ex wait <id> --once`）。`agent-ex wait --help` 只能证明 CLI ≥ 0.3.0。
+2. 清掉 `db133d8` 合并留下的 SKILL.md 重复/矛盾行与悬空章节引用。
+3. 补 README 的 `include_finished` / `limit` 参数表 + 全局单库提示；同步诊断文档、探针文档、
+   设计文档与 Trae 结论的过时表述；加强两条弱断言（空库 `Array.isArray` / 只验 limit 长度）。
+4. `npm version 0.3.1` → commit / push / tag → build + test + pack → 干净目录验证 → publish。
+
+判据同 0.3.0：以 registry 原始 packument + 线上 tgz `cmp` 为准，`npm view` 有缓存延迟。
 
 ### 2026-11-05 执行记录（三个实际踩到的坑）
 

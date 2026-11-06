@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // 用一个模拟 MCP client 驱动 mcp-wake-probe.mjs，验证探针本身能跑通。
 // 模拟 client 声明 sampling 能力并实现它，这样三条通道的「成功路径」都被覆盖。
 //

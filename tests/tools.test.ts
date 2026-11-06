@@ -173,8 +173,9 @@ describe("status", () => {
       seedFinished(store, "task_a", 100);
       seedFinished(store, "task_b", 200);
       seedFinished(store, "task_c", 300);
-      const v = status({ include_finished: true, limit: 2 }) as unknown[];
-      expect(v.length).toBe(2);
+      const v = status({ include_finished: true, limit: 2 }) as { task_id: string }[];
+      // 只断言 length 会让「返回任意 2 条」「顺序反了」都通过；必须钉住最新两条的 id 与顺序。
+      expect(v.map((t) => t.task_id)).toEqual(["task_c", "task_b"]);
     });
     it("active tasks are still included alongside finished ones", () => {
       const store = openStore(join(home, "tasks.db"));
