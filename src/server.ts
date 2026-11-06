@@ -42,87 +42,110 @@ async function main(): Promise<void> {
   const { cancel } = await import("./tools/cancel.js");
   const { doctor } = await import("./doctor.js");
 
-  server.tool(
+  server.registerTool(
     "agent_ex_submit",
-    [
-      "派发编码任务给外部 worker（detached runner），立即返回 task_id，不阻塞。",
-      "prompt 需包含完整上下文、约束与验收标准——worker 不共享当前会话上下文。",
-      "任务已提交，卡住/完成会推飞书，无需轮询。",
-      "同一 project_path 的写任务并发会互相踩文件——plan 负责串行派发或确保改动文件不重叠；只读分析任务不受此限，可并行。",
-      "对 needs_input 任务答疑续跑时传 continue_of=task_id，prompt 填答案，worker 将带着原上下文继续。",
-    ].join("\n"),
     {
-      prompt: z.string().describe("任务工单（首轮）或对 worker 问题的答复（续跑）"),
-      project_path: z.string().optional().describe("工作目录，默认 MCP server cwd"),
-      profile: z.string().optional().describe("运行 profile 名，默认取 config defaults.profile"),
-      continue_of: z.string().optional().describe("续跑目标任务 id（该任务须为 needs_input）"),
-      timeout_sec: z.number().int().positive().optional().describe("每轮超时秒数，默认取 config"),
+      description: [
+        "派发编码任务给外部 worker（detached runner），立即返回 task_id，不阻塞。",
+        "prompt 需包含完整上下文、约束与验收标准——worker 不共享当前会话上下文。",
+        "任务已提交，卡住/完成会推飞书，无需轮询。",
+        "同一 project_path 的写任务并发会互相踩文件——plan 负责串行派发或确保改动文件不重叠；只读分析任务不受此限，可并行。",
+        "对 needs_input 任务答疑续跑时传 continue_of=task_id，prompt 填答案，worker 将带着原上下文继续。",
+      ].join("\n"),
+      inputSchema: z.object({
+        prompt: z.string().describe("任务工单（首轮）或对 worker 问题的答复（续跑）"),
+        project_path: z.string().optional().describe("工作目录，默认 MCP server cwd"),
+        profile: z.string().optional().describe("运行 profile 名，默认取 config defaults.profile"),
+        continue_of: z.string().optional().describe("续跑目标任务 id（该任务须为 needs_input）"),
+        timeout_sec: z.number().int().positive().optional().describe("每轮超时秒数，默认取 config"),
+      }).strict(),
     },
     async (args) => json(await submit(args))
   );
 
-  server.tool(
+  server.registerTool(
     "agent_ex_status",
-    [
-      "查询任务状态。无参数调用返回全部活跃任务，用于一次性概览；",
-      "needs_input 任务会返回 question 字段。",
-      "include_terminal=true 时连已终态（completed/failed/cancelled）一起列，按创建时间倒序——",
-      "会话重启或上下文压缩后要认回「上次派的任务」时用它（活跃列表里查不到终态任务）。",
-    ].join("\n"),
     {
-      task_id: z.string().optional().describe("任务 id；缺省返回全部活跃任务"),
-      include_terminal: z.boolean().optional().describe("是否包含已终态任务；缺省只返回活跃任务"),
-      limit: z.number().int().positive().max(200).optional().describe("配合 include_terminal：返回最近 N 个（默认 20）"),
+      description: [
+        "查询任务状态。无参数调用返回全部进行中的任务，用于一次性概览；",
+        "needs_input 任务会返回 question 字段。",
+        "include_finished=true 时连已结束的任务（completed/failed/cancelled）一起列，按创建时间倒序——",
+        "会话重启或上下文压缩后要认回「上次派的任务」时用它（默认列表里只有进行中的任务）。",
+      ].join("\n"),
+      inputSchema: z.object({
+        task_id: z.string().optional().describe("任务 id；缺省返回全部进行中的任务"),
+        include_finished: z.boolean().optional().describe("是否包含已结束的任务；缺省只返回进行中的任务"),
+        limit: z.number().int().positive().max(200).optional().describe("配合 include_finished：返回最近 N 个（默认 20）"),
+      }).strict(),
     },
     async (args) => json(status(args))
   );
 
-  server.tool(
+  server.registerTool(
     "agent_ex_cancel",
-    [
-      "取消任务（状态感知、幂等）：running 杀整个进程组；已终态则原样返回当前状态。",
-      "若返回带warning，说明进程树快照不可用（ps 被拒），组外逃逸的 agent 子进程可能残留。",
-    ].join("\n"),
-    { task_id: z.string().describe("任务 id") },
+    {
+      description: [
+        "取消任务（状态感知、幂等）：running 杀整个进程组；已终态则原样返回当前状态。",
+        "若返回带warning，说明进程树快照不可用（ps 被拒），组外逃逸的 agent 子进程可能残留。",
+      ].join("\n"),
+      inputSchema: z.object({ task_id: z.string().describe("任务 id") }).strict(),
+    },
     async (args) => json(cancel(args))
   );
 
-  server.tool(
+  server.registerTool(
     "agent_ex_version",
-    ["返回当前 MCP server 构建元数据（version / gitSha / buildTime），用于确认重启后新代码已生效。",
-      "构建信息缺失时返回 unknown。"].join("\n"),
-    {},
+    {
+      description: [
+        "返回当前 MCP server 构建元数据（version / gitSha / buildTime），用于确认重启后新代码已生效。",
+        "构建信息缺失时返回 unknown。",
+      ].join("\n"),
+      inputSchema: z.object({}).strict(),
+    },
     async () => json(version()),
   );
 
-  server.tool(
+  server.registerTool(
     "agent_ex_doctor",
-    ["体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。",
-      "查三类问题：config 本身（关键词/dry_run/webhook/默认profile）、executor 的 bin 是否可执行、",
-      "历史通知失败（扫 runner 日志里的飞书拒收记录，按 code 聚合）。",
-      "send=true 会额外实发一张正文不含产品名的自检卡——验证通知必须用它，",
-      "因为飞书关键词闸门匹配整张卡片，拿真实任务报告当探针会假通过。"].join("\n"),
     {
-      send: z.boolean().optional().describe("是否实发自检卡（默认 false，只读体检）"),
+      description: [
+        "体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。",
+        "查三类问题：config 本身（关键词/dry_run/webhook/默认profile）、executor 的 bin 是否可执行、",
+        "历史通知失败（扫 runner 日志里的飞书拒收记录，按 code 聚合）。",
+        "send=true 会额外实发一张正文不含产品名的自检卡——验证通知必须用它，",
+        "因为飞书关键词闸门匹配整张卡片，拿真实任务报告当探针会假通过。",
+      ].join("\n"),
+      inputSchema: z.object({
+        send: z.boolean().optional().describe("是否实发自检卡（默认 false，只读体检）"),
+      }).strict(),
     },
     async (args) => json(await doctor({ send: args.send ?? false })),
   );
 
-  server.tool(
+  server.registerTool(
     "agent_ex_restart",
-    ["主动重启当前 MCP server 进程（process.exit，由 host 自动 respawn 并加载当前 dist）。",
-      "server 无状态、in-flight worker 在独立进程组，重启安全；只重启调用方这条连接，不影响其他 live server 或在跑任务。"].join("\n"),
-    {},
+    {
+      description: [
+        "主动重启当前 MCP server 进程（process.exit，由 host 自动 respawn 并加载当前 dist）。",
+        "server 无状态、in-flight worker 在独立进程组，重启安全；只重启调用方这条连接，不影响其他 live server 或在跑任务。",
+      ].join("\n"),
+      inputSchema: z.object({}).strict(),
+    },
     async () => json(restart()),
   );
 
   if (isTestMode()) {
-    server.tool(
+    server.registerTool(
       "agent_ex_set_started_at",
-      ["TEST ONLY: 改写任务 started_at（unix 秒），用于 V5 孤儿收割验收快速触发 2×timeout_sec 判定。", "需在 MCP server 启动时设置环境变量 AGENT_EX_TEST_MODE=1。"].join("\n"),
       {
-        task_id: z.string().describe("任务 id"),
-        started_at: z.number().describe("新的 started_at（unix 秒）"),
+        description: [
+          "TEST ONLY: 改写任务 started_at（unix 秒），用于 V5 孤儿收割验收快速触发 2×timeout_sec 判定。",
+          "需在 MCP server 启动时设置环境变量 AGENT_EX_TEST_MODE=1。",
+        ].join("\n"),
+        inputSchema: z.object({
+          task_id: z.string().describe("任务 id"),
+          started_at: z.number().describe("新的 started_at（unix 秒）"),
+        }).strict(),
       },
       async (args) => json(setStartedAt(args))
     );
