@@ -60,7 +60,7 @@ npm i -g agent-ex-mcp    # 或免安装：npx -y agent-ex-mcp@latest init
 agent-ex init        # 交互式配置：探测 CLI、收集密钥、生成 config + .env
 ```
 
-> 包已发布到公共 registry（`agent-ex-mcp@0.1.0`）。
+> 包已发布到公共 registry（当前 `agent-ex-mcp@0.3.0`）。
 > **包名带 `-mcp` 后缀、命令名不带**：npm 上 `agent-ex` 与已被他人占用的 `agentex` 过于相似，
 > 触发 registry 的包名相似度保护而无法发布，故加限定词规避；`bin` 仍为 `agent-ex`，
 > 所以安装后命令是 `agent-ex init`（不是 `agent-ex-mcp init`）。数据目录 `~/.agent-ex` 同理保持不变。

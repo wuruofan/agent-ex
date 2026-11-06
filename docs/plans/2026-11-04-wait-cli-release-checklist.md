@@ -4,17 +4,35 @@
 > 步骤依据 [`docs/plans/2026-10-30-wait-cli-implementation-plan.md`](2026-10-30-wait-cli-implementation-plan.md) 的 Task 5 / Task 6。
 > **本文只是一份执行清单**，具体命令的权威版本在 `AGENTS.md` 的「发布（npm）」一节。
 
-## 当前状态（2026-11-04 21:20 核对）
+## 当前状态（2026-11-05 发布完成；2026-11-06 commit B 已推送）
 
 | 项 | 状态 |
 | :--- | :--- |
-| 代码提交 | 11 个未推送提交（`f7fcbd5` … `7616134`） |
+| 代码提交 | ✅ 14 个提交已 push 到 `origin/main`（含 `dad791a chore(release): 0.3.0`），`v0.3.0` tag 已推送 |
+| `npm run typecheck` / `npm run build` | ✅ |
 | `npm test` | ✅ 26 files / 359 passed / 4 skipped |
-| `npm run typecheck` | ✅ |
-| `npm run build` | ✅ |
-| 打包干跑 | ✅ 装进干净目录后 CLI 子命令齐全、MCP 工具面 6/6、`wait` 端到端跑通 |
-| `package.json` 版本 | `0.2.0` ⇒ **发布时改成 `0.3.0`** |
-| npm 认证 | ⏳ 未验证（明天在电脑旁做） |
+| 打包干跑 | ✅ 干净目录装 `agent-ex-mcp-0.3.0.tgz`：`wait --help` exit 0、`WAIT=not_found` exit 3、MCP 工具面 6/6 |
+| npm 认证 | ✅ `npm whoami` → `demonsimon`；publish 仍需一次网页 2FA（见下方执行记录） |
+| npm publish | ✅ `agent-ex-mcp@0.3.0`，`dist.shasum` = `3b2ca1e1ba96578bf0ff7a58fe58b0a3f8cdca08`，线上 tgz 与本地 `cmp` 一致 |
+| 从 registry 装回 | ✅ `npm i agent-ex-mcp@0.3.0` → `wait --help` exit 0 + MCP 6/6 `ALL OK` |
+| commit B（skill 迁移） | ✅ publish 之后完成：删旧脚本 / 去 `vitest.config.ts` 的 exclude / `SKILL.md` 加 `agent-ex >= 0.3.0` 门槛与版本探针 / `npm test` 26 files 359 passed / 已 push（见 ⑨） |
+
+### 2026-11-05 执行记录（三个实际踩到的坑）
+
+1. **`npm login` 不等于 publish 免 2FA**。`whoami` 已通过，但写操作仍触发
+   `Authenticate your account at: https://www.npmjs.com/auth/cli/<authId>` + `Press ENTER to open in the browser...`。
+   非交互 shell 里 stdin 立即 EOF ⇒ `E404 GET /-/v1/done?authId=***`，**发布静默失败**。
+   解法：用 pty 驱动 publish（真 TTY + stdin 常开），检测到 `Press ENTER` 时自动送一个换行，
+   由人在浏览器完成 2FA；npm 轮询 `done` 拿到升级 token 后自动重试 PUT。
+   日志证据：`http fetch PUT 401` → `GET 200 /-/v1/done` → **`http fetch PUT 202`** → `verbose exit 0` / `info ok`。
+2. **`npm publish <tgz>` 也会跑 `prepublishOnly`**（`build` + `test`，本机约 4.5 分钟），
+   每次重试都要重跑，会把浏览器认证窗口挤没。⑤ 已手动跑过等价的 `typecheck && build && test`，
+   且发布的就是那份 tgz ⇒ 交互那次用 `--ignore-scripts` 跳过重复闸门，不影响产物。
+3. **发布成功 ≠ `npm view` 立刻能看到**。PUT 返回 `202` + "may take a few minutes to become available"，
+   客户端/CDN 缓存让 `npm view versions` 短暂仍报 `[0.1.0, 0.2.0]`、`npm view @latest` 报 `0.2.0`。
+   判据用 `curl -H 'Cache-Control: no-cache' https://registry.npmjs.org/agent-ex-mcp` 的原始 packument
+   （`versions` / `dist-tags.latest` / `dist.shasum`）+ 下载线上 tgz 做 `cmp`，别拿 `npm view` 当失败证据。
+   另外 pty 驱动自身可能因 master 端 EIO 竞争误报退出码 1 —— 以 npm 日志的 `info ok` 和 registry 为准。
 
 ## 关键约束（照抄 AGENTS.md，但这里把理由写出来）
 

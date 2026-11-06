@@ -246,7 +246,7 @@ interface EmitCtx {
 }
 
 const oneLine = (s: string, max = 300) => String(s).replace(/\s+/g, " ").trim().slice(0, max);
-// 默认 300 与老脚本逐字一致（wait-task.mjs:421）——ERROR/QUESTION 的截断口径，改了金标准 diff 就会红
+// 默认 300 沿用迁移前 skill 脚本（0.2.x）的口径——ERROR/QUESTION 的截断值改了金标准 diff 就会红
 
 function emit(
   row: TaskRow, wait: "terminal" | "needs_input" | "timeout",
@@ -359,7 +359,7 @@ export async function runWait(argv: string[], deps: WaitDeps = {}): Promise<Wait
         effectiveMaxWait = opts.maxWaitSec ?? deriveMaxWait(row.timeout_sec);
       }
       const ctx: EmitCtx = { opts, dbSource: reader.dbSource, effectiveMaxWait, now };
-      // 首次进 copy 模式时向 stderr 说明原因（验收表要求；文案对齐老脚本 wait-task.mjs:329）
+      // 首次进 copy 模式时向 stderr 说明原因（验收表要求；文案沿用迁移前 skill 脚本的措辞）
       if (reader.dbSource === "copy" && !copyNoteDone) {
         copyNoteDone = true;
         note(

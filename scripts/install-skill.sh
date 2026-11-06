@@ -102,3 +102,14 @@ echo "Done. Verify:"
 for t in "${TARGETS[@]}"; do
   echo "  ls -la ${t/#\~/$HOME}/$SKILL_NAME"
 done
+
+# The skill's wait step is no longer a bundled script. Make sure the CLI exists.
+echo
+if command -v agent-ex >/dev/null 2>&1; then
+  echo "Runtime check: 'agent-ex' found. Verify the version with: agent-ex wait --help"
+  echo "  (exit 0 + 'usage: agent-ex wait <task_id>' means >= 0.3.0; exit 2 means an old package)"
+else
+  echo "Runtime check: 'agent-ex' NOT on PATH — the skill's wait step needs agent-ex-mcp >= 0.3.0."
+  echo "  For this checkout:  npm link      # run from the repo root"
+  echo "  For a normal install: npm i -g agent-ex-mcp"
+fi
