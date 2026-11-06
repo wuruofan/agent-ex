@@ -4,7 +4,7 @@
 > 步骤依据 [`docs/plans/2026-10-30-wait-cli-implementation-plan.md`](2026-10-30-wait-cli-implementation-plan.md) 的 Task 5 / Task 6。
 > **本文只是一份执行清单**，具体命令的权威版本在 `AGENTS.md` 的「发布（npm）」一节。
 
-## 当前状态（2026-11-05 发布 0.3.0；2026-11-06 追加 0.3.1 发版）
+## 当前状态（2026-11-05 发布 0.3.0；2026-11-06 已发布 0.3.1）
 
 | 项 | 状态 |
 | :--- | :--- |
@@ -16,7 +16,10 @@
 | npm publish | ✅ `agent-ex-mcp@0.3.0`，`dist.shasum` = `3b2ca1e1ba96578bf0ff7a58fe58b0a3f8cdca08`，线上 tgz 与本地 `cmp` 一致 |
 | 从 registry 装回 | ✅ `npm i agent-ex-mcp@0.3.0` → `wait --help` exit 0 + MCP 6/6 `ALL OK` |
 | commit B（skill 迁移） | ✅ publish 之后完成：删旧脚本 / 去 `vitest.config.ts` 的 exclude / `SKILL.md` 加 `agent-ex >= 0.3.0` 门槛与版本探针 / `npm test` 26 files 359 passed / 已 push（见 ⑨） |
-| 0.3.1 后续发版 | ✅ 代码与文档已提交并 push 到 `origin/main`；publish 与上线核验见下方「0.3.1 执行记录」 |
+| 0.3.1 提交 / tag | ✅ `415ff31`（文档 + 测试对齐）、`9e08490 chore(release): 0.3.1` 已 push，`v0.3.1` tag 已推送，`build-meta` = `v0.3.1 9e08490` |
+| 0.3.1 构建 / 装包验证 | ✅ `typecheck` / `build` / `npm test` 26 files 368 passed 4 skipped；干净目录装 `agent-ex-mcp-0.3.1.tgz`：`wait --help` exit 0、MCP 6/6，且 status 契约探针全绿（schema 含 `include_finished`/`limit`、`additionalProperties=false`、未知参数被 `.strict()` 拒、`agent_ex_version` = 0.3.1） |
+| 0.3.1 npm publish | ✅ `PUT 401 → GET 200 /-/v1/done → PUT 202 → verbose exit 0 / info ok`；registry `latest=0.3.1`，`dist.shasum` = `708bcab20ba4baa7b932ba44e60a8146e07eca12` 与本地 tgz 一致 |
+| 0.3.1 上线核验 | ✅ 原始 packument `latest=0.3.1`、`dist.shasum` 与本地一致；线上 tgz（带 `?cb=` 绕 CDN 负缓存）`cmp` 逐字节一致；显式指定官方源装回后 `wait --help` exit 0、MCP 6/6、status 契约探针全绿 |
 
 ### 0.3.1 执行记录（2026-11-06：补发 `include_finished` 所在版本）
 
@@ -37,6 +40,44 @@
 4. `npm version 0.3.1` → commit / push / tag → build + test + pack → 干净目录验证 → publish。
 
 判据同 0.3.0：以 registry 原始 packument + 线上 tgz `cmp` 为准，`npm view` 有缓存延迟。
+
+**实际执行（2026-11-06 14:45）**：`415ff31` → `9e08490` → `v0.3.1`；`build` 产出
+`build-meta v0.3.1 9e08490`；`npm test` 26 files / 368 passed / 4 skipped。
+干净目录验证除原有 CLI/MCP 检查外，加了一次性 status 契约探针：直接发 `tools/list` 查
+`agent_ex_status` 的 schema 是否含 `include_finished`/`limit` 与 `additionalProperties=false`，
+再用 `tools/call` 验「合法参数被接受」与「未知参数 `include_terminal` 被拒（MCP -32602）」，
+最后用 `agent_ex_version` 确认 0.3.1 —— **这次改的正是「旧包静默剥离参数」，只看代码不够，
+必须验装出来的包**。publish 判据仍是 npm 日志的 `PUT 202` + `verbose exit 0`。
+
+**本轮三个新坑**：
+
+1. **无效 token ⇒ publish 直接 `PUT 404`，不会触发网页 2FA**。`npm whoami` E401 是判据；
+   只有「token 有效但写操作需 2FA」才是 `PUT 401 → web auth`。第一次 publish 就是这样静默失败的
+   （日志里只有一条 `PUT 404`），别急着点链接，先修登录。
+2. **`npm login` 在本环境写不回 `~/.npmrc`**：浏览器授权其实成功（`GET 200 /-/v1/done` +
+   `web auth done-check finished`），随后写文件被 WorkBuddy 文件代理拦截
+   （`CODEBUDDY_BROKER_DENY` / `file-write* /Users/wuruofan/.npmrc`），token 只存在于已退出的
+   进程内存里 ⇒ 登录白做。绕行：`NPM_CONFIG_USERCONFIG=/tmp/agent-ex-publish-npmrc`
+   （实测 `npm config set` 可写 /tmp），login 与 publish 都带这个 env，全程不碰 `~/.npmrc`。
+   代价：用户全局 `~/.npmrc` 仍是失效的 `npm_Fi…` token，之后要自己在终端 `npm login` 修一次。
+   另：**pty 进程被中断杀掉 ⇒ CLI 会话作废**，用户点链接报 "Invalid or Expired Token"；
+   给出链接后不要中断对话，等后台任务通知。pty 报的 exit 1 也是 EIO 误报（本轮 login / publish 都是）。
+3. **`PUT 202` 后 registry 异步生效**：客户端提示 "Your package is being processed and may take
+   a few minutes"。packument 数分钟后才出现 0.3.1，tarball CDN 更晚（期间直连 404、下载到
+   21 字节错误体）；`npm view` 另有缓存 ⇒ 用
+   `curl -H 'Cache-Control: no-cache' '<packument>?cb=<时间戳>'` 判定。
+   **更隐蔽的是 CDN 负缓存**：发布前查过一次 tarball URL，之后再带 `Cache-Control: no-cache`
+   甚至 `npm pack --prefer-online` 都仍返回缓存的 404；给 **tarball URL 本身**加 `?cb=<时间戳>`
+   立刻返回 200，sha1 与本地 tgz 逐字节一致。⇒ 装回冒烟可直接
+   `npm install "<tarball-url>?cb=$(date +%s)"`，别被不带参数的 404 误导成「没发上去」。
+4. **默认 registry 是只读镜像 `registry.npmmirror.com`**：`npm install "<registry.npmjs.org 的 tarball URL>"`
+   会被 npm 重写成 `cdn.npmmirror.com/packages/...`，镜像还没同步新版本 ⇒ 404。
+   装回必须显式 `--registry https://registry.npmjs.org`，或直接用已校验过的线上 tgz 文件。
+
+**发布后必须做的动作（别漏）**：宿主里**正在运行的** MCP server 仍是发布前加载的旧构建，
+不会因为 `npm run build` / 新包上线而自动更新。需在宿主面板 disable/enable（或重启）
+`agent-ex` MCP server，再用 `agent_ex_version` 确认返回 `0.3.1`；否则 `SKILL.md` 的
+「[回来先查]」兜底仍会撞上 0.3.0 的静默剥离，看起来就像发布没生效。
 
 ### 2026-11-05 执行记录（三个实际踩到的坑）
 
