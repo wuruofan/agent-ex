@@ -9,7 +9,8 @@ agent_created: true
 > 📦 **安装方式**：使用者用 `npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y`
 > （装出实体副本，落 `~/.agents/skills`）；本仓库开发者用 `./scripts/install-skill.sh`（软链到本仓库，改完即时生效）。
 > **WorkBuddy 只扫 `~/.workbuddy/skills`、不读 `~/.agents/skills`**，`npx` 装完还得再补一条软链——命令见 README 的「路线 A」。
-> 下方脚本路径用 `$SKILL_DIR` 定位，两种装法都适用。
+> ⚙️ **运行依赖**：等待环节调用 `agent-ex wait`，要求 `agent-ex-mcp >= 0.3.0`（`agent-ex` 需在 PATH 上）。
+> 使用者 `npm i -g agent-ex-mcp`；本仓库开发者在仓库根 `npm link`。版本探针见「前置检查」。
 
 ## Overview
 
@@ -41,12 +42,13 @@ agent_created: true
 1. **prompt 必须自包含**：worker 看不到本会话内容。prompt 里必须写全：任务目标、项目路径、相关文件路径与现状事实、技术栈/约束、验收标准、Git 纪律、交付物格式。缺上下文 = worker 瞎猜 = 返工。
 2. **同一 `project_path` 的写任务禁止并发**：裁量对象是**写**，不是目录——多个任务写同一目录会互相踩文件；**只读任务（模板 C，且不执行会写盘的命令）任意数量可并行**。派发前先查活跃任务，按 Step 1 的读写矩阵判定：写 × 写必须串行（等它终态）/ 换目录 / 向用户确认。
 3. **worker 不做会话外动作**：默认在 prompt 中指示 worker **不要 git commit / push / 发通知**，只改文件并汇报变更摘要——除非用户在任务里显式授权。worker 以 `--dangerously-skip-permissions` 运行，没有二次确认。
-4. **不轮询**：任务提交后返回 `task_id` 即结束本轮；终态会推飞书。只在用户主动问进度、或收到飞书/需要续跑时再查 `agent_ex_status`。**唯一豁免**：为「会话内定时等待」起的后台 wait-task 进程，每个新 turn 最多查一次（见该节「[回来先查]」）——那是**接续**，不是盯进度。
+4. **不轮询**：任务提交后返回 `task_id` 即结束本轮；终态会推飞书。只在用户主动问进度、或收到飞书/需要续跑时再查 `agent_ex_status`。**唯一豁免**：为「Phase 2」起的后台 `agent-ex wait` 进程，每个新 turn 最多查一次（见该节「[回来先查]」）——那是**接续**，不是盯进度。
 
 ## 前置检查（Preflight）
 
 调用工具前确认：
 
+- **CLI 版本门槛 `agent-ex >= 0.3.0`**：Phase 2 的等待改用 `agent-ex wait`，旧包（0.2.0 及更早）没有这个子命令。探针 `agent-ex wait --help`：新版 **exit 0** 且打印 `usage: agent-ex wait <task_id> …`；旧版 **exit 2**，把 `wait` 当未知子命令并打印 `no command: start the MCP server on stdio`——此时**不要继续调用**，旧版会静默起一个等 stdin 的 MCP server（挂住不返回）。没装全局包时：正式路线 `npm i -g agent-ex-mcp`，源码路线在仓库根 `npm link`；宿主 shell 里找不到命令时可退回 `npx -y agent-ex-mcp@latest wait <task_id>`（每次走 npx，更慢且要联网）。实际等待时**以 stdout 的 `WAIT=` 行为判据**，不要只看退出码（`WAIT=timeout` 也是 exit 2，与旧版撞码）。
 - MCP server 可用：工具名 `agent_ex_submit` / `agent_ex_status` / `agent_ex_cancel`（WorkBuddy 中可能带前缀如 `mcp__agent-ex__*`）。若工具不可用，先检查 `~/.workbuddy/mcp.json` 注册与 `agent-ex/dist/server.js` 是否已 build，**不要**尝试用其他方式派发。
 - 需要 worker 干活的机器上 `project_path` 存在且可写；executor 的 agent CLI 已配置（`$AGENT_EX_HOME/config.json`，默认 `$HOME/.agent-ex/config.json`）。运行时密钥在 `$HOME/.agent-ex/.env`，**不要**在 prompt/参数里写任何密钥。
 - 飞书通知 `dry_run` 状态：`config.json` 中 `notify.dry_run=false` 时终态会**真发飞书**；首次验证链路可先确认该配置。
@@ -168,7 +170,7 @@ agent_created: true
 
 ### Step 4 — 提交后
 
-派发后立即把 `task_id` 与任务摘要报给用户，结束本轮。**不轮询、不主动 status**——终态会推飞书唤醒。（唯一豁免：若为该任务起了后台 wait-task 进程，本 turn 结束前把它登记进「待消费清单」，好让下一个 turn 的「[回来先查]」兜底接上；见「会话内定时等待」一节。）
+派发后立即把 `task_id` 与任务摘要报给用户，结束本轮。**不轮询、不主动 status**——终态会推飞书唤醒。（唯一豁免：若为该任务起了后台 `agent-ex wait` 进程，本 turn 结束前把它登记进「待消费清单」，好让下一个 turn 的「[回来先查]」兜底接上；见「会话内定时等待」一节。）
 
 **收到飞书终态卡后的核验流程（防假阳性约定）**：worker 报告**默认不完全采信**。按 `references/confidence-check.md` 走 5 问核对（worker 自报的数字/路径/行号每条能否定位到证据；不能定位即标低置信度）+ 置信度三档（高/中/低）分级。低/中 → 取**完整**报告复核（⚠️ `agent_ex_status` 返回的 `result` **会被截断**，长报告拿不到；全文在 `~/.agent-ex/logs/task_<task_id>.jsonl`，见排错表）；不能闭环 → `agent_ex_submit({ continue_of, prompt: <反问> })` 走 needs_input 反问或 `agent_ex_cancel` 重派。**不要把"看起来完成"的报告直接转给用户**。
 
@@ -223,7 +225,7 @@ agent_created: true
 
 - **入口**：用户给了一个需要方案/设计的任务即进入，**无需批准**（只读派发不产生副作用）；这与 Phase 2 不同——那边的人工闸门是整份 plan 的批准。注意**讨论阶段只在出现分叉点时派**：没有要查证的问题就纯讨论，别为派而派（对齐「别派」）。
 - **一步** = 识别一个分叉点 → 派只读勘察（模板 C，可多路，**派完不等**）→ 结论过 5 问 → 过则写进 plan 的"已确证事实"并标注来源；不过则换切法 / 换模板重派 → 回到与用户的讨论。
-- **等待策略：非阻塞优先**。派发后主 agent 继续与用户讨论；只有当"下一步判断必须用到这份结论"时才起后台 `wait-task`（用法同下节），多路在途时逐个唤醒、逐个过 5 问。**不要套用执行期「派 → 等 → 复核 → 派下一个」的串行节奏**——Phase 1 的空等没有收益，讨论节奏本身就是等待。
+- **等待策略：非阻塞优先**。派发后主 agent 继续与用户讨论；只有当"下一步判断必须用到这份结论"时才起后台 `agent-ex wait`（用法同下节），多路在途时逐个唤醒、逐个过 5 问。**不要套用执行期「派 → 等 → 复核 → 派下一个」的串行节奏**——Phase 1 的空等没有收益，讨论节奏本身就是等待。
 - **放行判据是 5 问，不是置信度三档**：闸门强度按**不可逆性**定——Phase 1 的结论错了，代价是改 plan 一句话；Phase 2 错了是不可逆的代码 + commit。
 - **反空转（停止判据，否则 loop 会变成"为派而派"）**：
   - 自己几条命令 / 十分钟内能查清的，**不派**——派发的固定成本是写自包含工单 + 复核；
@@ -237,7 +239,7 @@ agent_created: true
 3. plan 按粒度规则（见 Step 2「工单粒度与预算」）拆成任务序列，逐条验收可证伪（自检第 7 项）；
 4. 显式请求用户批准整个序列（含每任务验收标准与 commit 授权）。**批准动作 = Phase 1 的终点 = 下节 loop 的入口。**
 
-## Phase 2：执行期自主推进 loop（可选；含会话内定时等待）
+## Phase 2：执行期自主推进 loop（可选；含后台 `agent-ex wait`）
 
 **用途**：把「等终态 → 复核 → 派下一个」这条链路里的**空等**自动化，但**不拆掉复核闸门**。飞书通知的是人，而复核需要人和主 agent 同时在场——这一节补的就是最后一公里。9/23 用户确认形态 A（有人值守的连续推进）；**9/28 升级为自主推进 loop**（升级制闸门，协议见本节末尾）：入口由用户批准整个 plan，之后自主"派发→复核→放行/升级"迭代直到 plan 跑完。
 
@@ -245,41 +247,31 @@ agent_created: true
 
 > **本节的续跑不依赖宿主唤醒能力**：唤醒是**预期行为，不是保证**——有些宿主不会在后台进程完成后主动开新 turn
 > （例证与探针见 `docs/diagnostics/2026-10-20-trae-no-wake-channel.md`）。下面「[回来先查]」给出一条
-> 宿主无关的兜底：**每个新 turn 先查一次未消费的 wait-task 进程**，查到什么就接什么。
+> 宿主无关的兜底：**每个新 turn 先查一次未消费的 wait 进程**，查到什么就接什么。
 > 唤醒正常时它是空操作；唤醒缺失时它自愈。
 
 **为什么必须是后台进程、而不是会话内轮询**（设计红线，不是风格偏好）：会话内每轮询一次就是一次完整 API 往返，而**一次往返要把整段会话上下文重新发一遍**。所以轮询成本 ≈ **(任务时长 ÷ 轮询间隔) × 整个会话**，与「状态行有多长」毫无关系 —— 中位 22min 的任务按 60s 轮询 ≈ **22 次全量重放**，p75（39min）≈ 39 次。它同时还占住会话，等待期间用户没法跟主 agent 说话。⇒ 会话内轮询**两头都输**：既贵，又丢掉了「唤醒后带着上下文继续」这个最该保住的东西。
 
-要用 `scripts/wait-task.mjs` 起**后台进程**：等待发生在独立进程里，模型完全不参与 ⇒ **等待期间成本精确为零**，唤醒时**只发生一次**上下文重放，且这次重放落在**原会话**里（前序任务的事实、当前 plan 的约束、用户期间说过的话都还在）。
+要用 `agent-ex wait` 起**后台进程**：等待发生在独立进程里，模型完全不参与 ⇒ **等待期间成本精确为零**，唤醒时**只发生一次**上下文重放，且这次重放落在**原会话**里（前序任务的事实、当前 plan 的约束、用户期间说过的话都还在）。
 
-> 📁 **脚本路径**：本 skill 目录下的 `scripts/wait-task.mjs`。不同机器安装位置不同（源码路线通常在
-> `<repo>/skills/agent-ex-dispatch/`，也可用 `./scripts/install-skill.sh` 软链到用户级 skills 目录），
-> **不要硬编码任何绝对路径**——先定位再调用：
->
-> ```bash
-> SKILL_MD="$(find -L ~/.agents/skills ~/.workbuddy/skills ~/.claude/skills \
->   -maxdepth 2 -name SKILL.md -path '*agent-ex-dispatch*' 2>/dev/null | head -1)"
-> SKILL_DIR="$(dirname "$SKILL_MD")"
-> ```
->
-> ⚠️ **`find` 必须带 `-L`**（跟随符号链接）。本 skill 常用**软链**安装（`install-skill.sh` 的做法），
-> 而 `find` 默认**不跟随软链** ⇒ 不加 `-L` 会返回空、`SKILL_DIR` 变成 `.`，后续调用报 `No such file or directory`。
->
-> 拿到 `SKILL_DIR` 后按下述方式启动（脚本只用 node 内置模块，`--home` 默认读 `$AGENT_EX_HOME`，无外部依赖）。
+> 🔧 **命令来源**：`agent-ex wait` 由 npm 包 `agent-ex-mcp >= 0.3.0` 提供，**不随本 skill 分发**（skill 只装文档，
+> 不再自带等待脚本，也不需要 `$SKILL_DIR` 定位）。`agent-ex` 必须在宿主 shell 的 PATH 上；版本探针与安装方式见「前置检查」。
+> 命令只用 node 内置模块 + 只读打开任务库，`--home` 默认读 `$AGENT_EX_HOME`（缺省 `~/.agent-ex`），无外部依赖。
 
 ```bash
-node --disable-warning=ExperimentalWarning \
-  "$SKILL_DIR/scripts/wait-task.mjs" \
-  <task_id> --report-out /tmp/<task_id>.report.md
+agent-ex wait <task_id> --report-out /tmp/<task_id>.report.md
 ```
 
-⚠️ `--disable-warning` 是 **node 自己的 flag，必须放在脚本路径之前**。放到脚本后面会被参数解析器当成未知选项、以 exit 4 退出（9/23 实测踩到）。
+> 全部选项见 `agent-ex wait --help`：`--interval-sec` / `--max-wait-sec` / `--once` / `--copy-dir` /
+> `--no-digest` / `--verbose` / `--home`。参数都是 `--key value` 形式，没有 node flag，也不再需要 `--disable-warning`。
 
 > 🛡️ **只读沙箱里也能用（10/16 起）**：宿主 shell 沙箱若禁止写 `~/.agent-ex`（Trae 的默认策略就是：
 > `filesystem.default="read_only"`、`readWrite` 为空、`commandRules` 白名单里没有 `node`），直接读库会失败
-> —— 脚本会自动改为读「可写目录里的副本」并输出 `DB_SOURCE=copy`；若连副本目录也不可写，用
+> —— CLI 会自动把 `tasks.db(+wal/+journal)` 整组复制到可写目录再读，输出 `DB_SOURCE=copy`；若连副本目录也不可写，用
 > `--copy-dir <你工作区里的目录>`。**`WAIT=db_unreadable`（exit 6）是环境问题，不是「任务不存在」**
-> （后者是 `WAIT=not_found` / exit 3），两者别混。见 `docs/diagnostics/2026-10-16-readonly-sandbox.md`。
+> （后者是 `WAIT=not_found` / exit 3），两者别混。0.3.0 起任务库默认改用 `journal_mode=TRUNCATE`，
+> 静止态不再需要 `-wal`/`-shm`，只读沙箱可直接读；库头仍是 WAL 时才走上面的副本降级。
+> 背景见 `docs/diagnostics/2026-10-16-readonly-sandbox.md`。
 
 以 `run_in_background` 方式启动，**不要**前台跑。
 
@@ -287,10 +279,10 @@ node --disable-warning=ExperimentalWarning \
 > 有些宿主**不会**在后台进程完成后主动开新 turn（例证与探针见
 > `docs/diagnostics/2026-10-20-trae-no-wake-channel.md`）。所以本 skill 的续跑**不依赖唤醒**：
 > **每个新 turn 开始时**（用户说了任何话、或我被别的事件拉起），先看本会话里有没有**还没消费**的
-> wait-task 进程，**有就先查它再往下走**。
+> wait 进程，**有就先查它再往下走**。
 >
 > **怎么查（只用跨宿主都成立的手段）**：重跑
-> `node --disable-warning=ExperimentalWarning "$SKILL_DIR/scripts/wait-task.mjs" <task_id> --once`
+> `agent-ex wait <task_id> --once`
 > —— 幂等、**不改任务状态、不重派任务**（只 `SELECT` 任务库；副作用仅限落一份 `REPORT_PATH`、
 > 以及只读沙箱下把 `tasks.db` 复制到可写目录，见上一段的 `DB_SOURCE=copy`）。
 > 宿主若另提供「查后台任务状态」的工具（各宿主工具名不同），可作为等价手段用它；**不要依赖某一个
@@ -301,9 +293,9 @@ node --disable-warning=ExperimentalWarning \
 > - `WAIT=needs_input`（exit 5）→ **最该被立刻发现的一支**：任务没结束，worker 在等答复。
 >   读 `QUESTION`（完整问题在 `agent_ex_status` 的 `question`），能自己答就
 >   `agent_ex_submit({ continue_of: <task_id>, prompt: <答案> })`，需要用户拍板就停下问用户。
->   答复后**对同一 task_id 重新起一次 wait-task**（任务已回到 `running`）。
+>   答复后**对同一 task_id 重新起一次 `agent-ex wait`**（任务已回到 `running`）。
 > - `WAIT=timeout`（exit 2）→ 任务**还在 `running`**，不是终态。多半是 runner 过了自己允许的最坏情况
->   仍未 finalize（多半已死）。此时**由我决定**继续等（重起 wait-task）／`cancel`／重派，不自动续等。
+>   仍未 finalize（多半已死）。此时**由我决定**继续等（重起 `agent-ex wait`）／`cancel`／重派，不自动续等。
 > - `WAIT=not_found`（exit 3）→ 本会话记错了 task_id，或库被换过（见下一条）。
 > - `WAIT=db_unreadable`（exit 6）→ **环境问题，不是任务问题**：只读沙箱里加 `--copy-dir <可写目录>`，
 >   或让该命令在沙箱外跑（见上一段）。
@@ -321,23 +313,24 @@ node --disable-warning=ExperimentalWarning \
 >
 > **与「不轮询」的关系**：铁律 4 / Step 4 的「不轮询」指的是**不要为了盯进度反复查**（那是每轮
 > 全量重放会话上下文，昂贵且占住会话）。本兜底**不违反**它——它**每个 turn 最多查一次**，
-> 只针对**已知待消费的 wait-task 进程**，查完就消费掉，不重复。
+> 只针对**已知待消费的 wait 进程**，查完就消费掉，不重复。
 >
 > 这样「唤醒成功」时这一步是空操作，「没被唤醒」时也能自愈，**完全不依赖宿主是否具备唤醒能力**
 > —— 宿主将来补上，这个兜底自然什么都不做。
 
 **为什么这样可行（已实测）**：
 
-- **能等多久：三层，只有中间那层是脚本的事**（9/23 查清）：
+- **能等多久：三层，只有中间那层是 `wait` 的事**（9/23 查清）：
   - **工具层 —— 后台进程不会被 Bash 调用的 timeout 杀掉**。两个探针（9/23 实测）：带显式 600s timeout 的仍活到 700s（vXyTDb，`sleep 700` 跑满并落盘）；**不带 timeout**（走 120s 默认）的 mvr3kW 由 `for i in $(seq 1 180); do …; sleep 30; done` 每 30s 打点，**180 点全部落齐、跑满 90 分钟（5403s）后自然结束** —— 是 120s 默认的 **45 倍**、600s 上限的 **9 倍**。⇒ 后台任务的寿命由它自己决定，工具层不介入（前台调用才会受 timeout 约束，超时会自动转后台而不是被杀）。
-  - **脚本层 —— `--max-wait-sec`，默认由任务自己的 `timeout_sec` 推导**：`3 × timeout_sec + 90 + 120`。依据是 runner 的真实上界：每次尝试**各自计时**（`runner.ts:133` 的 `setTimeout(..., timeout_sec*1000)` 包在 `runAgent` 内），瞬时错误最多重试 3 次、退避 30s/60s（`runner.ts:24-26`），而**真超时本身不重试** ⇒ 任务不可能活过 `3 × timeout_sec + 90s`。等到比这再往后 2 分钟，超时才变成**有信息量的信号**（"runner 活过了它自己允许的最坏情况，多半是没 finalize 就死了"），而不是噪音。`--max-wait-sec 0` = **永不放弃**。真实例：`timeout_sec=5400` 的任务 → 预算 `16410s`（已在真实任务上验证输出 `MAX_WAIT_SEC=16410`）。
+  - **wait 层 —— `--max-wait-sec`，默认由任务自己的 `timeout_sec` 推导**：`3 × timeout_sec + 90 + 120`。依据是 runner 的真实上界：每次尝试**各自计时**（`runner.ts:133` 的 `setTimeout(..., timeout_sec*1000)` 包在 `runAgent` 内），瞬时错误最多重试 3 次、退避 30s/60s（`runner.ts:24-26`），而**真超时本身不重试** ⇒ 任务不可能活过 `3 × timeout_sec + 90s`。等到比这再往后 2 分钟，超时才变成**有信息量的信号**（"runner 活过了它自己允许的最坏情况，多半是没 finalize 就死了"），而不是噪音。`--max-wait-sec 0` = **永不放弃**。真实例：`timeout_sec=5400` 的任务 → 预算 `16410s`（已在真实任务上验证输出 `MAX_WAIT_SEC=16410`）。
   - **任务层 —— 每个任务都会自己结束**：runner 一定 finalize 到 `completed` / `failed` / `needs_input`，`queued` 也会被立刻 spawn 的 runner 认领。唯一能永久停在 `running` 的情形就是 **runner 未 finalize 而死** —— 那正是上面这个推导预算要抓的东西。
-- **超时后不会自动再等**（这是刻意的）：脚本 exit 2 就结束，**重起等待 / `cancel` / 重派由主 agent 决定** —— 只有主 agent 知道该等还是该放弃。而按上面的推导预算，超时本身已经是「可能卡死」的信号，不该无条件续等。要"等到天荒地老"就显式传 `--max-wait-sec 0`。
+- **超时后不会自动再等**（这是刻意的）：`wait` exit 2 就结束，**重起等待 / `cancel` / 重派由主 agent 决定** —— 只有主 agent 知道该等还是该放弃。而按上面的推导预算，超时本身已经是「可能卡死」的信号，不该无条件续等。要"等到天荒地老"就显式传 `--max-wait-sec 0`。
+- 等待期间**不占会话、不消耗 token**；进程在**「终态 或 需要我」**时退出 → **自动唤醒我**（后台任务完成会通知）。
 - 等待期间**不占会话、不消耗 token**；进程在**「终态 或 需要我」**时退出 → **唤醒我**（后台任务完成会通知；**宿主可能不具备唤醒能力**，那种情况下由上面「[回来先查]」兜底接上 —— 唤醒是预期行为，不是保证）。
-- **终态到手的两种状态**（9/23 修）：`WAIT=terminal`（exit 0）与 `WAIT=needs_input`（**exit 5**）。后者**不是终态**（答复后任务回到 `running`），但 worker 已经停下等答复，**只有我能让它继续**。早期版本把它当「继续等」：判别性实测中，一个已经在问问题的任务把 30s 时钟等满才退出，默认情形下就是**白等 2 小时再报一个无用的 `timeout`**，恰好把最该被唤醒的那一刻吞掉。
 - 终态直接给出复核所需的全部字段：`STATUS` / `ELAPSED_SEC` / `FILES_CHANGED` / `LOG_PATH` / `REPORT_PATH` / `REPORT_CHARS`，外加一个**自带的报告摘要**（见下一小节）。
 - **报告提取已内置，覆盖两种 executor 的日志形状**：claude 的 `type=="assistant"` + `message.role=="assistant"` + `message.content[]`，以及 opencode 的扁平 `{"type":"text","text":…}`（`executors/opencode.ts:45-47`）。claude 侧两道过滤缺一不可——compaction 摘要挂在 `role:"user"` 上、可能是报告的几十倍长（`task_mu9jj2zd_9b3341`：摘要 12 936 字符 vs 终报 3 322 字符）。**9/23 修**：此前只认 claude 形状，opencode 任务会**静默返回空串**（同一份报告文本实测：claude 440 字符 / opencode 0），已补齐并加守卫。
-- 退出码：`0` 终态 / `5` **需要我（needs_input，附 `QUESTION`）** / `2` 超时（含 `--once` 查到但未终态）/ `3` 无此任务 / `6` **库不可读（环境问题，非任务问题）** / `4` 用法错。只想查一次状态时加 `--once`。**判据以 `STATUS`/`WAIT` 字段为准，退出码不是**——沙箱拒绝会让宿主把退出码报成 1。
+- 退出码：`0` 终态 / `5` **需要我（needs_input，附 `QUESTION`）** / `2` 超时（含 `--once` 查到但未终态）/ `3` 无此任务 / `6` 任务库不可读（环境/沙箱，已与 `3` 分开）/ `4` 用法错 / `1` 内部错误 / `130`、`143`（SIGINT / SIGTERM，退出时会清理副本目录）。只想查一次状态时加 `--once`。**判据看 stdout 的 `WAIT=` 行，别只看退出码**：`WAIT=timeout` 也是 exit 2，而旧包的「未知子命令」同样 exit 2。
+- **终态到手的两种状态**（9/23 修）：`WAIT=terminal`（exit 0）与 `WAIT=needs_input`（**exit 5**）。后者**不是终态**（答复后任务回到 `running`），但 worker 已经停下等答复，**只有我能让它继续**。早期版本把它当「继续等」：判别性实测中，一个已经在问问题的任务把 30s 时钟等满才退出，默认情形下就是**白等 2 小时再报一个无用的 `timeout`**，恰好把最该被唤醒的那一刻吞掉。
 
 **终态下实际能拿到什么（9/23 逐类真实任务验证）**：
 
@@ -352,9 +345,9 @@ node --disable-warning=ExperimentalWarning \
 
 **省 token 的读法（9/23 实测）**：
 
-- **等待期间零 token** —— 脚本是独立进程，模型不参与；完成通知也**只带 stdout 的文件路径、不带内容**（实测探针 YvERVF：300 行 / 21k 字符的输出，通知仍只有约 200 字符）。⇒ **唤醒之后读什么**才是唯一的成本项。
+- **等待期间零 token** —— `wait` 是独立进程，模型不参与；完成通知也**只带 stdout 的文件路径、不带内容**（实测探针 YvERVF：300 行 / 21k 字符的输出，通知仍只有约 200 字符）。⇒ **唤醒之后读什么**才是唯一的成本项。
 - `WAIT=needs_input` 时**不给 digest**（QUESTION 就是要的信息），但仍会落 `REPORT_PATH`，需要看「已经做到哪了」时再读。
-- **默认只读脚本 stdout，别急着读 `REPORT_PATH`**。脚本自带摘要，按报告长度自动选形态：
+- **默认只读 `wait` 的 stdout，别急着读 `REPORT_PATH`**。`wait` 自带摘要，按报告长度自动选形态：
   - `REPORT_OUTLINE` —— 章节结构（几十 token）。一眼看出报告有没有缺掉承诺的小节。
   - `REPORT_TEXT` —— 报告 **≤1200 字符**时**直接内联全文**，此时**完全不需要读文件**（内联与读文件的 token 等价，但省一次工具调用）。
   - `REPORT_HEAD` —— 报告 **>1200 字符**时给前 700 字符（通常已含变更清单与验收数字）。
@@ -366,7 +359,7 @@ node --disable-warning=ExperimentalWarning \
 **终态到手后必须走的流程（这就是闸门，不许省）**：
 
 1. **先看 `WAIT=`**：
-   - `WAIT=needs_input`（exit 5）→ 任务**没结束**，worker 在等答复。读 `QUESTION`（完整问题在 `agent_ex_status` 的 `question`）→ **用本会话上下文去回答**：能自己答就直接 `agent_ex_submit({ continue_of: <task_id>, prompt: <答案> })`；需要用户拍板（选项取舍之类）则停下问用户 → 答复后**对同一 task_id 重新起一次 wait-task**（任务已回到 `running`）。
+   - `WAIT=needs_input`（exit 5）→ 任务**没结束**，worker 在等答复。读 `QUESTION`（完整问题在 `agent_ex_status` 的 `question`）→ **用本会话上下文去回答**：能自己答就直接 `agent_ex_submit({ continue_of: <task_id>, prompt: <答案> })`；需要用户拍板（选项取舍之类）则停下问用户 → 答复后**对同一 task_id 重新起一次 `agent-ex wait`**（任务已回到 `running`）。
    - `WAIT=terminal`（exit 0）→ 走下面 2–4 步。
 2. 读 `REPORT_PATH` 拿**完整**报告（不经过 `agent_ex_status`，所以没有截断问题），按 `references/confidence-check.md` 走 5 问 + 置信度三档分级；
 3. **高置信度** → 报变更摘要 + commit（若整个任务序列已作为一个 plan 预先批准，则直接 commit、**不 push**）→ 起下一个任务，回到 Step 1 并发检查；
@@ -375,7 +368,9 @@ node --disable-warning=ExperimentalWarning \
 #### 自主推进 loop 协议（9/28 定稿：升级制闸门）
 
 - **入口（唯一的人工闸门）**：用户把**整个任务序列**作为一个 plan 批准（含每个任务的验收标准与 commit 授权）——即上节制定期结束时的批准动作。没有这个批准就没有 loop——退化为单任务派发。
-- **Loop 一步** = Step 1 并发检查 → Step 3 submit → 后台 wait-task → 终态到手走上面 1–4 步 → 回到 Step 1，直到 plan 跑完。
+- **Loop 一步** = Step 1 并发检查 → Step 3 submit → 后台 `agent-ex wait` → 终态到手走上面 1–4 步 → 回到 Step 1，直到 plan 跑完。
+  **唤醒没来也不阻塞**：上面「[回来先查]」兜底保证每个 turn 都能接上没被唤醒的那一支
+  —— loop 的**进度由任务状态驱动，不由唤醒驱动**，所以宿主唤醒能力变化不影响协议本身。
   **唤醒没来也不阻塞**：上面「[回来先查]」兜底保证每个 turn 都能接上没被唤醒的那一支
   —— loop 的**进度由任务状态驱动，不由唤醒驱动**，所以宿主唤醒能力变化不影响协议本身。
 - **放行规则（升级制）**：高置信 → commit（不 push）+ 派下一个；中/低置信、plan 偏离、或 needs_input 中只有用户能答的（选项取舍/方向）→ 停下问；连续 2 次中置信 → 停（见上）。needs_input 中能自己答的，用 `continue_of` 续跑不中断 loop。
@@ -393,27 +388,26 @@ queued → running → needs_input →(continue_of)→ running →(≤5 轮)→ 
 cancelled ← 任意非终态可取消
 ```
 
-> 「超时」是两个**不同**的东西，看到时先分清：**runner 层超时**落成 `failed` + `ERROR=timeout after <N>s` —— 任务**真的结束了**，报告多半是空的；**脚本层超时**是 `WAIT=timeout`（exit 2）—— 任务**还在 `running`**，意味着 runner 过了它自己允许的最坏情况仍未 finalize，多半已经死了。
+> 「超时」是两个**不同**的东西，看到时先分清：**runner 层超时**落成 `failed` + `ERROR=timeout after <N>s` —— 任务**真的结束了**，报告多半是空的；**wait 层超时**是 `WAIT=timeout`（exit 2）—— 任务**还在 `running`**，意味着 runner 过了它自己允许的最坏情况仍未 finalize，多半已经死了。
 
 ## 排错
 
 | 现象 | 处理 |
 |---|---|
 | 工具不存在 / MCP 未连 | 检查 `~/.workbuddy/mcp.json` 与 `dist/server.js` 是否 build；重启后重试 |
-| **刚 submit 完，wait-task 就报 `WAIT=not_found` / `agent_ex_status` 报 `not found`**（`task_muxhq896_247f77` 这种 14+ 字符 id） | **先怀疑自己打错了 id，不要怀疑任务没提交**。submit 的返回是权威，但它是一串长得像随机的字符，**手抄进 `wait-task.mjs` / `agent_ex_status` 极易漏一个字符**（10/07 实测：把 `…hq896…` 抄成 `…h896…`，两个入口都报 `not found`，白白以为派发失败）。处置：**从 submit 的返回里复制粘贴**，别凭记忆敲；已报 not found 时用**不带参数的** `agent_ex_status`（列全部活跃任务）取回真实 id，再用它重起 wait-task。 |
+| **刚 submit 完，`agent-ex wait` 就报 `WAIT=not_found` / `agent_ex_status` 报 `not found`**（`task_muxhq896_247f77` 这种 14+ 字符 id） | **先怀疑自己打错了 id，不要怀疑任务没提交**。submit 的返回是权威，但它是一串长得像随机的字符，**手抄进 `agent-ex wait` / `agent_ex_status` 极易漏一个字符**（10/07 实测：把 `…hq896…` 抄成 `…h896…`，两个入口都报 `not found`，白白以为派发失败）。处置：**从 submit 的返回里复制粘贴**，别凭记忆敲；已报 not found 时用**不带参数的** `agent_ex_status`（列全部活跃任务）取回真实 id，再用它重起 `agent-ex wait`。 |
 | `agent_ex_submit` 返回带 `warning` 字段 | 同 `project_path` 已有活跃任务（铁律 2 的被检查版，**不区分读写**）——按 Step 1 矩阵判读：只读可继续，任一侧要写就停下等前序终态或向用户确认。 |
-| **`wait-task` 报 `WAIT=db_unreadable`（exit 6）**，或报 `WAIT=not_found` 但 `agent_ex_status` 说任务在 | **这是环境问题，不是任务问题**（10/16 实测定案）。最常见成因：宿主 shell 沙箱禁止写数据目录，SQLite 做 WAL recovery 需写 `-wal`/`-shm` 时被拒。脚本已内置降级（复制 `tasks.db(+wal)` 到可写目录再读，输出 `DB_SOURCE=copy`）；降级也失败时 `--copy-dir <可写目录>` 指到工作区，或让该命令在沙箱外跑。**判据：`STATUS`/`WAIT` 是权威字段，退出码不是**——沙箱拒绝会让宿主把退出码报成 1，而任务本身可能已经 completed。根治见 `docs/diagnostics/2026-10-16-readonly-sandbox.md`（库不再用 WAL；转换需一个「所有连接都退出」的窗口 ⇒ 重启 MCP server 即完成，重启前降级路径一直兜着）。 |
+| **`agent-ex wait` 报 `WAIT=db_unreadable`（exit 6）**，或报 `WAIT=not_found` 但 `agent_ex_status` 说任务在 | **这是环境问题，不是任务问题**（10/16 实测定案）。最常见成因：宿主 shell 沙箱禁止写数据目录，SQLite 做 WAL recovery 需写 `-wal`/`-shm` 时被拒。CLI 已内置降级（整组复制 `tasks.db(+wal/+journal)` 到可写目录再读，输出 `DB_SOURCE=copy`）；降级也失败时 `--copy-dir <可写目录>` 指到工作区，或让该命令在沙箱外跑。**判据：`STATUS`/`WAIT` 是权威字段，退出码不是**——沙箱拒绝会让宿主把退出码报成 1，而任务本身可能已经 completed。0.3.0 起任务库默认 `journal_mode=TRUNCATE`，静止态不需要 `-wal`/`-shm`，只读沙箱可直接读；库头仍是 WAL 时才需要降级（转换要求「所有连接都退出」的窗口 ⇒ 重启 MCP server）。背景见 `docs/diagnostics/2026-10-16-readonly-sandbox.md`。 |
 | 任务 `failed`，`error: failed to spawn runner … ENOENT` | executor `bin` 解析失败（裸名 + PATH 找不到）→ 定点改路径：`agent-ex config set executors.<name>.bin <绝对路径>`（不用手改 `config.json`） |
 | 飞书不推送 | `notify.dry_run` 还是 `true`；或 `FEISHU_WEBHOOK_URL` 不在 `.env` / server 环境。**先跑 `agent-ex doctor`**（或 MCP 工具 `agent_ex_doctor`）——它一次给出结论 + 病因 + 修复命令，不用自己翻日志猜。 |
 | **飞书不推送，但 `dry_run=false`、URL 也在**（任务照常终态，人什么都没收到） | **先跑 `agent_ex_doctor` / `agent-ex doctor`**：它会扫 `~/.agent-ex/logs/runner-*.log`（runner 的 stdout/stderr 重定向在这里，**排查通知的唯一证据面**；`tasks.db` 只给一个布尔 `notify_failed`，分不清「拒收」和「网络不通」）并按 `code` 聚合，直接告诉你病因与修法。手工排查时读该日志里的 `[notifier] feishu rejected: HTTP 200 code=XXXX msg=...`：**判定用 `code` 不用 `res.ok`**（飞书出错也返 HTTP 200）。常见码：`19024` 关键词不匹配（改 `notify.keyword` 与机器人「安全设置 → 自定义关键词」对齐）、`19001` **webhook 地址本身失效**（机器人被删/重建 ⇒ 要换地址，改关键词没用）、`19021` 勾了「加签」（本工具不发 `timestamp`/`sign` ⇒ 取消勾选）、`19022` IP 白名单。改 `config.json` **不需要重启 MCP server**：runner 是独立进程、每次 `loadConfig()` 新读。⚠️ **10/16 实测的坑，比"两边不一致"更隐蔽**：闸门是对**整张卡片**做子串匹配，**worker 的报告正文里只要偶然出现该词，卡就能过**——所以配置错了也可能长期"看起来正常"。10/13→10/15 连续 **23 个任务 0 通知**（旧名 `agent-flow-ex` 一直留在 live config 里没改），直到某张卡的正文恰好提到了新名才被误判为"已恢复"。⇒ **验通知必须用正文不含产品名的自检卡**（`agent-ex doctor --send` 就是），别用真实任务报告当探针。 |
 | `{env:VAR}` 报 not found | 对应密钥缺在 `$HOME/.agent-ex/.env`，补上后重启 MCP server |
-| **`agent_ex_status` 的 `result` 只给到一半**（长报告在句子中间断掉、承诺的小节没出现） | **不要重派、不要据此猜结论**。全文落在 `$AGENT_EX_HOME/logs/`（默认 `~/.agent-ex/logs/`）下的 `task_<id>_<hash>.jsonl`（每行一个 JSON；注意文件名带一段 hash 后缀，用 `ls`/`find` 定位，别假设只有 id）。抽法：逐行 `json.loads` → 递归收集 `{"type":"text"}` 的 `text`，**且只收 `role == "assistant"` 的块** → **先打印每块的字符数**，最终报告是其中最长的那块（**别盲取最后一块**：实测 T0 报告是第 2 块、阶段 2 是第 18 块）。**按 role 过滤是必须的，不是可选的**：被压缩（compact）过的任务日志里**最长的文本块是 compaction 摘要，不是报告** —— `task_mu9jj2zd_9b3341` 实测：摘要 12 936 字符（内容以 `This session is being continued from a previous conversation…` 开头）挂在 **`role: "user"`** 上，而 23 个 `role: "assistant"` 文本块才是 worker 自己的叙述与终报（终报 3 322 字符 = **最后一块**，条数比 23∶1）。⇒ 不按 role 过滤，就会把"继续上次工作"的摘要当成交付报告来复核（本会话真踩到过）。9/20 一天踩了三次（11 088 字符的报告 MCP 只回一半）。**最省事的做法：`"$SKILL_DIR/scripts/wait-task.mjs" <task_id> --once --report-out <path>`** —— 已内置同一套提取，且覆盖 claude / opencode 两种日志形状，见「会话内定时等待」。若要手写，用**当前解释器**（`python3 -c` 即可，不要硬编码任何机器上的 python 绝对路径），把最长块写到 `/tmp/t<stage>_report.md` 再 `Read`。|
+| **`agent_ex_status` 的 `result` 只给到一半**（长报告在句子中间断掉、承诺的小节没出现） | **不要重派、不要据此猜结论**。全文落在 `$AGENT_EX_HOME/logs/`（默认 `~/.agent-ex/logs/`）下的 `task_<id>_<hash>.jsonl`（每行一个 JSON；注意文件名带一段 hash 后缀，用 `ls`/`find` 定位，别假设只有 id）。抽法：逐行 `json.loads` → 递归收集 `{"type":"text"}` 的 `text`，**且只收 `role == "assistant"` 的块** → **先打印每块的字符数**，最终报告是其中最长的那块（**别盲取最后一块**：实测 T0 报告是第 2 块、阶段 2 是第 18 块）。**按 role 过滤是必须的，不是可选的**：被压缩（compact）过的任务日志里**最长的文本块是 compaction 摘要，不是报告** —— `task_mu9jj2zd_9b3341` 实测：摘要 12 936 字符（内容以 `This session is being continued from a previous conversation…` 开头）挂在 **`role: "user"`** 上，而 23 个 `role: "assistant"` 文本块才是 worker 自己的叙述与终报（终报 3 322 字符 = **最后一块**，条数比 23∶1）。⇒ 不按 role 过滤，就会把"继续上次工作"的摘要当成交付报告来复核（本会话真踩到过）。9/20 一天踩了三次（11 088 字符的报告 MCP 只回一半）。**最省事的做法：`agent-ex wait <task_id> --once --report-out <path>`** —— 已内置同一套提取，且覆盖 claude / opencode 两种日志形状，见「Phase 2：执行期自主推进 loop」。若要手写，用**当前解释器**（`python3 -c` 即可，不要硬编码任何机器上的 python 绝对路径），把最长块写到 `/tmp/t<stage>_report.md` 再 `Read`。|
 | **要回读「工单正文」而不是报告**（核对某阶段当初派了什么 / 查 task_id ↔ 阶段的对应） | 工单是 JSONL 的**第一条**记录，形状 `{"type":"user_prompt","round":…,"text":"…"}` —— **顶层 `text` 字段**，**不是** `message.content`（后者是 assistant 侧文本块的形状）。字段用错会**静默拿到空串**：9/20 实测按 `type=="user"` + `message.content` 抽 12 个文件全空，差点误判成"日志没存工单"。另：`task_id` 带随机后缀 + 阶段号只写在工单正文里 ⇒ 想知道「阶段 N 是哪个 task_id」只能这样回读，不要凭记忆写进 spec。|
 | **要统计 worker 的工作量 / 定位"为什么这单超时"** | 日志形状有三个必知的坑：① **只有 `type:"user"` 行带 `timestamp`**，`assistant` / `system` 行只有 `uuid` ⇒ 算耗时只能用 assistant 的 `tool_use.id` 配对到 user 行里的 `tool_result`，`system/task_started`、`task_notification` **无时间戳**不能当计时锚点；② 压缩标记用**完整短语 `ran out of context`** 匹配（出现在一条 `role:"user"` 的 text 里）——直接 grep `compact` 会误命中 75 行（`system` 行的 `autocompact` 字段），比例被显著高估；③ 上下文占用 = assistant `usage` 的 `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`。**"有没有卡死"看相邻事件时间戳最大间隔**（实测超时任务最大空窗 3.2min ⇒ 没卡死，是真在干活）。超时根因见 Step 2「🔒 硬约束：worker 上下文在 ~72k tokens 就会触发压缩」。|
 
 ## Resources
 
-- `scripts/wait-task.mjs` — 等待任务到终态**或需要我（needs_input）**并提取完整报告（后台运行，不受单次 Bash 600s 上限约束）；退出码 **0**=terminal / **5**=needs_input / **2**=timeout / **3**=not_found / **6**=db_unreadable（环境/沙箱）/ **4**=usage。`--copy-dir` 指定「库目录只读」时的降级副本落点。用法与唤醒后的复核流程见「Phase 2：执行期自主推进 loop」。
-- `scripts/wait-task.test.mjs` — 上者的隔离验证（43 项断言，自建合成 `AGENT_EX_HOME`，不碰真实 tasks.db、不发飞书）。**改过 `wait-task.mjs` 就重跑它**：`node skills/agent-ex-dispatch/scripts/wait-task.test.mjs`。每条断言都编码了一个真实踩过的错：needs_input 被当成"继续等"（时钟等满才退、报无用 timeout）／取最长文本块会拿到 compaction 摘要而非报告／digest 阈值低于脚本自身固定开销时反而比原报告更贵／**只读文件系统被当成只读数据库**（WAL 库的 `-shm` 一旦不在，无写权限的读者就读不了 —— 旧代码报 `WAIT=not_found`，把环境问题指向了「id 抄错」这个完全错的方向）。已做变异验证：清空 `ACTIONABLE` 后该测试 9 项转红。
+- **外部命令 `agent-ex wait`**（由 `agent-ex-mcp >= 0.3.0` 提供，**不随本 skill 分发**）—— 等待任务到终态**或需要我（needs_input）**并提取完整报告（后台运行，不受单次 Bash 600s 上限约束）；退出码 **0**=terminal / **5**=needs_input / **2**=timeout / **3**=not_found / **6**=db_unreadable（环境/沙箱）/ **4**=usage / **1**=内部错误 / **130、143**=信号。`--copy-dir` 指定「库目录只读」时的降级副本落点。安装与版本探针见「前置检查」，用法与唤醒后的复核流程见「Phase 2：执行期自主推进 loop」。实现在仓库 `src/wait.ts` + `src/report.ts`，测试在 `tests/wait.test.ts` / `tests/report.test.ts`，不再由 skill 自带脚本。
 - `references/prompt-templates.md` — 派发工单 / needs_input 答复 / 只读评审 三类提示词模板。
 - `references/confidence-check.md` — 收到 worker 终态报告后的防假阳性 5 问 + 置信度三档分级 + 采信前的十个机械核对（git 数改动 / 重量行为断言 / 检查 plan 是否偏离消费方 / 测试结论先对齐沙箱 / 「无输出」类验收自己重跑 / 接口字段逐条对测试 / 「0 fail」必须附非零测试数 / 「结构上不可能」类断言用探针走完整路径 / plan 断言表与测试名对表 / 计数先定口径、按结构字段数）+ 把交付按 Task 边界落成 commit 时的文件重叠规则 + 「这条断言在旧代码上会失败」要自己用最小 mutation 跑出来（含基线测量的文件级 cp 法）+「plan 步骤本身不可满足时先修 plan，不要改 worker 已正确的代码」。
