@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { PassThrough } from "node:stream";
+import * as readline from "node:readline/promises";
 import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,27 +19,51 @@ import { runInit } from "../src/init.js";
  */
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "aex-init-")); });
-afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { rmSync(dir, { recursive: true, force: true }); restoreReadline(); });
 
 /**
- * 逐条喂入答案行。
+ * 逐条喂入答案。
  *
- * 不能 `end()` 一次性喂完：readline 收到 EOF 后会关闭自己，后续 `question()` 全部抛
- * "readline was closed"。必须保持流打开、按提示顺序逐条写。
+ * ⚠️ 不能靠往输入流里"写行"来对齐提示——2026-11-09 实测踩过：
+ * readline 在**没有待答问题**时收到的一行会被当成普通 'line' 事件**丢掉**，
+ * 那行答案就此消失，后面的答案整体错位一格，init 的流程随之改变
+ * （表现为本文件里 yes/no 用例在并行负载下偶发红）。
+ * 靠"睡一拍"（setImmediate）去猜时机也救不了：负载一变就又错位。
+ *
+ * ⇒ 改成**在问题被问出的那一刻，把答案当作"用户输入"注入**（rl.write）：
+ * readline 的状态机正常走完（提示正确打印、内部 pending 状态被消费、
+ * 回调经由真实的 line 事件触发），而答案与问题**一一对应**，零时序依赖。
+ *
+ * 拦的是 `node:readline/promises` 的 Interface —— init 用的就是它
+ * （question() 返回 Promise 而非回调；且它与 node:readline 是**两个不同的类**，
+ * patch 错类会完全打不中）。
+ * 提示语仍由 readline 自己写进 stdout（测试要抓的就是它）。
  */
+const rlProto = readline.Interface.prototype as unknown as {
+  question: (this: readline.Interface, query: string, options?: unknown) => Promise<string>;
+};
+/** 模块加载时捕获一次原方法：避免重复安装时把"已打补丁的版本"当成原方法再包一层。 */
+const ORIG_QUESTION = rlProto.question;
+/** 当前待答的答案队列（null = 没有 feeder 在跑 ⇒ 原样转发）。 */
+let answerQueue: string[] | null = null;
+
 function feeder(answers: string[]): { stream: PassThrough; done: Promise<void> } {
   const s = new PassThrough();
-  let i = 0;
-  const done = (async () => {
-    for (const a of answers) {
-      // 等 readline 真正 ask 了再写（用 setImmediate 让出事件循环）
-      await new Promise((r) => setImmediate(r));
-      s.write(a + "\n");
-    }
-    // 保留流打开：后续还有 question() 要问
-  })();
-  void i;
-  return { stream: s, done };
+  answerQueue = answers.slice();
+  rlProto.question = function (this: readline.Interface, query: string, options?: unknown): Promise<string> {
+    const p = ORIG_QUESTION.call(this, query, options);
+    const next = answerQueue && answerQueue.length > 0 ? answerQueue.shift() : undefined;
+    // 当作用户输入注入：readline 会像收到用户敲的一行那样处理它
+    if (next !== undefined) this.write(next + "\n");
+    return p;
+  };
+  return { stream: s, done: Promise.resolve() };
+}
+
+/** 还原 readline 原型：node:readline 是内置模块，同一 worker 里跨测试文件共享。 */
+function restoreReadline(): void {
+  rlProto.question = ORIG_QUESTION;
+  answerQueue = null;
 }
 
 const EXISTING = {

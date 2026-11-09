@@ -57,13 +57,27 @@ function spawnTree(home: string, hbPath: string, detachedRoot = false): Tree {
   return { root, sPidfile, gPidfile, hb: hbPath };
 }
 
-async function waitForFile(path: string, timeoutMs = 5000): Promise<void> {
+/**
+ * 等到 pid 文件**写完内容**，并返回那个 pid。
+ *
+ * 为什么不能只等"文件出现"：子进程用 writeFileSync 写 pid ⇒ open(O_CREAT) 时
+ * 文件**已经存在**但还是空的，内容是下一条 syscall 才写进去。
+ * existsSync 赢了这条竞态 ⇒ 读到空串 ⇒ Number("") = 0 ⇒
+ * 断言 toContain(0) 失败（2026-11-09 并发压力下实测复现）。
+ *
+ * 与 waitForHeartbeat 同款思路：等**可用的状态**，不等"文件出现了"。
+ */
+async function waitForPidFile(path: string, timeoutMs = 5000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (existsSync(path)) return;
+    if (existsSync(path)) {
+      const raw = readFileSync(path, "utf8").trim();
+      const pid = Number(raw);
+      if (raw !== "" && Number.isInteger(pid) && pid > 0) return pid;
+    }
     await new Promise((r) => setTimeout(r, 30));
   }
-  throw new Error(`timeout waiting for ${path}`);
+  throw new Error(`timeout waiting for a usable pid in ${path}`);
 }
 
 /**
@@ -117,10 +131,8 @@ describe("collectDescendants", () => {
     home = mkdtempSync(join(tmpdir(), "afex-pt-"));
     const { root, sPidfile, gPidfile } = spawnTree(home, join(home, "hb.txt"));
     trees.push({ root, sPidfile, gPidfile, hb: join(home, "hb.txt") });
-    await waitForFile(sPidfile);
-    await waitForFile(gPidfile);
-    const sPid = Number(readFileSync(sPidfile, "utf8"));
-    const gPid = Number(readFileSync(gPidfile, "utf8"));
+    const sPid = await waitForPidFile(sPidfile);
+    const gPid = await waitForPidFile(gPidfile);
 
     const found = collectDescendants(root.pid!);
     expect(found).toContain(sPid); // 同组直子
@@ -159,10 +171,8 @@ describe("killTree", () => {
     const hbPath = join(home, "hb.txt");
     const { root, sPidfile, gPidfile, hb } = spawnTree(home, hbPath);
     trees.push({ root, sPidfile, gPidfile, hb });
-    await waitForFile(sPidfile);
-    await waitForFile(gPidfile);
-    const sPid = Number(readFileSync(sPidfile, "utf8"));
-    const gPid = Number(readFileSync(gPidfile, "utf8"));
+    const sPid = await waitForPidFile(sPidfile);
+    const gPid = await waitForPidFile(gPidfile);
 
     // 让心跳先跑起来，确认 G 活着且在写（轮询而非固定 sleep，见 waitForHeartbeat 注释）
     await waitForHeartbeat(hb);
@@ -200,10 +210,8 @@ describe("killTree with real runner group semantics", () => {
     const hbPath = join(home, "hb.txt");
     const { root, sPidfile, gPidfile, hb } = spawnTree(home, hbPath, true); // R detached → 组 leader
     trees.push({ root, sPidfile, gPidfile, hb });
-    await waitForFile(sPidfile);
-    await waitForFile(gPidfile);
-    const sPid = Number(readFileSync(sPidfile, "utf8"));
-    const gPid = Number(readFileSync(gPidfile, "utf8"));
+    const sPid = await waitForPidFile(sPidfile);
+    const gPid = await waitForPidFile(gPidfile);
     // 等心跳真正跑起来再 kill：否则「G 还没启动就被杀」与「G 启动了但没被杀掉」无法区分，
     // 后者才是本用例要抓的回归（2026-10-11 与主用例同源的固定 sleep 隐患）。
     await waitForHeartbeat(hb);
