@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { agentExHome } from "./paths.js";
 import { BRAND } from "./brand.js";
 import { validateConfig, resolveBinPath, type Config } from "./config.js";
+import { parseOpencodeModel } from "./model-check.js";
 import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
 
 /** 可写的固定字段白名单：key → 类型 + 说明。 */
@@ -55,7 +56,14 @@ const FORBIDDEN_ENV_KEYS = new Set(["NODE_OPTIONS", "PATH"]);
 const FORBIDDEN_ENV_PREFIXES = ["LD_", "DYLD_"];
 
 export interface ConfigListResult {
-  profiles: Array<{ name: string; executor: string; model: string; is_default: boolean; env: string[] }>;
+  profiles: Array<{
+    name: string;
+    executor: string;
+    model: string;
+    is_default: boolean;
+    env: string[];
+    path_prepend: string[];
+  }>;
   executors: Array<{ name: string; bin: string; bin_ok: boolean }>;
   notify: { dry_run: boolean; keyword: string; webhook: string };
   defaults: { profile: string; timeout_sec: number };
@@ -83,12 +91,8 @@ export function writeConfig(home: string, cfg: Config): void {
  */
 function opencodeModel(raw: string | undefined): string {
   if (!raw) return "";
-  try {
-    const m = (JSON.parse(raw) as { model?: unknown }).model;
-    return typeof m === "string" ? m : raw;
-  } catch {
-    return raw;
-  }
+  // 解析失败 / 无 model 字段时退回原样展示（宁可难看也别吞掉信息）。
+  return parseOpencodeModel(raw) ?? raw;
 }
 
 /** 列出当前配置概览。 */
@@ -103,6 +107,8 @@ export function listConfig(home: string = agentExHome()): ConfigListResult {
       // 只列环境变量**名字**（不列值）：值可能是大段配置内容，名字才回答
       // "这个 profile 会注入哪些变量"（如内置 profile 的 ZEN_FREE_PREFER）
       env: Object.keys(p.env ?? {}),
+      // 读的是未校验的原始 JSON ⇒ 形状不对时按"没配置"展示，不把坏值带进 UI
+      path_prepend: Array.isArray(p.path_prepend) ? p.path_prepend : [],
     })),
     // bin_ok 必须是真的探测结果：恒为 true 的字段是在骗人
     // （与 doctor 的 resolveBinPath 判定同源，见 config.ts）
@@ -335,6 +341,37 @@ export function setProfileValue(
       `Unknown profile "${profileName}" — existing: ${Object.keys(c.profiles ?? {}).join(", ") || "(none)"}`,
     );
   }
+  // ---- path_prepend（保留字）----
+  // 必须在"空值直接报错"之前：空串在这里是**清空**该字段的合法操作。
+  if (key === "path_prepend") {
+    const raw = rawValue.trim();
+    if (raw === "") {
+      delete p.path_prepend;
+      writeConfig(home, c);
+      return { profile: profileName, key, value: "" };
+    }
+    const parts = raw.split(",").map((s) => s.trim());
+    if (parts.some((s) => s === "")) {
+      throw new Error(
+        `"path_prepend" expects a comma-separated list of absolute directories, got an empty entry in "${rawValue}"`,
+      );
+    }
+    const relative = parts.find((s) => !s.startsWith("/"));
+    if (relative !== undefined) {
+      throw new Error(
+        `"path_prepend" entry "${relative}" is not an absolute path — every entry must start with "/"`,
+      );
+    }
+    const seen = new Set<string>();
+    for (const s of parts) {
+      if (seen.has(s)) throw new Error(`"path_prepend" has a duplicate entry "${s}"`);
+      seen.add(s);
+    }
+    p.path_prepend = parts;
+    writeConfig(home, c);
+    return { profile: profileName, key, value: parts.join(",") };
+  }
+
   const value = rawValue.trim();
   if (value === "") throw new Error(`"${key}" expects a non-empty value, got ""`);
 
@@ -354,7 +391,7 @@ export function setProfileValue(
   if (!ENV_KEY_RE.test(key)) {
     throw new Error(
       `"${key}" is not a valid env key — expected uppercase letters/digits/underscore (e.g. ZEN_FREE_PREFER) ` +
-      `or the reserved word "executor"`,
+      `or the reserved words "executor" / "path_prepend"`,
     );
   }
   if (FORBIDDEN_ENV_KEYS.has(key) || FORBIDDEN_ENV_PREFIXES.some((p2) => key.startsWith(p2))) {

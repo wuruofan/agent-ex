@@ -85,7 +85,8 @@ export function runConfig(args: string[]): number {
     for (const p of l.profiles) {
       const mark = p.is_default ? ansi.dim("  (default)") : "";
       const env = p.env.length > 0 ? `  env=${p.env.join(",")}` : "";
-      console.log(`  ${ansi.bold(ansi.cyan(p.name))}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${env}${mark}`);
+      const pp = p.path_prepend.length > 0 ? `  path_prepend=${p.path_prepend.join(",")}` : "";
+      console.log(`  ${ansi.bold(ansi.cyan(p.name))}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${env}${pp}${mark}`);
     }
     console.log(`\n${ansi.bold("Executors:")}`);
     // bin_ok 必须真的渲染出来：只在结构里探测、界面上不显示，等于没修
@@ -138,7 +139,8 @@ export function runProfile(args: string[]): number {
     for (const p of l.profiles) {
       const mark = p.is_default ? ansi.dim("  (default)") : "";
       const env = p.env.length > 0 ? `  env=${p.env.join(",")}` : "";
-      console.log(`  ${ansi.bold(ansi.cyan(p.name))}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${env}${mark}`);
+      const pp = p.path_prepend.length > 0 ? `  path_prepend=${p.path_prepend.join(",")}` : "";
+      console.log(`  ${ansi.bold(ansi.cyan(p.name))}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${env}${pp}${mark}`);
     }
     // 只列**还没物化**的预设：已经进了 config 的再列一遍，等于说"它不在 config 里"，是假话
     const unmaterialized = Object.keys(BUILTIN_PROFILES).filter((n) => !l.profiles.some((p) => p.name === n));
@@ -196,7 +198,7 @@ export function runProfile(args: string[]): number {
     if (!name || !key || value === undefined) {
       console.error(
         `usage: agent-ex profile set <profile> <key> <value>\n` +
-        `  key: an env var name (e.g. ZEN_FREE_PREFER) or the reserved word "executor"`,
+        `  key: an env var name (e.g. ZEN_FREE_PREFER) or the reserved words "executor" / "path_prepend"`,
       );
       return 2;
     }

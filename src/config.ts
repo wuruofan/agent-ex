@@ -10,6 +10,8 @@ export interface ExecutorConfig {
 export interface ProfileConfig {
   executor: string;
   env: Record<string, string>;
+  /** 插进 worker PATH 的额外绝对路径目录（位于 executor 的 bin 目录之后、系统目录之前）。 */
+  path_prepend?: string[];
 }
 export interface Config {
   executors: Record<string, ExecutorConfig>;
@@ -70,6 +72,7 @@ export type ConfigIssueCode =
   | "profiles.empty"
   | "executor.bin"
   | "profile.executor"
+  | "profile.path_prepend"
   | "defaults.profile"
   | "notify.webhook"
   | "defaults.timeout_sec";
@@ -146,7 +149,8 @@ export function collectConfigIssues(cfg: unknown): ConfigIssue[] {
     }
   }
   for (const [name, raw] of Object.entries(profiles)) {
-    const exec = asRecord(raw).executor;
+    const prof = asRecord(raw);
+    const exec = prof.executor;
     if (typeof exec !== "string" || !executors[exec]) {
       issues.push({
         code: "profile.executor",
@@ -154,6 +158,19 @@ export function collectConfigIssues(cfg: unknown): ConfigIssue[] {
         fix: `agent-ex config set profiles.${name}.executor <existing executor>`,
         subject: name,
       });
+    }
+    // path_prepend 只做**形状**校验（同步、纯、零 I/O）：目录是否存在不在这里判——
+    // 那会让「nvm 目录暂时没装」直接 reject 整份 config，太脆。
+    if (prof.path_prepend !== undefined) {
+      const problem = pathPrependProblem(prof.path_prepend);
+      if (problem !== null) {
+        issues.push({
+          code: "profile.path_prepend",
+          message: `profile "${name}" path_prepend ${problem}`,
+          fix: `agent-ex profile set ${name} path_prepend /abs/dir1,/abs/dir2`,
+          subject: name,
+        });
+      }
     }
   }
   const defaults = asRecord(c.defaults);
@@ -184,6 +201,20 @@ export function collectConfigIssues(cfg: unknown): ConfigIssue[] {
     });
   }
   return issues;
+}
+
+/** 返回 path_prepend 的**第一个**形状问题（null = 合法）。纯函数，不做任何 I/O。 */
+function pathPrependProblem(v: unknown): string | null {
+  if (!Array.isArray(v)) return "must be an array of absolute directory paths";
+  const seen = new Set<string>();
+  for (const item of v) {
+    if (typeof item !== "string") return "entries must be strings";
+    if (item === "") return "entries must be non-empty";
+    if (!item.startsWith("/")) return `entry "${item}" is not an absolute path`;
+    if (seen.has(item)) return `entry "${item}" is duplicated`;
+    seen.add(item);
+  }
+  return null;
 }
 
 function validate(cfg: Config): void {

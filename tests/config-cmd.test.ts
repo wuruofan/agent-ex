@@ -53,6 +53,13 @@ describe("config list", () => {
     const l = listConfig(home);
     expect(l.profiles[0].env).toEqual(["ANTHROPIC_MODEL"]);
   });
+
+  it("列出 path_prepend；未配置时为快照空数组", () => {
+    seed();
+    expect(listConfig(home).profiles[0].path_prepend).toEqual([]);
+    seed({ profiles: { default: { executor: "claude", env: {}, path_prepend: ["/a", "/b"] } } });
+    expect(listConfig(home).profiles[0].path_prepend).toEqual(["/a", "/b"]);
+  });
 });
 
 describe("config set —— 白名单字段", () => {
@@ -319,6 +326,33 @@ describe("profile set —— 改 profile 的字段（键必须受约束）", () 
     seed();
     expect(() => setProfileValue(home, "default", "OPENCODE_CONFIG_CONTENT", "{not json")).toThrow(/valid JSON/);
     expect(() => setProfileValue(home, "default", "OPENCODE_CONFIG_CONTENT", "{}")).toThrow(/model/);
+  });
+
+  it("path_prepend：逗号分隔的绝对路径列表落盘", () => {
+    seed();
+    const r = setProfileValue(home, "default", "path_prepend", "/a,/b");
+    expect(r.value).toBe("/a,/b");
+    expect(readConfig(home).profiles.default.path_prepend).toEqual(["/a", "/b"]);
+  });
+
+  it("path_prepend：空串清空该字段（删掉键，而不是写空数组）", () => {
+    seed({ profiles: { default: { executor: "claude", env: {}, path_prepend: ["/a"] } } });
+    setProfileValue(home, "default", "path_prepend", "");
+    expect("path_prepend" in readConfig(home).profiles.default).toBe(false);
+  });
+
+  it("path_prepend：非绝对路径 / 空片段 / 重复项都拒绝且不写盘", () => {
+    seed({ profiles: { default: { executor: "claude", env: {}, path_prepend: ["/keep"] } } });
+    expect(() => setProfileValue(home, "default", "path_prepend", "relative/bin")).toThrow(/absolute path/);
+    expect(() => setProfileValue(home, "default", "path_prepend", "/a,,/b")).toThrow(/empty entry/);
+    expect(() => setProfileValue(home, "default", "path_prepend", "/a,/a")).toThrow(/duplicate/);
+    expect(readConfig(home).profiles.default.path_prepend).toEqual(["/keep"]);
+  });
+
+  it("PATH 仍禁写 profile env（硬约束 #3 没被 path_prepend 削弱）", () => {
+    seed();
+    expect(() => setProfileValue(home, "default", "PATH", "/a")).toThrow(/not allowed/);
+    expect(readConfig(home).profiles.default.env.PATH).toBeUndefined();
   });
 
   it("内置 zen-free profile 必须保留动态解析占位符（不能被换成硬编码模型名）", () => {

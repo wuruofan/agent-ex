@@ -224,7 +224,8 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
 | `executors.<name>.bin` | agent CLI 的位置：**绝对路径或裸命令名皆可**（见「`executors.<name>.bin`」）。 |
 | `executors.<name>.extra_flags` | 拼到 agent 命令后的额外参数。权限开关按 executor 区分：claude 用 `--dangerously-skip-permissions`，opencode 用 `--auto`（`init` 会自动写对）。 |
 | `profiles.<name>.executor` | 引用 `executors` 里的某个 executor。 |
-| `profiles.<name>.env` | 传给 agent 子进程的环境变量；支持 `{env:VAR}` 占位符（见下）。**opencode 一般留空**（provider 由 opencode 自己的 `auth.json`/`opencode.json` 管理）；要给某个 profile 单独指定模型，写 `OPENCODE_CONFIG_CONTENT: "{\"model\":\"provider/model\"}"`——`extra_flags` 是 executor 级，多 profile 无法用它区分模型。另注意 `buildAgentEnv` 只给极简 `PATH`，worker 里的 shell 用不到 `/opt/homebrew/bin` 等，需要时在此显式补 `PATH`。 |
+| `profiles.<name>.env` | 传给 agent 子进程的环境变量；支持 `{env:VAR}` 占位符（见下）。**opencode 一般留空**（provider 由 opencode 自己的 `auth.json`/`opencode.json` 管理）；要给某个 profile 单独指定模型，写 `OPENCODE_CONFIG_CONTENT: "{\"model\":\"provider/model\"}"`——`extra_flags` 是 executor 级，多 profile 无法用它区分模型。**不要在此写 `PATH`**（会被拒绝）；要给 worker 补 PATH 目录用 `profiles.<name>.path_prepend`（见下）。 |
+| `profiles.<name>.path_prepend` | 插进 worker `PATH` 的额外**绝对路径目录**列表（位于 executor 的 bin 目录之后、系统目录之前）。典型用途：让 worker 用 nvm 的 `node`。 |
 | `notify.feishu_webhook_url` | 飞书机器人 webhook；支持 `{env:FEISHU_WEBHOOK_URL}` 占位符。 |
 | `notify.dry_run` | `true`（缺省）→ 只打印通知内容不真发；`false` → 真发。 |
 | `notify.keyword` | 附加在卡片末尾的「关键词」安全闸门。**缺省 = `agent-ex`（`src/brand.ts` 的 `BRAND`，`loadConfig` 自动填入）**，一般无需手写。详见「飞书通知配置」。 |
@@ -306,6 +307,20 @@ which opencode      # → /usr/local/bin/opencode
 ```
 
 > 早期版本要求必须写绝对路径；现已支持裸名自动解析，无需再硬编码 nvm 路径。
+
+### `profiles.<name>.path_prepend`：给 worker 补 PATH 目录
+
+worker 的 `PATH` 由 `buildAgentEnv` 自建：`dirname(executor bin)` → `path_prepend` → 系统目录（`/usr/bin:/bin:/usr/sbin:/sbin`），**不读** `process.env.PATH`。要让 worker 用 nvm 的 `node` 而不是 homebrew 的，就声明额外目录（绝对路径，逗号分隔）：
+
+```bash
+agent-ex profile set minimax-3 path_prepend /Users/you/.nvm/versions/node/v24.14.0/bin,/Users/you/.bun/bin
+# 清空该字段：
+agent-ex profile set minimax-3 path_prepend ""
+```
+
+- 只在**该 profile** 里生效；executor 自己的 bin 目录恒排第一，不会被挤掉。
+- 每项必须是绝对路径、非空、不重复；不合法时加载/`doctor` 会报出，`profile set` 当场拒绝。
+- **不要**改成 profile env 里的 `PATH`：`profile set` 会拒绝（那是 worker 的启动面，等价于任意代码执行）。
 
 ### 密钥：config 占位符 + `.env` 真实值
 
@@ -401,10 +416,10 @@ agent-ex doctor --send
 | `agent-ex doctor --send` | 额外实发一张**正文不含产品名**的自检卡，验证真实投递。 |
 | `agent-ex config list` | 列出 profiles / executors / notify / defaults 现状。 |
 | `agent-ex config set <key> <value>` | 改单个字段。白名单：`notify.dry_run`、`notify.keyword`、`defaults.timeout_sec`，以及 `executors.<name>.bin`（定点修 bin 路径）。 |
-| `agent-ex profile list` | 列出所有 profile（标出默认的那个）。 |
+| `agent-ex profile list` | 列出所有 profile（标出默认的那个；声明了 `path_prepend` 的会一并显示）。 |
 | `agent-ex profile use <profile>` | **切**默认 profile（profile 必须已存在）。 |
 | `agent-ex profile create <built-in> [--bin <path>]` | **物化**一个内置预设（当前：`opencode-zen-free`，零密钥的 opencode 免费模型）。只创建，不切默认；`--bin` 用于 executor 不在 PATH 上时指定绝对路径。 |
-| `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段（如 `ZEN_FREE_PREFER`），或用保留字 `executor` 改它用哪个 executor。 |
+| `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段（如 `ZEN_FREE_PREFER`），或用保留字 `executor` 改它用哪个 executor、用 `path_prepend` 声明 worker PATH 的额外目录（逗号分隔的绝对路径；空值清空）。 |
 | `agent-ex wait <task_id>` | **阻塞等一个任务到终态**（`completed` / `failed` / `cancelled`）或到 `needs_input`，并把 worker 的最终报告提出来。给 agent 派活后用它在后台等结果，见下节。 |
 
 > `doctor` 也有对应的 MCP 工具 `agent_ex_doctor`，让 agent 自己就能排错，不用手抄命令。

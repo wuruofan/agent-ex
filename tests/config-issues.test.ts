@@ -107,6 +107,49 @@ describe("collectConfigIssues —— 规则的唯一真相源", () => {
   });
 });
 
+describe("collectConfigIssues —— profile.path_prepend 形状校验", () => {
+  function withPathPrepend(pathPrepend: unknown): Record<string, unknown> {
+    return baseCfg({ profiles: { default: { executor: "claude", env: {}, path_prepend: pathPrepend } } });
+  }
+
+  function onlyPathPrependIssue(pathPrepend: unknown) {
+    const hits = collectConfigIssues(withPathPrepend(pathPrepend)).filter((i) => i.code === "profile.path_prepend");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].subject).toBe("default");
+    expect(hits[0].message).toContain("path_prepend");
+    expect(hits[0].fix).toContain("profile set default path_prepend");
+    return hits[0];
+  }
+
+  it("合法值不产出 issue", () => {
+    expect(collectConfigIssues(withPathPrepend(["/a", "/b"])).filter((i) => i.code === "profile.path_prepend")).toEqual([]);
+  });
+
+  it("未配置时不产出 issue（老配置零影响）", () => {
+    expect(collectConfigIssues(baseCfg()).filter((i) => i.code === "profile.path_prepend")).toEqual([]);
+  });
+
+  it("不是数组时报出", () => {
+    expect(onlyPathPrependIssue("/a").message).toContain("array");
+  });
+
+  it("元素不是字符串时报出", () => {
+    expect(onlyPathPrependIssue(["/a", 1]).message).toContain("strings");
+  });
+
+  it("元素为空串时报出", () => {
+    expect(onlyPathPrependIssue([""]).message).toContain("non-empty");
+  });
+
+  it("元素不是绝对路径时报出", () => {
+    expect(onlyPathPrependIssue(["relative/bin"]).message).toContain("absolute");
+  });
+
+  it("有重复项时报出", () => {
+    expect(onlyPathPrependIssue(["/a", "/a"]).message).toContain("duplicated");
+  });
+});
+
 describe("validateConfig —— 文案与规则一一对应", () => {
   it("抛的错与第一条 issue 的 message 一致", () => {
     const cfg = baseCfg({ defaults: { profile: "default", timeout_sec: "3600" } });
