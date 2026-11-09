@@ -60,7 +60,7 @@ export function detectAgentClis(whichFn: (name: string) => string | null = which
 /** 值得补进 worker PATH 的工具链命令（各人装法不同：nvm/fnm/volta/asdf/mise/homebrew/系统包）。 */
 export const TOOLCHAIN_BINS = ["node", "npm", "bun", "git"] as const;
 
-/** worker PATH 里本来就有的系统目录 —— 落在这里没有增量，不该写进 path_prepend。 */
+/** worker PATH 里本来就有的系统目录 —— 落在这里没有增量，不该写进 path_dirs。 */
 const BASE_WORKER_PATH_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
 /**
@@ -267,7 +267,7 @@ export interface InitAnswers {
   notify: { feishu_webhook_url: string; dry_run?: boolean; keyword?: string };
   timeout_sec: number;
   /** 探测到的工具链目录（进 worker PATH；空/缺省时不写这个键）。 */
-  path_prepend?: string[];
+  path_dirs?: string[];
 }
 
 /**
@@ -289,7 +289,7 @@ export function buildConfig(a: InitAnswers) {
       [a.profile]: {
         executor: a.executor,
         env: a.env,
-        ...(a.path_prepend && a.path_prepend.length ? { path_prepend: a.path_prepend } : {}),
+        ...(a.path_dirs && a.path_dirs.length ? { path_dirs: a.path_dirs } : {}),
       },
     },
     notify: a.notify,
@@ -547,7 +547,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
     const timeoutRaw = (await ask(rl, "Default timeout (seconds)", "3600")).trim();
     const timeout = Number.parseInt(timeoutRaw, 10) || 3600;
 
-    const config = buildConfig({ executor, bin, profile, env, notify, timeout_sec: timeout, path_prepend: toolchainDirs });
+    const config = buildConfig({ executor, bin, profile, env, notify, timeout_sec: timeout, path_dirs: toolchainDirs });
 
     // ---- 覆盖前的变更预告：让用户知道"要放弃什么"再决定 ----
     // 位置在这里（而不是流程开头）是因为"要变成什么"必须等问答结束才知道；

@@ -87,7 +87,7 @@ async function main(): Promise<void> {
   const executor = getExecutor(task.executor);
   const profile = cfg.profiles[task.profile];
   const profileEnv = profile?.env ?? {};
-  const pathPrepend = profile?.path_prepend;
+  const pathDirs = profile?.path_dirs;
 
   // 本轮原始输入：round1 用 task.prompt；续跑轮从日志读 server 预写的 user_prompt 行
   const rawInput = task.rounds === 1 ? task.prompt : readRoundInput(task.log_path, task.rounds);
@@ -211,7 +211,7 @@ async function main(): Promise<void> {
     if (resolved.model) {
       appendFileSync(task.log_path, JSON.stringify({ type: "_runner", event: "zen_model", attempt, model: resolved.model, excluded: [...zenExcluded] }) + "\n");
     }
-    outcome = await runAgent(attempt, buildAgentEnv(executorCfg.bin, resolved.env, pathPrepend));
+    outcome = await runAgent(attempt, buildAgentEnv(executorCfg.bin, resolved.env, pathDirs));
     const finalText = (outcome.resultText ?? outcome.lastAssistantText ?? "").trim();
     if (outcome.timedOut) break;           // 真超时，不是 API 瞬时错误
     if (outcome.question) break;           // 等人工，交给 dispatcher 代答/续跑

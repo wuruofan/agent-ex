@@ -8,15 +8,15 @@ const SYSTEM = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
 describe("buildAgentEnv —— worker 环境自建 PATH", () => {
   /**
-   * 回归保护：没有 path_prepend 的老配置，PATH 必须与今天**逐字节一致**。
+   * 回归保护：没有 path_dirs 的老配置，PATH 必须与今天**逐字节一致**。
    * 这也是「不继承 process.env.PATH」这条硬约束的可执行断言。
    */
-  it("不传 pathPrepend 时 PATH 与历史行为逐字节一致", () => {
+  it("不传 pathDirs 时 PATH 与历史行为逐字节一致", () => {
     const env = buildAgentEnv(bin, {});
     expect(env.PATH).toBe([binDir, ...SYSTEM].join(":"));
   });
 
-  it("pathPrepend 插在 executor bin 目录之后、系统目录之前", () => {
+  it("pathDirs 插在 executor bin 目录之后、系统目录之前", () => {
     const env = buildAgentEnv(bin, {}, ["/nvm/node/bin", "/bun/bin"]);
     expect(env.PATH).toBe([binDir, "/nvm/node/bin", "/bun/bin", ...SYSTEM].join(":"));
   });

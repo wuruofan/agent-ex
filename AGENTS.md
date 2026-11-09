@@ -46,14 +46,14 @@
 
 1. **init 的用户可见输出必须全英文。** `tests/init.test.ts` 会扫 `src/init.ts` 里所有 `console.log/error`、`ask()`、`rl.question()` 行，出现中文字符就红。代码注释用中文没关系。
 2. **`config` / `profile` 的写入口是白名单**（`src/config-cmd.ts` 的 `WRITABLE` + `executors.<name>.bin`）。不要为了方便加通用点路径写入。
-3. **profile env 禁写 `NODE_OPTIONS` / `PATH` / `LD_*` / `DYLD_*`**——它们是 worker 进程的启动/加载面（等价于任意代码执行）。受控的 PATH 来源是 `profile.path_prepend`（绝对目录列表，只能走 `profile set`）。
+3. **profile env 禁写 `NODE_OPTIONS` / `PATH` / `LD_*` / `DYLD_*`**——它们是 worker 进程的启动/加载面（等价于任意代码执行）。受控的 PATH 来源是 `profile.path_dirs`（绝对目录列表，只能走 `profile set`）。
 4. **`{model:zen-free}` 占位符不能被换成硬编码模型名**（`setProfileValue` 会拦）。free 模型集会轮换，配置里必须零硬引用。
 5. **`init` 是全量覆盖式**：重跑会重写 `config.json`、丢掉其它 profile 与 `dry_run`。改单个字段一律走 `agent-ex config set` / `profile set`。
 6. **校验只有一个真相源**：`src/config.ts` 的 `collectConfigIssues()` 同时被 `validateConfig()` 和 `doctor` 消费。别在 doctor 里另写一套检查。
 7. **`server.ts` 顶层 import 必须"每个分支都要用且便宜"**：目前只留 `env-file` / `brand` / `ansi` / `marks`；MCP SDK、zod、`submit/status/cancel/doctor/wait` 全在 `main()` 或对应分支里动态 import。两个原因：
    - **启动税**：MCP SDK 顶层静态 import 会拖进几百个模块（连带 express / hono / ajv）。CLI 子命令一个都不需要它，`agent-ex wait` 每次调用都要白付这笔钱（实测 6s → 0.9s）。
    - **SQLite 噪音**：`submit` → `store` → `node:sqlite` 一旦静态 import，连 `agent-ex init` 也会加载 SQLite，实验性警告是异步打印的，会插进交互提示符中间。
-8. **worker 的环境不继承 shell**：`buildAgentEnv()` 只给 `HOME` / `TMPDIR` / `PATH` + profile env（`{env:VAR}` 在此解析）。但 `HOME` 会传 ⇒ `~/.claude/settings.json` 里的 env 对 worker 仍然生效。`profile.path_prepend` 是 worker PATH 的**唯一受控来源**（插在 executor bin 目录之后、系统目录之前），`buildAgentEnv()` 仍然完全自建 PATH、不读 `process.env.PATH`。
+8. **worker 的环境不继承 shell**：`buildAgentEnv()` 只给 `HOME` / `TMPDIR` / `PATH` + profile env（`{env:VAR}` 在此解析）。但 `HOME` 会传 ⇒ `~/.claude/settings.json` 里的 env 对 worker 仍然生效。`profile.path_dirs` 是 worker PATH 的**唯一受控来源**（插在 executor bin 目录之后、系统目录之前），`buildAgentEnv()` 仍然完全自建 PATH、不读 `process.env.PATH`。
 
 ## 改动时的连带规则
 

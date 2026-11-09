@@ -62,7 +62,7 @@ export interface ConfigListResult {
     model: string;
     is_default: boolean;
     env: string[];
-    path_prepend: string[];
+    path_dirs: string[];
   }>;
   executors: Array<{ name: string; bin: string; bin_ok: boolean }>;
   notify: { dry_run: boolean; keyword: string; webhook: string };
@@ -108,7 +108,7 @@ export function listConfig(home: string = agentExHome()): ConfigListResult {
       // "这个 profile 会注入哪些变量"（如内置 profile 的 ZEN_FREE_PREFER）
       env: Object.keys(p.env ?? {}),
       // 读的是未校验的原始 JSON ⇒ 形状不对时按"没配置"展示，不把坏值带进 UI
-      path_prepend: Array.isArray(p.path_prepend) ? p.path_prepend : [],
+      path_dirs: Array.isArray(p.path_dirs) ? p.path_dirs : [],
     })),
     // bin_ok 必须是真的探测结果：恒为 true 的字段是在骗人
     // （与 doctor 的 resolveBinPath 判定同源，见 config.ts）
@@ -341,33 +341,33 @@ export function setProfileValue(
       `Unknown profile "${profileName}" — existing: ${Object.keys(c.profiles ?? {}).join(", ") || "(none)"}`,
     );
   }
-  // ---- path_prepend（保留字）----
+  // ---- path_dirs（保留字）----
   // 必须在"空值直接报错"之前：空串在这里是**清空**该字段的合法操作。
-  if (key === "path_prepend") {
+  if (key === "path_dirs") {
     const raw = rawValue.trim();
     if (raw === "") {
-      delete p.path_prepend;
+      delete p.path_dirs;
       writeConfig(home, c);
       return { profile: profileName, key, value: "" };
     }
     const parts = raw.split(",").map((s) => s.trim());
     if (parts.some((s) => s === "")) {
       throw new Error(
-        `"path_prepend" expects a comma-separated list of absolute directories, got an empty entry in "${rawValue}"`,
+        `"path_dirs" expects a comma-separated list of absolute directories, got an empty entry in "${rawValue}"`,
       );
     }
     const relative = parts.find((s) => !s.startsWith("/"));
     if (relative !== undefined) {
       throw new Error(
-        `"path_prepend" entry "${relative}" is not an absolute path — every entry must start with "/"`,
+        `"path_dirs" entry "${relative}" is not an absolute path — every entry must start with "/"`,
       );
     }
     const seen = new Set<string>();
     for (const s of parts) {
-      if (seen.has(s)) throw new Error(`"path_prepend" has a duplicate entry "${s}"`);
+      if (seen.has(s)) throw new Error(`"path_dirs" has a duplicate entry "${s}"`);
       seen.add(s);
     }
-    p.path_prepend = parts;
+    p.path_dirs = parts;
     writeConfig(home, c);
     return { profile: profileName, key, value: parts.join(",") };
   }
@@ -391,7 +391,7 @@ export function setProfileValue(
   if (!ENV_KEY_RE.test(key)) {
     throw new Error(
       `"${key}" is not a valid env key — expected uppercase letters/digits/underscore (e.g. ZEN_FREE_PREFER) ` +
-      `or the reserved words "executor" / "path_prepend"`,
+      `or the reserved words "executor" / "path_dirs"`,
     );
   }
   if (FORBIDDEN_ENV_KEYS.has(key) || FORBIDDEN_ENV_PREFIXES.some((p2) => key.startsWith(p2))) {

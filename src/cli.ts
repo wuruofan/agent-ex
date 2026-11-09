@@ -85,7 +85,7 @@ export function runConfig(args: string[]): number {
     for (const p of l.profiles) {
       const mark = p.is_default ? ansi.dim("  (default)") : "";
       const env = p.env.length > 0 ? `  env=${p.env.join(",")}` : "";
-      const pp = p.path_prepend.length > 0 ? `  path_prepend=${p.path_prepend.join(",")}` : "";
+      const pp = p.path_dirs.length > 0 ? `  path_dirs=${p.path_dirs.join(",")}` : "";
       console.log(`  ${ansi.bold(ansi.cyan(p.name))}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${env}${pp}${mark}`);
     }
     console.log(`\n${ansi.bold("Executors:")}`);
@@ -139,7 +139,7 @@ export function runProfile(args: string[]): number {
     for (const p of l.profiles) {
       const mark = p.is_default ? ansi.dim("  (default)") : "";
       const env = p.env.length > 0 ? `  env=${p.env.join(",")}` : "";
-      const pp = p.path_prepend.length > 0 ? `  path_prepend=${p.path_prepend.join(",")}` : "";
+      const pp = p.path_dirs.length > 0 ? `  path_dirs=${p.path_dirs.join(",")}` : "";
       console.log(`  ${ansi.bold(ansi.cyan(p.name))}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${env}${pp}${mark}`);
     }
     // 只列**还没物化**的预设：已经进了 config 的再列一遍，等于说"它不在 config 里"，是假话
@@ -198,7 +198,7 @@ export function runProfile(args: string[]): number {
     if (!name || !key || value === undefined) {
       console.error(
         `usage: agent-ex profile set <profile> <key> <value>\n` +
-        `  key: an env var name (e.g. ZEN_FREE_PREFER) or the reserved words "executor" / "path_prepend"`,
+        `  key: an env var name (e.g. ZEN_FREE_PREFER) or the reserved words "executor" / "path_dirs"`,
       );
       return 2;
     }

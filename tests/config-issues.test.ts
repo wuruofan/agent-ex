@@ -107,26 +107,26 @@ describe("collectConfigIssues —— 规则的唯一真相源", () => {
   });
 });
 
-describe("collectConfigIssues —— profile.path_prepend 形状校验", () => {
-  function withPathPrepend(pathPrepend: unknown): Record<string, unknown> {
-    return baseCfg({ profiles: { default: { executor: "claude", env: {}, path_prepend: pathPrepend } } });
+describe("collectConfigIssues —— profile.path_dirs 形状校验", () => {
+  function withPathPrepend(pathDirs: unknown): Record<string, unknown> {
+    return baseCfg({ profiles: { default: { executor: "claude", env: {}, path_dirs: pathDirs } } });
   }
 
-  function onlyPathPrependIssue(pathPrepend: unknown) {
-    const hits = collectConfigIssues(withPathPrepend(pathPrepend)).filter((i) => i.code === "profile.path_prepend");
+  function onlyPathPrependIssue(pathDirs: unknown) {
+    const hits = collectConfigIssues(withPathPrepend(pathDirs)).filter((i) => i.code === "profile.path_dirs");
     expect(hits).toHaveLength(1);
     expect(hits[0].subject).toBe("default");
-    expect(hits[0].message).toContain("path_prepend");
-    expect(hits[0].fix).toContain("profile set default path_prepend");
+    expect(hits[0].message).toContain("path_dirs");
+    expect(hits[0].fix).toContain("profile set default path_dirs");
     return hits[0];
   }
 
   it("合法值不产出 issue", () => {
-    expect(collectConfigIssues(withPathPrepend(["/a", "/b"])).filter((i) => i.code === "profile.path_prepend")).toEqual([]);
+    expect(collectConfigIssues(withPathPrepend(["/a", "/b"])).filter((i) => i.code === "profile.path_dirs")).toEqual([]);
   });
 
   it("未配置时不产出 issue（老配置零影响）", () => {
-    expect(collectConfigIssues(baseCfg()).filter((i) => i.code === "profile.path_prepend")).toEqual([]);
+    expect(collectConfigIssues(baseCfg()).filter((i) => i.code === "profile.path_dirs")).toEqual([]);
   });
 
   it("不是数组时报出", () => {

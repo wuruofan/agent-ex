@@ -13,15 +13,15 @@ import { resolveEnvPlaceholders, resolveBinPath } from "./config.js";
 export function buildAgentEnv(
   bin: string,
   profileEnv: Record<string, string>,
-  pathPrepend?: string[],
+  pathDirs?: string[],
 ): NodeJS.ProcessEnv {
   const resolved = resolveBinPath(bin) ?? bin;
   return {
     HOME: process.env.HOME,
     TMPDIR: tmpdir(),
-    // 顺序：executor 自己的 bin 目录 → profile.path_prepend → 系统目录。
+    // 顺序：executor 自己的 bin 目录 → profile.path_dirs → 系统目录。
     // dirname(resolved) 恒排第一：用户的额外目录不能把 executor 本身挤掉。
-    PATH: [dirname(resolved), ...(pathPrepend ?? []), "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"),
+    PATH: [dirname(resolved), ...(pathDirs ?? []), "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"),
     ...resolveEnvPlaceholders(profileEnv),
   };
 }

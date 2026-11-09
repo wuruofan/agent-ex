@@ -167,7 +167,7 @@ describe("buildConfig", () => {
     expect(cfg.executors.opencode.extra_flags).toEqual(DEFAULT_EXTRA_FLAGS.opencode);
     expect(cfg.executors.opencode.extra_flags).toEqual(["--auto"]);
   });
-  it("path_prepend 非空时写进 profile", () => {
+  it("path_dirs 非空时写进 profile", () => {
     const cfg = buildConfig({
       executor: "claude",
       bin: "/bin/node",
@@ -175,11 +175,11 @@ describe("buildConfig", () => {
       env: {},
       notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true },
       timeout_sec: 3600,
-      path_prepend: ["/opt/node/bin", "/home/u/.bun/bin"],
+      path_dirs: ["/opt/node/bin", "/home/u/.bun/bin"],
     });
-    expect(cfg.profiles.default.path_prepend).toEqual(["/opt/node/bin", "/home/u/.bun/bin"]);
+    expect(cfg.profiles.default.path_dirs).toEqual(["/opt/node/bin", "/home/u/.bun/bin"]);
   });
-  it("path_prepend 缺省或空数组时不写这个键", () => {
+  it("path_dirs 缺省或空数组时不写这个键", () => {
     const absent = buildConfig({
       executor: "claude",
       bin: "/bin/node",
@@ -188,7 +188,7 @@ describe("buildConfig", () => {
       notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true },
       timeout_sec: 3600,
     });
-    expect(Object.keys(absent.profiles.default)).not.toContain("path_prepend");
+    expect(Object.keys(absent.profiles.default)).not.toContain("path_dirs");
     const empty = buildConfig({
       executor: "claude",
       bin: "/bin/node",
@@ -196,9 +196,9 @@ describe("buildConfig", () => {
       env: {},
       notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true },
       timeout_sec: 3600,
-      path_prepend: [],
+      path_dirs: [],
     });
-    expect(Object.keys(empty.profiles.default)).not.toContain("path_prepend");
+    expect(Object.keys(empty.profiles.default)).not.toContain("path_dirs");
   });
 });
 
@@ -306,7 +306,7 @@ describe("init 自动预填工具链目录", () => {
     return s;
   }
 
-  it("把探测到的目录写进 profile.path_prepend，提示为英文且说明是给 worker 用的", async () => {
+  it("把探测到的目录写进 profile.path_dirs，提示为英文且说明是给 worker 用的", async () => {
     const home = mkdtempSync(join(tmpdir(), "aex-init-toolchain-"));
     const origHome = process.env.AGENT_EX_HOME;
     const origKey = process.env.MINIMAX_API_KEY;
@@ -340,7 +340,7 @@ describe("init 自动预填工具链目录", () => {
 
     try {
       const cfg = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
-      expect(cfg.profiles.default.path_prepend).toEqual(["/opt/node/bin"]);
+      expect(cfg.profiles.default.path_dirs).toEqual(["/opt/node/bin"]);
       const text = out.join("\n");
       expect(text).toContain("/opt/node/bin");
       expect(text).toMatch(/worker PATH/);
