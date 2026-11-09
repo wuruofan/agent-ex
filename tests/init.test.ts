@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { isAbsolute } from "node:path";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import {
   apiKeyVarFor,
   buildConfig,
   DEFAULT_CLAUDE_ENV,
   DEFAULT_EXTRA_FLAGS,
   detectAgentClis,
+  detectToolchainDirs,
   mcpServerSnippet,
   missingTokenKey,
   nextSteps,
@@ -17,6 +19,7 @@ import {
   presetEnv,
   renderDetectedClis,
   resolveServerEntry,
+  runInit,
 } from "../src/init.js";
 import { BUILTIN_PROFILES, createProfile, readConfig } from "../src/config-cmd.js";
 import { BRAND } from "../src/brand.js";
@@ -56,6 +59,50 @@ describe("探测 agent CLI", () => {
     expect(text).toContain("No agent CLI found");
     expect(text).toContain("claude");
     expect(text).toContain("opencode");
+  });
+});
+
+describe("探测工具链目录", () => {
+  /** 只让指定命令命中给定绝对路径，其余一律 null（不依赖开发机装了什么）。 */
+  function stub(map: Record<string, string | null>) {
+    return (name: string): string | null => map[name] ?? null;
+  }
+
+  it("node 与 npm 同目录 ⇒ 该目录只出现一次", () => {
+    const dirs = detectToolchainDirs(
+      stub({ node: "/opt/node/bin/node", npm: "/opt/node/bin/npm" }),
+    );
+    expect(dirs).toEqual(["/opt/node/bin"]);
+  });
+
+  it("node 在 A、bun 在 B ⇒ [A, B]，顺序保持探测顺序", () => {
+    const dirs = detectToolchainDirs(
+      stub({ node: "/opt/node/bin/node", bun: "/home/u/.bun/bin/bun" }),
+    );
+    expect(dirs).toEqual(["/opt/node/bin", "/home/u/.bun/bin"]);
+  });
+
+  it("某个命令探测不到 ⇒ 跳过，其余仍在", () => {
+    const dirs = detectToolchainDirs(
+      stub({ node: null, npm: "/opt/node/bin/npm", bun: "/home/u/.bun/bin/bun", git: null }),
+    );
+    expect(dirs).toEqual(["/opt/node/bin", "/home/u/.bun/bin"]);
+  });
+
+  it("解析出相对路径 ⇒ 跳过（不能写进 worker PATH）", () => {
+    const dirs = detectToolchainDirs(stub({ node: "bin/node", bun: "/home/u/.bun/bin/bun" }));
+    expect(dirs).toEqual(["/home/u/.bun/bin"]);
+  });
+
+  it("位于 /usr/bin 等基础 PATH 目录 ⇒ 跳过（冗余）", () => {
+    const dirs = detectToolchainDirs(
+      stub({ node: "/usr/bin/node", npm: "/usr/bin/npm", git: "/usr/local/bin/git" }),
+    );
+    expect(dirs).toEqual(["/usr/local/bin"]);
+  });
+
+  it("一个都探测不到 ⇒ 空数组（不是塞 null 占位）", () => {
+    expect(detectToolchainDirs(() => null)).toEqual([]);
   });
 });
 
@@ -119,6 +166,39 @@ describe("buildConfig", () => {
     });
     expect(cfg.executors.opencode.extra_flags).toEqual(DEFAULT_EXTRA_FLAGS.opencode);
     expect(cfg.executors.opencode.extra_flags).toEqual(["--auto"]);
+  });
+  it("path_prepend 非空时写进 profile", () => {
+    const cfg = buildConfig({
+      executor: "claude",
+      bin: "/bin/node",
+      profile: "default",
+      env: {},
+      notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true },
+      timeout_sec: 3600,
+      path_prepend: ["/opt/node/bin", "/home/u/.bun/bin"],
+    });
+    expect(cfg.profiles.default.path_prepend).toEqual(["/opt/node/bin", "/home/u/.bun/bin"]);
+  });
+  it("path_prepend 缺省或空数组时不写这个键", () => {
+    const absent = buildConfig({
+      executor: "claude",
+      bin: "/bin/node",
+      profile: "default",
+      env: {},
+      notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true },
+      timeout_sec: 3600,
+    });
+    expect(Object.keys(absent.profiles.default)).not.toContain("path_prepend");
+    const empty = buildConfig({
+      executor: "claude",
+      bin: "/bin/node",
+      profile: "default",
+      env: {},
+      notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true },
+      timeout_sec: 3600,
+      path_prepend: [],
+    });
+    expect(Object.keys(empty.profiles.default)).not.toContain("path_prepend");
   });
 });
 
@@ -204,6 +284,69 @@ describe("init 的 opencode 分支 —— 与内置 preset 必须同名同 env",
       expect(fromInit.env).toEqual(fromCreate.env);
       // 两边都必须带偏好字段（这是当初 init 漏掉的那一个）
       expect(fromInit.env.ZEN_FREE_PREFER).toBe("deepseek,glm,mimo");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("init 自动预填工具链目录", () => {
+  /**
+   * 逐条喂答案（与 init-e2e 同款）：readline 收到 EOF 会关闭自己，
+   * 后续 question() 全部抛 "readline was closed"，所以不能一次性 end()。
+   */
+  function feeder(answers: string[]): PassThrough {
+    const s = new PassThrough();
+    void (async () => {
+      for (const a of answers) {
+        await new Promise((r) => setImmediate(r));
+        s.write(a + "\n");
+      }
+    })();
+    return s;
+  }
+
+  it("把探测到的目录写进 profile.path_prepend，提示为英文且说明是给 worker 用的", async () => {
+    const home = mkdtempSync(join(tmpdir(), "aex-init-toolchain-"));
+    const origHome = process.env.AGENT_EX_HOME;
+    const origKey = process.env.MINIMAX_API_KEY;
+    const origHook = process.env.FEISHU_WEBHOOK_URL;
+    process.env.AGENT_EX_HOME = home;
+    // 去掉可能存在的密钥，避免 collectSecret 多问一句 "Use this value?"，打乱答案序列
+    delete process.env.MINIMAX_API_KEY;
+    delete process.env.FEISHU_WEBHOOK_URL;
+
+    const out: string[] = [];
+    const origLog = console.log;
+    console.log = (...a: unknown[]) => { out.push(a.join(" ")); };
+    try {
+      await runInit(
+        feeder(["", "default", "minimax", "", "", "3600"]),
+        {
+          which: (n) => {
+            if (n === "claude") return "/bin/ls";
+            if (n === "node") return "/opt/node/bin/node";
+            if (n === "npm") return "/opt/node/bin/npm";
+            return null;
+          },
+        },
+      );
+    } finally {
+      console.log = origLog;
+      if (origHome === undefined) delete process.env.AGENT_EX_HOME; else process.env.AGENT_EX_HOME = origHome;
+      if (origKey === undefined) delete process.env.MINIMAX_API_KEY; else process.env.MINIMAX_API_KEY = origKey;
+      if (origHook === undefined) delete process.env.FEISHU_WEBHOOK_URL; else process.env.FEISHU_WEBHOOK_URL = origHook;
+    }
+
+    try {
+      const cfg = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+      expect(cfg.profiles.default.path_prepend).toEqual(["/opt/node/bin"]);
+      const text = out.join("\n");
+      expect(text).toContain("/opt/node/bin");
+      expect(text).toMatch(/worker PATH/);
+      expect(text).toMatch(/config\.json/);
+      // 面向用户的提示必须是英文（中文扫描测试之外的额外保险）
+      expect(text).not.toMatch(/[一-龥]/);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

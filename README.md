@@ -319,6 +319,7 @@ agent-ex profile set minimax-3 path_prepend ""
 ```
 
 - 只在**该 profile** 里生效；executor 自己的 bin 目录恒排第一，不会被挤掉。
+- `agent-ex init` 会自动探测本机的 node/npm/bun/git 所在目录并预填该字段（各人的装法不同，不必手抄路径）；仍可用 `agent-ex profile set` 手工增删。
 - 每项必须是绝对路径、非空、不重复；不合法时加载/`doctor` 会报出，`profile set` 当场拒绝。
 - **不要**改成 profile env 里的 `PATH`：`profile set` 会拒绝（那是 worker 的启动面，等价于任意代码执行）。
 

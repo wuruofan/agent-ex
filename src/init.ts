@@ -57,6 +57,39 @@ export function detectAgentClis(whichFn: (name: string) => string | null = which
   return out;
 }
 
+/** 值得补进 worker PATH 的工具链命令（各人装法不同：nvm/fnm/volta/asdf/mise/homebrew/系统包）。 */
+export const TOOLCHAIN_BINS = ["node", "npm", "bun", "git"] as const;
+
+/** worker PATH 里本来就有的系统目录 —— 落在这里没有增量，不该写进 path_prepend。 */
+const BASE_WORKER_PATH_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+
+/**
+ * 探测工具链所在目录，给 worker 的 PATH 补料。
+ *
+ * 为什么在 init 时探测：init 跑在用户的交互式终端里，它的 PATH 就是用户真正在用的
+ * 工具链（nvm/fnm/volta/homebrew …）；而 worker 的 PATH 由 buildAgentEnv 完全自建，
+ * 不继承 shell。二者的落差正是 node/npm/bun 在 worker 里 command not found 的根因。
+ *
+ * `whichFn` 可注入（与 detectAgentClis 同款理由：测试不能依赖开发机装了什么）。
+ */
+export function detectToolchainDirs(whichFn: (name: string) => string | null = which): string[] {
+  const dirs: string[] = [];
+  for (const name of TOOLCHAIN_BINS) {
+    const bin = whichFn(name);
+    // 没装 / 没在 PATH：跳过，不报错、不占位
+    if (!bin) continue;
+    // `command -v` 在含相对 PATH 项时可能返回相对路径 —— 不能写进 worker PATH
+    if (!bin.startsWith("/")) continue;
+    const dir = dirname(bin);
+    // 基础 PATH 已覆盖 ⇒ 写进去是冗余
+    if (BASE_WORKER_PATH_DIRS.includes(dir)) continue;
+    // 去重：nvm 下 node 与 npm 通常同目录，只应出现一次
+    if (dirs.includes(dir)) continue;
+    dirs.push(dir);
+  }
+  return dirs;
+}
+
 /**
  * 探测结果的展示。
  *
@@ -233,6 +266,8 @@ export interface InitAnswers {
   env: Record<string, string>;
   notify: { feishu_webhook_url: string; dry_run?: boolean; keyword?: string };
   timeout_sec: number;
+  /** 探测到的工具链目录（进 worker PATH；空/缺省时不写这个键）。 */
+  path_prepend?: string[];
 }
 
 /**
@@ -250,7 +285,13 @@ export const DEFAULT_EXTRA_FLAGS: Record<string, string[]> = {
 export function buildConfig(a: InitAnswers) {
   return {
     executors: { [a.executor]: { bin: a.bin, extra_flags: DEFAULT_EXTRA_FLAGS[a.executor] ?? [] } },
-    profiles: { [a.profile]: { executor: a.executor, env: a.env } },
+    profiles: {
+      [a.profile]: {
+        executor: a.executor,
+        env: a.env,
+        ...(a.path_prepend && a.path_prepend.length ? { path_prepend: a.path_prepend } : {}),
+      },
+    },
     notify: a.notify,
     defaults: { profile: a.profile, timeout_sec: a.timeout_sec },
   };
@@ -418,6 +459,16 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
     const found = detectAgentClis(opts.which);
     console.log(renderDetectedClis(found));
 
+    // ---- 探测工具链目录（给 worker 的 PATH 补料）----
+    // 自动的、不问问题：用户不必知道自己的 node/npm/bun 装在哪。
+    // 空数组不报警 —— 机器上本来就没有 node 也不是 init 该管的。
+    const toolchainDirs = detectToolchainDirs(opts.which);
+    if (toolchainDirs.length > 0) {
+      console.log(
+        `${ansi.dim(MARK.info)} Adding toolchain dirs to the worker PATH (editable in config.json): ${toolchainDirs.join(", ")}`,
+      );
+    }
+
     let executor: string;
     let detected: string | null = null;
     if (found.length === 1) {
@@ -496,7 +547,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
     const timeoutRaw = (await ask(rl, "Default timeout (seconds)", "3600")).trim();
     const timeout = Number.parseInt(timeoutRaw, 10) || 3600;
 
-    const config = buildConfig({ executor, bin, profile, env, notify, timeout_sec: timeout });
+    const config = buildConfig({ executor, bin, profile, env, notify, timeout_sec: timeout, path_prepend: toolchainDirs });
 
     // ---- 覆盖前的变更预告：让用户知道"要放弃什么"再决定 ----
     // 位置在这里（而不是流程开头）是因为"要变成什么"必须等问答结束才知道；
