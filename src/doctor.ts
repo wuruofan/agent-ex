@@ -26,6 +26,7 @@ import {
   type ConfigIssueCode,
 } from "./config.js";
 import { buildFeishuCard, sendFeishuCard } from "./notifier.js";
+import { extractModelRef, checkModelLiveness, type RunImpl } from "./model-check.js";
 
 export type Severity = "error" | "warn" | "info" | "ok";
 
@@ -298,7 +299,7 @@ export function applyFixes(home: string): FixResult {
   return { applied, skipped, notes };
 }
 
-export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: typeof fetch; delays?: number[] } = {}): Promise<DoctorReport> {
+export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: typeof fetch; delays?: number[]; probeImpl?: RunImpl } = {}): Promise<DoctorReport> {
   /**
    * 体检（只读，不改任何东西）。
    *
@@ -503,6 +504,39 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
       detail: "This comes from the shared validation rules in config.ts (the same ones loadConfig throws on at startup) — the same config would keep the server from starting.",
       fix: issue.fix,
     });
+  }
+
+  // ---- 6c. 模型存活预检（动态证据，不进 collectConfigIssues）----
+  // collectConfigIssues 是同步纯函数、零 I/O（所有 config 写盘路径都消费它），
+  // 所以「模型 id 是否还在线上清单里」这类需要起子进程的判定只能放在这里，
+  // 且解析/探测的**唯一实现**在 model-check.ts（AGENTS.md 硬约束 #6）。
+  for (const [name, raw] of Object.entries(c.profiles ?? {})) {
+    const p = (raw ?? {}) as { executor?: unknown; env?: unknown };
+    const executor = typeof p.executor === "string" ? p.executor : "";
+    const env = (p.env && typeof p.env === "object" && !Array.isArray(p.env)
+      ? (p.env as Record<string, string>)
+      : {});
+    const ref = extractModelRef(executor, env);
+    if (!ref) continue;
+    const bin = c.executors?.[executor]?.bin;
+    if (typeof bin !== "string" || bin === "") continue;
+    const liveness = await checkModelLiveness(ref, { bin, executor, runImpl: opts.probeImpl });
+    if (liveness === "missing") {
+      findings.push({
+        severity: "error",
+        title: `Profile "${name}" points at a model that is not available`,
+        detail: `model "${ref.model}" is not in the output of "${bin} models ${ref.provider}". opencode fails such tasks within a second with a bare "Unexpected server error", so dispatch is refused before it starts.`,
+        // fix 必须是**可复制执行**的命令（仓库惯例：doctor 的每条 finding 都给得出下一步）。
+        // profile set 会校验 JSON 与 model 字段，天然是这里的正确入口。
+        fix: `agent-ex profile set ${name} OPENCODE_CONFIG_CONTENT '{"model":"${ref.provider}/<a-model-that-exists>"}'`,
+      });
+    } else if (liveness === "unknown") {
+      findings.push({
+        severity: "warn",
+        title: `Model liveness for profile "${name}" could not be verified`,
+        detail: `Could not list models via "${bin} models ${ref.provider}" (command failed, timed out, or returned nothing). model "${ref.model}" may or may not still exist; dispatch is not blocked.`,
+      });
+    }
   }
 
   // ---- 7. 历史失败证据（runner 日志）----

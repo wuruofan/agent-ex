@@ -18,6 +18,12 @@ export interface Executor {
    *    runner 会先 `slice(1)` 再 spawn。2026-10-08 opencode e2e 实测踩过这个坑。
    */
   buildCommand(bin: string, extraFlags: string[], resumeSessionId?: string): string[];
+  /**
+   * 可选：构造「列出某 provider 下可用模型」的完整 argv（含 bin 作为第 0 位）。
+   * 不实现 = 该 executor 没有模型列举能力 ⇒ 模型存活探测视为 unsupported（放行）。
+   * 同样**不要**原样传给 spawn(bin, argv)，调用方需 slice(1)。
+   */
+  buildModelListCommand?(bin: string, provider: string): string[];
   /** 解析 CLI stdout 的一行；无法识别返回 null。 */
   parseEvent(line: string): AgentEvent | null;
 }

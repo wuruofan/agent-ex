@@ -456,3 +456,56 @@ describe("doctor --send —— 自检卡的结论里必须带飞书 code", () =>
     expect(r.findings.some((f) => f.title.includes("Self-check card delivered"))).toBe(true);
   });
 });
+
+describe("doctor —— 模型存活预检", () => {
+  function writeOpencodeCfg(model: string, executor = "opencode"): void {
+    writeCfg({
+      executors: {
+        opencode: { bin: "/bin/ls" },
+        claude: { bin: "/bin/ls" },
+      },
+      profiles: {
+        oc: {
+          executor,
+          env: executor === "opencode"
+            ? { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model }) }
+            : { ANTHROPIC_MODEL: model },
+        },
+      },
+      notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: BRAND },
+      defaults: { profile: "oc", timeout_sec: 3600 },
+    });
+    writeFileSync(join(home, ".env"), "FEISHU_WEBHOOK_URL=https://open.feishu.cn/hook/test\n");
+  }
+
+  it("missing → error finding naming the profile and model", async () => {
+    writeOpencodeCfg("prov/Offline");
+    const r = await doctor({ home, probeImpl: async () => ({ code: 0, stdout: "prov/Live\n", stderr: "" }) });
+    const f = r.findings.find((x) => x.title.includes("not available"));
+    expect(f?.severity).toBe("error");
+    expect(f?.title).toContain('"oc"');
+    expect(f?.detail).toContain("prov/Offline");
+  });
+
+  it("unknown → warn finding, never error", async () => {
+    writeOpencodeCfg("prov/Maybe");
+    const r = await doctor({ home, probeImpl: async () => ({ code: 1, stdout: "", stderr: "boom" }) });
+    const f = r.findings.find((x) => x.title.includes("could not be verified"));
+    expect(f?.severity).toBe("warn");
+    expect(r.findings.some((x) => x.severity === "error" && /model/i.test(x.title))).toBe(false);
+  });
+
+  it("ok → no model-related finding", async () => {
+    writeOpencodeCfg("prov/Live");
+    const r = await doctor({ home, probeImpl: async () => ({ code: 0, stdout: "prov/Live\nprov/Other\n", stderr: "" }) });
+    expect(r.findings.some((x) => /model/i.test(x.title))).toBe(false);
+  });
+
+  it("unsupported executor → no model-related finding", async () => {
+    writeOpencodeCfg("claude-sonnet-4", "claude");
+    let called = false;
+    const r = await doctor({ home, probeImpl: async () => { called = true; return { code: 0, stdout: "", stderr: "" }; } });
+    expect(called).toBe(false);
+    expect(r.findings.some((x) => /model/i.test(x.title))).toBe(false);
+  });
+});

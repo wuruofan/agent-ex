@@ -2,9 +2,16 @@ import { randomBytes } from "node:crypto";
 import { statSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { openStore } from "../store.js";
-import { loadConfig } from "../config.js";
+import { loadConfig, type Config } from "../config.js";
 import { logsDir, dbPath } from "../paths.js";
 import { spawnDetachedRunner } from "../spawn-runner.js";
+import {
+  extractModelRef,
+  checkModelLiveness,
+  type ModelLiveness,
+  type ModelRef,
+  type RunImpl,
+} from "../model-check.js";
 
 export interface SubmitArgs {
   prompt: string;
@@ -14,9 +21,42 @@ export interface SubmitArgs {
   timeout_sec?: number;
 }
 
+/** 测试注入点：替换模型存活探测的真实 spawn。生产调用方不传。 */
+export interface SubmitDeps {
+  runImpl?: RunImpl;
+}
+
 export type SubmitResult =
   | { task_id: string; status: string; rounds: number; warning?: string }
   | { error: string };
+
+/**
+ * 派发前的模型存活预检。
+ *
+ * 返回 null = 不适用（非 opencode / 无模型引用 / executor 没有 bin），无需处理。
+ * `missing` 是**唯一可拦截的确定性结论**；`unknown` 只降级为「未能验证」的 warning。
+ */
+async function probeProfileModel(
+  cfg: Config,
+  executor: string,
+  env: Record<string, string>,
+  profileName: string,
+  runImpl: RunImpl | undefined,
+): Promise<{ ref: ModelRef; liveness: ModelLiveness } | null> {
+  const ref = extractModelRef(executor, env);
+  if (!ref) return null;
+  const bin = cfg.executors[executor]?.bin;
+  if (typeof bin !== "string" || bin === "") return null;
+  const liveness = await checkModelLiveness(ref, { bin, executor, runImpl });
+  return { ref, liveness };
+}
+
+function missingModelError(profileName: string, ref: { model: string; provider: string }): string {
+  return (
+    `profile "${profileName}" points at model "${ref.model}", which is not in the available list for provider ` +
+    `"${ref.provider}" (opencode models). The id looks offline — update OPENCODE_CONFIG_CONTENT to a model that still exists before dispatching.`
+  );
+}
 
 /**
  * 等一小段时间（默认 80ms）让异步 spawn 错误浮现。
@@ -58,7 +98,7 @@ function spawnRunnerWithAsyncErrorCapture(
   return { pid: child.pid ?? null, spawnError };
 }
 
-export async function submit(args: SubmitArgs): Promise<SubmitResult> {
+export async function submit(args: SubmitArgs, deps: SubmitDeps = {}): Promise<SubmitResult> {
   if (!args.prompt?.trim()) return { error: "prompt is required" };
   const cfg = loadConfig();
   const store = openStore(dbPath());
@@ -71,6 +111,15 @@ export async function submit(args: SubmitArgs): Promise<SubmitResult> {
       const t = store.getTask(args.continue_of);
       if (!t) return { error: `task ${args.continue_of} not found` };
       if (t.status !== "needs_input") return { error: `task ${args.continue_of} is "${t.status}", expected "needs_input"` };
+
+      // 续跑分支同样要探测：任务行里存了当初的 profile / executor。
+      const tProfile = cfg.profiles[t.profile];
+      const tProbe = tProfile
+        ? await probeProfileModel(cfg, t.executor, tProfile.env ?? {}, t.profile, deps.runImpl)
+        : null;
+      if (tProbe?.liveness === "missing") return { error: missingModelError(t.profile, tProbe.ref) };
+      const tUnverified = tProbe?.liveness === "unknown";
+
       const rounds = t.rounds + 1;
       const ok = store.transition(args.continue_of, ["needs_input"], "running", { rounds });
       if (!ok) return { error: `task ${args.continue_of} state changed concurrently (now "${store.getTask(args.continue_of)?.status}")` };
@@ -79,7 +128,14 @@ export async function submit(args: SubmitArgs): Promise<SubmitResult> {
       if (pid !== null) store.patch(args.continue_of, { pid });
       const err = await spawnError;
       if (err) return { error: `failed to spawn runner for ${args.continue_of}: ${err}` };
-      return { task_id: args.continue_of, status: "running", rounds };
+      return tUnverified
+        ? {
+            task_id: args.continue_of,
+            status: "running",
+            rounds,
+            warning: `model liveness for profile "${t.profile}" could not be verified (model list unavailable); dispatch continues`,
+          }
+        : { task_id: args.continue_of, status: "running", rounds };
     }
 
     // ---- 新任务 ----
@@ -87,6 +143,11 @@ export async function submit(args: SubmitArgs): Promise<SubmitResult> {
     const profile = cfg.profiles[profileName];
     if (!profile) return { error: `unknown profile "${profileName}"` };
     if (!cfg.executors[profile.executor]) return { error: `profile "${profileName}" references unknown executor` };
+
+    // ---- 模型存活预检：missing 直接拒绝派发（不创建任务）；unknown 只告警 ----
+    const probe = await probeProfileModel(cfg, profile.executor, profile.env ?? {}, profileName, deps.runImpl);
+    if (probe?.liveness === "missing") return { error: missingModelError(profileName, probe.ref) };
+    const modelUnverified = probe?.liveness === "unknown";
 
     const timeout_sec = args.timeout_sec ?? cfg.defaults.timeout_sec;
     if (!Number.isInteger(timeout_sec) || timeout_sec <= 0) return { error: "timeout_sec must be a positive integer" };
@@ -101,10 +162,17 @@ export async function submit(args: SubmitArgs): Promise<SubmitResult> {
     // ---- 同目录活跃任务警告：把"同目录写任务禁止并发"从纪律变成被检查的事实 ----
     // 不阻断（合法场景由调度方判断，如刻意接续工作），只随结果带出 warning 让调度方看见。
     const sameDirActive = store.listActive().filter((t) => t.project_path === project_path);
-    const warning = sameDirActive.length
-      ? `project_path "${project_path}" already has ${sameDirActive.length} active task(s), e.g. ` +
-        `${sameDirActive[0].id} (${sameDirActive[0].status}); same-directory tasks share one working tree and can clobber each other`
-      : undefined;
+    const warnings: string[] = [];
+    if (sameDirActive.length) {
+      warnings.push(
+        `project_path "${project_path}" already has ${sameDirActive.length} active task(s), e.g. ` +
+        `${sameDirActive[0].id} (${sameDirActive[0].status}); same-directory tasks share one working tree and can clobber each other`,
+      );
+    }
+    if (modelUnverified) {
+      warnings.push(`model liveness for profile "${profileName}" could not be verified (model list unavailable); dispatch continues`);
+    }
+    const warning = warnings.length ? warnings.join("; ") : undefined;
 
     const id = `task_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
     store.createTask({

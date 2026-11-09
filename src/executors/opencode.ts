@@ -35,6 +35,10 @@ export const opencodeExecutor: Executor = {
       // prompt 由 runner 写入 stdin（opencode 在 stdin 非 TTY 时读取它），不进 argv。
     ];
   },
+  buildModelListCommand(bin, provider) {
+    // `opencode models <provider>`：每行一个完整 `provider/model`，无表头，exit 0。
+    return [bin, "models", provider];
+  },
   parseEvent(line) {
     let j: unknown;
     try { j = JSON.parse(line); } catch { return null; }

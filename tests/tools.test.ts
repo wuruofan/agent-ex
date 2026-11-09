@@ -107,6 +107,99 @@ describe("submit", () => {
     const store = openStore(join(home, "tasks.db"));
     expect(store.listActive().length).toBe(0);
   });
+
+  describe("model liveness pre-check", () => {
+    function writeOpencodeCfg(profileName: string, model: string, executor = "opencode"): void {
+      const profiles: Record<string, unknown> = {
+        [profileName]: {
+          executor,
+          env: executor === "opencode"
+            ? { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model }) }
+            : { ANTHROPIC_MODEL: model },
+        },
+      };
+      writeFileSync(join(home, "config.json"), JSON.stringify({
+        executors: {
+          opencode: { bin: process.execPath },
+          claude: { bin: process.execPath },
+        },
+        profiles,
+        notify: { feishu_webhook_url: "https://example.invalid/hook", dry_run: true },
+        defaults: { profile: profileName, timeout_sec: 60 },
+      }));
+    }
+
+    it("refuses dispatch when the model is confirmed missing (no task created)", async () => {
+      writeOpencodeCfg("oc", "prov/Offline");
+      const countTasks = (): number => {
+        const s = openStore(join(home, "tasks.db"));
+        try { return s.listRecent(200).length; } finally { s.close(); }
+      };
+      const before = countTasks();
+      const r = await submit(
+        { prompt: "hello", project_path: home },
+        { runImpl: async () => ({ code: 0, stdout: "prov/Live\nprov/Other\n", stderr: "" }) },
+      );
+      expect(r).toMatchObject({ error: expect.any(String) });
+      const err = (r as { error: string }).error;
+      expect(err).toContain('profile "oc"');
+      expect(err).toContain("prov/Offline");
+      expect(countTasks()).toBe(before);
+      expect(mockedSpawn).not.toHaveBeenCalled();
+    });
+
+    it("dispatches normally with a warning when liveness is unknown", async () => {
+      writeOpencodeCfg("oc", "prov/Maybe");
+      const r = await submit(
+        { prompt: "hello", project_path: home },
+        { runImpl: async () => ({ code: 1, stdout: "", stderr: "boom" }) },
+      );
+      expect(r).toMatchObject({ status: "queued", rounds: 1 });
+      expect((r as { warning?: string }).warning).toMatch(/liveness.*could not be verified/i);
+      expect(mockedSpawn).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not probe the {model:zen-free} placeholder profile", async () => {
+      writeOpencodeCfg("oc", "{model:zen-free}");
+      const runImpl = vi.fn();
+      const r = await submit({ prompt: "hello", project_path: home }, { runImpl });
+      expect(r).toMatchObject({ status: "queued", rounds: 1 });
+      expect(runImpl).not.toHaveBeenCalled();
+    });
+
+    it("does not probe a claude profile", async () => {
+      writeOpencodeCfg("cc", "claude-sonnet-4", "claude");
+      const runImpl = vi.fn();
+      const r = await submit({ prompt: "hello", project_path: home }, { runImpl });
+      expect(r).toMatchObject({ status: "queued", rounds: 1 });
+      expect(runImpl).not.toHaveBeenCalled();
+    });
+
+    it("refuses a needs_input continuation when the task's model is confirmed missing", async () => {
+      // 续跑分支也必须探测：任务行里存着当初的 profile / executor。
+      writeOpencodeCfg("oc", "prov/Offline");
+      const store = openStore(join(home, "tasks.db"));
+      const id = "task_cont";
+      store.createTask({
+        id, prompt: "p", project_path: home, executor: "opencode", profile: "oc",
+        timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
+        created_at: Math.floor(Date.now() / 1000),
+      });
+      store.transition(id, ["queued"], "needs_input", { question: "q" });
+      const r = await submit(
+        { prompt: "answer", continue_of: id },
+        { runImpl: async () => ({ code: 0, stdout: "prov/Live\n", stderr: "" }) },
+      );
+      expect(r).toMatchObject({ error: expect.any(String) });
+      const err = (r as { error: string }).error;
+      expect(err).toContain('profile "oc"');
+      expect(err).toContain("prov/Offline");
+      // 关键：被拒后任务**不能**被推进成 running（不能只剩半截状态变化）
+      expect(store.getTask(id)?.status).toBe("needs_input");
+      expect(store.getTask(id)?.rounds).toBe(1);
+      expect(mockedSpawn).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("status", () => {
