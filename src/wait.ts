@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -230,6 +231,29 @@ function parseArgs(argv: string[]): ParseResult {
   return { opts };
 }
 
+/**
+ * 原子写文件：先写同目录的临时文件，再 rename 覆盖目标。
+ *
+ * 为什么不能直接 writeFileSync(target, data)：那会先把目标**截断成 0 字节**
+ * 再写入内容 ⇒ 任何在窗口期内读该路径的进程都会读到**空文件或半截内容**。
+ * 默认的报告路径 `$TMPDIR/<task_id>.report.md` 又是**可预测且共享**的
+ * （并发 wait、或不同 home 下的同 task id 都会写同一个路径），
+ * 2026-11-09 实测就撞出过 `expected 2425 to be less than 0`。
+ *
+ * rename 在同一文件系统内是原子的 ⇒ 读者只会看到「旧内容」或「完整新内容」。
+ * 临时文件必须与目标**同目录**（跨设备 rename 会失败），失败时要清掉半截临时文件。
+ */
+export function writeFileAtomic(target: string, data: string): void {
+  const tmpPath = `${target}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    writeFileSync(tmpPath, data);
+    renameSync(tmpPath, target);
+  } catch (e) {
+    rmSync(tmpPath, { force: true });   // 别把半截临时文件留在目录里
+    throw e;
+  }
+}
+
 /** 预算推导：3 次 attempt 各吃满 timeout_sec + 30s/60s 退避 + 120s 收尾余量。
  *  **只看单轮上界**，不按 rounds 缩放（spec C3）。 */
 export function deriveMaxWait(timeoutSec: number): number {
@@ -274,7 +298,9 @@ function emit(
   const reportPath = ctx.opts.reportOut ?? join(tmpdir(), `${row.id}.report.md`);
   // 写失败仍要输出 REPORT_PATH（老脚本行为，保住逐行 diff 一致）⇒ 该路径**可能不存在**：
   // 契约里已写明"读之前先 test -f"，别在这里改成"写失败就不打这一行"。
-  try { writeFileSync(reportPath, text); } catch (e) {
+  try {
+    writeFileAtomic(reportPath, text);
+  } catch (e) {
     note(`agent-ex wait: could not write report: ${(e as Error).message}\n`);
   }
   stdout.push(`LOG_PATH=${row.log_path}`, `REPORT_PATH=${reportPath}`, `REPORT_CHARS=${text.length}`);

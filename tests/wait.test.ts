@@ -4,12 +4,12 @@ import { createRequire } from "node:module";
 // 与 src/store.ts:4-8 / tests/store.test.ts 同一约定，别改成顶层 import
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, readdirSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { TaskReader, sourceSig, runWait, deriveMaxWait } from "../src/wait.js";
+import { TaskReader, sourceSig, runWait, deriveMaxWait, writeFileAtomic } from "../src/wait.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -106,28 +106,98 @@ interface Row {
 const asst = (text: string) =>
   JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
 
-function makeHome(row: Row): string {
+let taskSeq = 0;
+
+/**
+ * 每个用例一个**唯一**的 task id。
+ *
+ * 为什么不能所有用例共用 "task_t1"：默认报告路径是 `$TMPDIR/<task_id>.report.md`
+ * —— 全局、可预测。共用 id ⇒ 同一进程内不同用例、乃至同机并发的多个测试进程
+ * 会写**同一个文件**，内容互相同步覆盖（2026-11-09 实测：并发跑全量套件时
+ * "终态报告文件内容 = 最长 assistant 块" 用例读到别的用例的报告）。
+ */
+function makeHome(row: Row): { home: string; taskId: string } {
   const home = mkdtempSync(join(tmpdir(), "af-wait-run-"));
+  const taskId = `task_t${++taskSeq}_${process.pid}`;
   const db = new DatabaseSync(join(home, "tasks.db"));
   db.exec(SCHEMA);
   const logPath = join(home, "task.jsonl");
   writeFileSync(logPath, (row.log ?? []).join("\n") + "\n");
   db.prepare("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?)").run(
-    "task_t1", row.status, "/tmp/proj", logPath, JSON.stringify(row.files ?? []),
+    taskId, row.status, "/tmp/proj", logPath, JSON.stringify(row.files ?? []),
     row.started_at ?? 1000, row.ended_at ?? null, row.error ?? null,
     row.question ?? null, row.timeout_sec ?? 3600,
   );
   db.close();
-  return home;
+  return { home, taskId };
 }
 
 const OPENCODE_FLAT = (text: string) => JSON.stringify({ type: "text", text });
 const OPENCODE_PART = (text: string) => JSON.stringify({ type: "text", part: { type: "text", text } });
 
+describe("writeFileAtomic —— 报告文件的原子写", () => {
+  /**
+   * 回归：直接 writeFileSync(target, data) 会**先截断成 0 字节**再写，
+   * 而默认报告路径 `$TMPDIR/<task_id>.report.md` 是可预测且共享的 ⇒
+   * 并发的读者会读到空报告（2026-11-09 实测：`expected 2425 to be less than 0`）。
+   *
+   * 判据不是"最后写对了"（两种写法都满足），而是**写的过程中读者看到什么**：
+   * 原子写下读者只可能看到「旧内容」或「完整新内容」，绝不会是空/半截。
+   *
+   * ⚠️ 观察者必须是**另一个进程**：原子写是同步的，同进程里的轮询协程
+   * 根本没机会在写期间跑起来（那样这条断言就是空的）。子进程才是真并发。
+   */
+  it("写过程中读者只会看到旧内容或完整新内容（不会读到空/半截）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aex-atomic-"));
+    const target = join(dir, "task_x.report.md");
+    const OLD = "OLD-CONTENT";
+    const NEW = "N".repeat(2 * 1024 * 1024);
+    writeFileSync(target, OLD);
+
+    // 独立进程观察者：连续 stat 目标文件，把每次的字节数吐回来
+    const observerSrc = `
+      const { statSync } = require("node:fs");
+      const target = process.argv[1];
+      const out = [];
+      const t = Date.now();
+      while (Date.now() - t < 1500) {
+        try { out.push(statSync(target).size); } catch {}
+      }
+      process.stdout.write(JSON.stringify(out));
+    `;
+    const child = spawn(process.execPath, ["-e", observerSrc, target], { stdio: ["ignore", "pipe", "ignore"] });
+    let raw = "";
+    child.stdout.on("data", (d: Buffer) => { raw += d.toString(); });
+    const exited = new Promise<void>((r) => child.on("close", () => r()));
+
+    await new Promise((r) => setTimeout(r, 250));   // 等观察者真的开始轮询
+    for (let i = 0; i < 8; i++) writeFileAtomic(target, NEW);   // 反复制造写入窗口
+    await exited;
+
+    const observed = JSON.parse(raw) as number[];
+    expect(observed.length).toBeGreaterThan(0);      // 观察者确实跑起来了（否则断言是空的）
+    for (const size of observed) {
+      expect([OLD.length, NEW.length]).toContain(size);   // 中间态（0 / 半截）即为回归
+    }
+    expect(readFileSync(target, "utf8")).toBe(NEW);
+    // 临时文件不能留在目录里
+    expect(readdirSync(dir).filter((f) => f.includes(".tmp-"))).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("写失败时不留半截临时文件", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aex-atomic-"));
+    const target = join(dir, "no-such-dir", "x.report.md");   // 父目录不存在 ⇒ 必然失败
+    expect(() => writeFileAtomic(target, "data")).toThrow();
+    expect(readdirSync(dir).filter((f) => f.includes(".tmp-"))).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("runWait 状态与输出", () => {
   it("终态 + 短报告：内联 REPORT_TEXT，不给 REPORT_HEAD", async () => {
-    const home = makeHome({ status: "completed", log: [asst("## 报告\n改完 2 个文件，0 fail。")] });
-    const r = await runWait(["task_t1", "--home", home, "--once"]);
+    const { home, taskId } = makeHome({ status: "completed", log: [asst("## 报告\n改完 2 个文件，0 fail。")] });
+    const r = await runWait([taskId, "--home", home, "--once"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toMatch(/^WAIT=terminal$/m);
     expect(r.stdout).toMatch(/^REPORT_TEXT=.*0 fail/m);
@@ -137,8 +207,8 @@ describe("runWait 状态与输出", () => {
 
   it("终态 + 长报告：REPORT_OUTLINE + REPORT_HEAD，无 REPORT_TEXT；stdout 字节数 < 报告文件字节数", async () => {
     const body = "## 摘要\n结论一\n## 验收\n0 fail\n" + "正文".repeat(800);   // > 1200 字符
-    const home = makeHome({ status: "completed", log: [asst(body)] });
-    const r = await runWait(["task_t1", "--home", home, "--once"]);
+    const { home, taskId } = makeHome({ status: "completed", log: [asst(body)] });
+    const r = await runWait([taskId, "--home", home, "--once"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toMatch(/^REPORT_OUTLINE=摘要 \| 验收/m);
     expect(r.stdout).toMatch(/^REPORT_HEAD=/m);
@@ -151,8 +221,8 @@ describe("runWait 状态与输出", () => {
 
   it("终态报告文件内容 = 最长 assistant 块，且不含 compaction 摘要", async () => {
     const compact = JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "摘要".repeat(3000) }] } });
-    const home = makeHome({ status: "completed", log: [asst("真报告正文"), compact] });
-    const r = await runWait(["task_t1", "--home", home, "--once"]);
+    const { home, taskId } = makeHome({ status: "completed", log: [asst("真报告正文"), compact] });
+    const r = await runWait([taskId, "--home", home, "--once"]);
     const reportPath = /^REPORT_PATH=(.*)$/m.exec(r.stdout)![1];
     expect((await import("node:fs")).readFileSync(reportPath, "utf8")).toBe("真报告正文");
     rmSync(home, { recursive: true, force: true });
@@ -160,8 +230,8 @@ describe("runWait 状态与输出", () => {
 
   it("opencode 两种形状都能取出报告", async () => {
     for (const line of [OPENCODE_FLAT("oc 报告"), OPENCODE_PART("嵌套报告")]) {
-      const home = makeHome({ status: "completed", log: [line] });
-      const r = await runWait(["task_t1", "--home", home, "--once"]);
+      const { home, taskId } = makeHome({ status: "completed", log: [line] });
+      const r = await runWait([taskId, "--home", home, "--once"]);
       expect(r.exitCode).toBe(0);
       expect(r.stdout).toMatch(/^REPORT_TEXT=/m);
       rmSync(home, { recursive: true, force: true });
@@ -169,8 +239,8 @@ describe("runWait 状态与输出", () => {
   });
 
   it("cancelled 是终态：exit 0 + WAIT=terminal（不是 timeout 的 exit 2）", async () => {
-    const home = makeHome({ status: "cancelled", log: [asst("被用户取消")] });
-    const r = await runWait(["task_t1", "--home", home, "--once"]);
+    const { home, taskId } = makeHome({ status: "cancelled", log: [asst("被用户取消")] });
+    const r = await runWait([taskId, "--home", home, "--once"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toMatch(/^STATUS=cancelled$/m);
     expect(r.stdout).toMatch(/^WAIT=terminal$/m);
@@ -178,8 +248,8 @@ describe("runWait 状态与输出", () => {
   });
 
   it("--no-digest：抑制 REPORT_OUTLINE/TEXT/HEAD 三件套，但 REPORT_PATH 与 REPORT_CHARS 仍在", async () => {
-    const home = makeHome({ status: "completed", log: [asst("## 摘要\n改完 2 个文件，0 fail。")] });
-    const r = await runWait(["task_t1", "--home", home, "--once", "--no-digest"]);
+    const { home, taskId } = makeHome({ status: "completed", log: [asst("## 摘要\n改完 2 个文件，0 fail。")] });
+    const r = await runWait([taskId, "--home", home, "--once", "--no-digest"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).not.toMatch(/^REPORT_(OUTLINE|TEXT|HEAD)=/m);
     // 只抑制 digest 内联，不影响报告落盘与字数统计——调用方仍能自己去读文件
@@ -189,8 +259,8 @@ describe("runWait 状态与输出", () => {
   });
 
   it("--verbose：心跳写 stderr 且带 status，不污染 stdout 契约", async () => {
-    const home = makeHome({ status: "running", log: [asst("working")] });
-    const r = await runWait(["task_t1", "--home", home, "--once", "--verbose"]);
+    const { home, taskId } = makeHome({ status: "running", log: [asst("working")] });
+    const r = await runWait([taskId, "--home", home, "--once", "--verbose"]);
     expect(r.stdout).toMatch(/^STATUS=running$/m);
     expect(r.stderr).toMatch(/status=running/);
     expect(r.stdout).not.toMatch(/status=running/);
@@ -198,11 +268,11 @@ describe("runWait 状态与输出", () => {
   });
 
   it("needs_input：exit 5 + QUESTION 带上问句，且 digest 三件套全部缺席；REPORT_PATH 仍输出", async () => {
-    const home = makeHome({
+    const { home, taskId } = makeHome({
       status: "needs_input", question: "timeout_sec 取哪个值？",
       log: [asst("## 进展\n已完成 3 处修复。")],
     });
-    const r = await runWait(["task_t1", "--home", home, "--once"]);
+    const r = await runWait([taskId, "--home", home, "--once"]);
     expect(r.exitCode).toBe(5);
     expect(r.stdout).toMatch(/^WAIT=needs_input$/m);
     expect(r.stdout).toMatch(/^STATUS=needs_input$/m);
@@ -213,24 +283,24 @@ describe("runWait 状态与输出", () => {
   });
 
   it("启动时已是 needs_input：exit 5（不是 2）", async () => {
-    const home = makeHome({ status: "needs_input" });
-    const r = await runWait(["task_t1", "--home", home]);
+    const { home, taskId } = makeHome({ status: "needs_input" });
+    const r = await runWait([taskId, "--home", home]);
     expect(r.exitCode).toBe(5);
     rmSync(home, { recursive: true, force: true });
   });
 
   it("needs_input 要快醒：sleep 只被调用 0 次（首轮就返回）", async () => {
-    const home = makeHome({ status: "needs_input" });
+    const { home, taskId } = makeHome({ status: "needs_input" });
     let sleeps = 0;
-    const r = await runWait(["task_t1", "--home", home], { sleep: async () => { sleeps++; } });
+    const r = await runWait([taskId, "--home", home], { sleep: async () => { sleeps++; } });
     expect(r.exitCode).toBe(5);
     expect(sleeps).toBe(0);
     rmSync(home, { recursive: true, force: true });
   });
 
   it("timeout：exit 2，无 QUESTION、无 LOG_PATH/REPORT_*", async () => {
-    const home = makeHome({ status: "running", log: [asst("working")] });
-    const r = await runWait(["task_t1", "--home", home, "--once"]);
+    const { home, taskId } = makeHome({ status: "running", log: [asst("working")] });
+    const r = await runWait([taskId, "--home", home, "--once"]);
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toMatch(/^WAIT=timeout$/m);
     expect(r.stdout).not.toMatch(/^QUESTION=/m);
@@ -240,16 +310,16 @@ describe("runWait 状态与输出", () => {
   });
 
   it("--once 查非终态：exit 2（不进入轮询）", async () => {
-    const home = makeHome({ status: "running" });
+    const { home, taskId } = makeHome({ status: "running" });
     let sleeps = 0;
-    const r = await runWait(["task_t1", "--home", home, "--once"], { sleep: async () => { sleeps++; } });
+    const r = await runWait([taskId, "--home", home, "--once"], { sleep: async () => { sleeps++; } });
     expect(r.exitCode).toBe(2);
     expect(sleeps).toBe(0);
     rmSync(home, { recursive: true, force: true });
   });
 
   it("not_found：exit 3，仅 3 行且没有 MAX_WAIT_SEC", async () => {
-    const home = makeHome({ status: "running" });
+    const { home, taskId } = makeHome({ status: "running" });
     const r = await runWait(["task_missing", "--home", home, "--once"]);
     expect(r.exitCode).toBe(3);
     expect(r.stdout).toBe("TASK_ID=task_missing\nSTATUS=unknown\nWAIT=not_found\n");
@@ -271,34 +341,34 @@ describe("runWait 状态与输出", () => {
   });
 
   it("预算：timeout_sec=120 ⇒ MAX_WAIT_SEC=570；--max-wait-sec 30 ⇒ 30；0 ⇒ 字面量 never；无 timeout_sec ⇒ 7200", async () => {
-    const a = makeHome({ status: "running", timeout_sec: 120 });
-    expect((await runWait(["task_t1", "--home", a, "--once"])).stdout).toMatch(/^MAX_WAIT_SEC=570$/m);
+    const { home: a, taskId: ta } = makeHome({ status: "running", timeout_sec: 120 });
+    expect((await runWait([ta, "--home", a, "--once"])).stdout).toMatch(/^MAX_WAIT_SEC=570$/m);
     rmSync(a, { recursive: true, force: true });
 
-    const b = makeHome({ status: "running", timeout_sec: 3600 });
-    expect((await runWait(["task_t1", "--home", b, "--once", "--max-wait-sec", "30"])).stdout)
+    const { home: b, taskId: tb } = makeHome({ status: "running", timeout_sec: 3600 });
+    expect((await runWait([tb, "--home", b, "--once", "--max-wait-sec", "30"])).stdout)
       .toMatch(/^MAX_WAIT_SEC=30$/m);
-    expect((await runWait(["task_t1", "--home", b, "--once", "--max-wait-sec", "0"])).stdout)
+    expect((await runWait([tb, "--home", b, "--once", "--max-wait-sec", "0"])).stdout)
       .toMatch(/^MAX_WAIT_SEC=never$/m);
     rmSync(b, { recursive: true, force: true });
 
-    const c = makeHome({ status: "running", timeout_sec: 0 });   // deriveMaxWait 对非正数回退默认
-    expect((await runWait(["task_t1", "--home", c, "--once"])).stdout).toMatch(/^MAX_WAIT_SEC=7200$/m);
+    const { home: c, taskId: tc } = makeHome({ status: "running", timeout_sec: 0 });   // deriveMaxWait 对非正数回退默认
+    expect((await runWait([tc, "--home", c, "--once"])).stdout).toMatch(/^MAX_WAIT_SEC=7200$/m);
     rmSync(c, { recursive: true, force: true });
   });
 
   it("ELAPSED_SEC = (ended_at ?? now) - started_at；终态行含人工等待，不改 DB", async () => {
     const started = 1_000_000;
     const ended = 1_000_905;   // 多轮含人工答复等待：5 + 900 ⇒ 905
-    const home = makeHome({ status: "completed", started_at: started, ended_at: ended });
-    const r = await runWait(["task_t1", "--home", home, "--once"]);
+    const { home, taskId } = makeHome({ status: "completed", started_at: started, ended_at: ended });
+    const r = await runWait([taskId, "--home", home, "--once"]);
     expect(r.stdout).toMatch(/^ELAPSED_SEC=905$/m);
     rmSync(home, { recursive: true, force: true });
   });
 
   it("QUESTION 不改退出码：终态行仍可能带上一轮 question，exit 0 与 WAIT=terminal 不受影响", async () => {
-    const home = makeHome({ status: "completed", question: "上一轮的问题？" });
-    const r = await runWait(["task_t1", "--home", home, "--once"]);
+    const { home, taskId } = makeHome({ status: "completed", question: "上一轮的问题？" });
+    const r = await runWait([taskId, "--home", home, "--once"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toMatch(/^WAIT=terminal$/m);
     expect(r.stdout).toMatch(/^QUESTION=上一轮的问题/m);
@@ -306,8 +376,8 @@ describe("runWait 状态与输出", () => {
   });
 
   it("ERROR 单行化输出在 FILES_CHANGED 之后", async () => {
-    const home = makeHome({ status: "failed", error: "boom\n  with  spaces" });
-    const r = await runWait(["task_t1", "--home", home, "--once"]);
+    const { home, taskId } = makeHome({ status: "failed", error: "boom\n  with  spaces" });
+    const r = await runWait([taskId, "--home", home, "--once"]);
     expect(r.exitCode).toBe(0);
     const lines = r.stdout.trimEnd().split("\n");
     expect(lines.indexOf("ERROR=boom with spaces")).toBeGreaterThan(lines.indexOf("FILES_CHANGED=0"));
@@ -315,8 +385,8 @@ describe("runWait 状态与输出", () => {
   });
 
   it("--report-out 写失败仍输出 REPORT_PATH（该路径可能不存在）", async () => {
-    const home = makeHome({ status: "completed", log: [asst("报告")] });
-    const r = await runWait(["task_t1", "--home", home, "--once",
+    const { home, taskId } = makeHome({ status: "completed", log: [asst("报告")] });
+    const r = await runWait([taskId, "--home", home, "--once",
       "--report-out", join(home, "no-such-dir", "report.md")]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toMatch(/^REPORT_PATH=/m);
@@ -485,31 +555,31 @@ describe("agent-ex wait 子命令（真 CLI）", () => {
   });
 
   it("terminal ⇒ 进程 exit 0", async () => {
-    const home = makeHome({ status: "completed", log: [asst("## 报告\n改完。")] });
-    const r = await runCli(["wait", "task_t1", "--once"], { AGENT_EX_HOME: home });
+    const { home, taskId } = makeHome({ status: "completed", log: [asst("## 报告\n改完。")] });
+    const r = await runCli(["wait", taskId, "--once"], { AGENT_EX_HOME: home });
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/^WAIT=terminal$/m);
     rmSync(home, { recursive: true, force: true });
   });
 
   it("needs_input ⇒ 进程 exit 5", async () => {
-    const home = makeHome({ status: "needs_input", question: "选哪个方案？" });
-    const r = await runCli(["wait", "task_t1", "--once"], { AGENT_EX_HOME: home });
+    const { home, taskId } = makeHome({ status: "needs_input", question: "选哪个方案？" });
+    const r = await runCli(["wait", taskId, "--once"], { AGENT_EX_HOME: home });
     expect(r.code).toBe(5);
     expect(r.out).toMatch(/^WAIT=needs_input$/m);
     rmSync(home, { recursive: true, force: true });
   });
 
   it("timeout ⇒ 进程 exit 2", async () => {
-    const home = makeHome({ status: "running" });
-    const r = await runCli(["wait", "task_t1", "--once"], { AGENT_EX_HOME: home });
+    const { home, taskId } = makeHome({ status: "running" });
+    const r = await runCli(["wait", taskId, "--once"], { AGENT_EX_HOME: home });
     expect(r.code).toBe(2);
     expect(r.out).toMatch(/^WAIT=timeout$/m);
     rmSync(home, { recursive: true, force: true });
   });
 
   it("not_found ⇒ 进程 exit 3", async () => {
-    const home = makeHome({ status: "running" });
+    const { home, taskId } = makeHome({ status: "running" });
     const r = await runCli(["wait", "task_missing", "--once"], { AGENT_EX_HOME: home });
     expect(r.code).toBe(3);
     expect(r.out).toBe("TASK_ID=task_missing\nSTATUS=unknown\nWAIT=not_found\n");
