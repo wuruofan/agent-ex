@@ -31,7 +31,7 @@ prompt 怎么写才自包含、同一目录的写任务为什么禁止并发、`
 - `package.json:14-18` 的 `files` 白名单只有 `dist` / `config.example.json` / `README.md`。
 - `tar -tzf agent-ex-mcp-0.3.1.tgz` 确认：已发布的包里**没有任何 `skills/` 目录**。
 - `skills/agent-ex-dispatch/SKILL.md` = 85,549 B；整目录 135,721 B（`wc -c`）。
-  ⇒ 打进包后 tarball 约 +40 KB，可忽略。
+  ⇒ 打进包后 tarball 约 **+60 KB（gzip 后 63,532 B）**，相对当前 0.3.1 包的 126,477 B 约 +50%。可接受，但**不是"可忽略"**——README 与发布说明里要写明包体积涨了。
 
 ### 2.2 skill 对 CLI 的硬依赖
 
@@ -42,19 +42,19 @@ prompt 怎么写才自包含、同一目录的写任务为什么禁止并发、`
 
 ### 2.3 宿主怎么发现 skill（本机实测，纠正了一个想当然）
 
-逐个 `ls -la` 本机用户级 skills 目录：
+逐个 `ls -la` + `find -type l -exec readlink` 本机用户级 skills 目录（精确计数，非概括）：
 
-| 宿主目录 | 内容 | 说明 |
+| 宿主目录 | 软链数 | 指向形态（精确） |
 | :--- | :--- | :--- |
-| `~/.agents/skills` | 实体 skill + 软链 | **真源**（Agent Skills 规范的共享目录） |
-| `~/.claude/skills` | 4 条软链 → `../../.agents/skills/*` | Claude Code 靠**软链**看共享目录 |
-| `~/.trae-cn/skills` | 9 条软链 → `../../.agents/skills/*` | Trae 同上 |
-| `~/.workbuddy/skills` | 11 条软链 | 来源分两类，**别混为一谈**（见 §2.4.1）：10-13 那条是 `install-skill.sh` 装的，10-21 那批才是 hook 桥接的 |
-| `~/.codex/skills` | 只有 `.system/`，0 条 skill | 未桥接 |
-| `~/.config/opencode/skills` | 空 | 未桥接 |
+| `~/.agents/skills` | 2 | `agent-ex-dispatch` → **本仓库**（绝对）；`galaxy-commit` → `~/.oh-my-galaxy/`（绝对，第三方） |
+| `~/.claude/skills` | 4 | **3 条相对** `../../.agents/skills/<name>`（humanizer-zh / mmx-cli / progressing）；1 条绝对 → oh-my-galaxy |
+| `~/.trae-cn/skills` | 9 | **6 条相对** `../../.agents/skills/<name>`；`agent-ex-dispatch` → **本仓库**（绝对）；1 条绝对 → oh-my-galaxy；1 条绝对 → 另一仓库 |
+| `~/.workbuddy/skills` | 11 | **7 条绝对** → `~/.agents/skills/<name>/`（hook 桥接）；`agent-ex-dispatch` → **本仓库**（绝对）；2 条绝对 → 第三方/另一仓库 |
+| `~/.codex/skills` | 0 | 只有 `.system/` |
+| `~/.config/opencode/skills` | 0 | 空 |
 
 ⇒ **纠正**：「`~/.agents/skills` 是共享目录，装进去所有宿主都能读到」是**错的**。
-   实测宿主是通过**每家一条软链**指向 `~/.agents/skills` 的。
+   实测宿主是通过**每家一条软链**指向 `~/.agents/skills` 的（相对或绝对两种形态都有）。
    ⇒ canonical 必须落在 `~/.agents/skills`，**且每家宿主都要一条链**——宿主表是必需品，不是可选项。
 
 ### 2.4 三类软链的来源归因，以及 WorkBuddy 的自动桥接 hook
@@ -68,8 +68,10 @@ prompt 怎么写才自包含、同一目录的写任务为什么禁止并发、`
 | `~/.agents/skills/agent-ex-dispatch` | 绝对路径 → **本仓库** | 10-13 09:50 | `scripts/install-skill.sh` |
 | `~/.workbuddy/skills/agent-ex-dispatch` | 绝对路径 → **本仓库** | **10-13 09:50** | **同上（同一秒、同一次运行）** |
 | `~/.trae-cn/skills/agent-ex-dispatch` | 绝对路径 → 本仓库 | 10-13 09:50 | 同上 |
-| `~/.claude/skills/*`（4 条） | **相对** `../../.agents/skills/*` | 9/4 ~ 10/29 | `npx skills` CLI |
-| `~/.workbuddy/skills/*`（10-21 那批 6 条） | 绝对路径 → `~/.agents/skills/*` | 10-21 16:50 | **WorkBuddy 桥接 hook** |
+| `~/.claude/skills/*`（**3 条**：humanizer-zh / mmx-cli / progressing） | **相对** `../../.agents/skills/*` | 9/4 ~ 10/29 | `npx skills` CLI |
+| `~/.trae-cn/skills/*`（**6 条**相对） | 相对 `../../.agents/skills/*` | 3/12 ~ 10/29 | `npx skills` CLI |
+| `~/.workbuddy/skills/*`（**7 条**：humanizer-zh / mcp-builder / mmx-cli / progressing / skill-creator / skill-vetter / template-skill / web-fetch-as-markdown 中的 7 个） | 绝对路径 → `~/.agents/skills/<name>/` | 10-21 16:50 ~ 11-06 17:02 | **WorkBuddy 桥接 hook** |
+| `~/.claude/skills/galaxy-commit`、`~/.trae-cn/skills/galaxy-commit`、`~/.workbuddy/skills/galaxy-commit`、`~/.workbuddy/skills/blog-voice` | 绝对路径 → `~/.oh-my-galaxy/` 等第三方位置 | — | 与本功能无关 |
 
 ⚠️ **别把 `~/.workbuddy/skills/agent-ex-dispatch` 当成 hook 的产物**——它是 `install-skill.sh` 装的
 （与 `~/.agents/skills` 那条同一次运行），不是桥接出来的。三条 `agent-ex-dispatch` 链同源于 10-13 的开发者路线。
@@ -125,7 +127,13 @@ WorkBuddy 侧永远没有链。⇒ canonical 路径**固定**为 `~/.agents/skil
 ### 2.5 既有文档的过期与矛盾（本次一并修）
 
 - `README.md:122` 说 skill 含 `scripts/` —— 目录里早没了，只剩 `SKILL.md` + 2 个 `references/`。
-- `README.md:175` 说 Trae「按 CLI 提示选」，与 `README.md:143-144` 说 CLI 没有 Trae 路径**自相矛盾**。
+- `README.md:122` 说 skill 含 `scripts/` —— 目录里早没了，只剩 `SKILL.md` + 2 个 `references/`。
+- ⚠️ **`README.md:175` 与 `:143-144` 并不矛盾**（原先这里写成"自相矛盾"，是误归因，已更正）：
+  `:143-144` 全文只讲 **WorkBuddy**（`skills` CLI 的宿主表里最接近的是 `codebuddy` → `~/.codebuddy/skills`），
+  `:175` 讲的是 **Trae**（"路线 A 则去掉 `-g`，按 CLI 提示选 Trae"）。两者讲的是不同宿主，没有对照关系。
+  ⇒ 真正待核实的是另一件事：**`skills` CLI 是否真有 Trae 选项、它会装到哪个路径**——本仓库没运行过该 CLI，无法确认。
+  ⇒ README 要改的不是"消除矛盾"，而是**把 Trae 的安装路径交给 `agent-ex skill install` 去探测**（`~/.trae-cn/skills`，
+  路径随安装版本变），并删掉对第三方 CLI 行为的转述。
 
 ### 2.6 独立评审的结论
 
@@ -143,13 +151,13 @@ WorkBuddy 侧永远没有链。⇒ canonical 路径**固定**为 `~/.agents/skil
 
 | # | 决策 |
 | :--- | :--- |
-| D1 | **skill 打进 npm 包**：`package.json` 的 `files` 加 `"skills/agent-ex-dispatch"`（**不写 `"skills"`**，否则 `skills/.DS_Store` 会被打进包）。分发以包内那份为准。 |
+| D1 | **skill 打进 npm 包**：`package.json` 的 `files` 加 `"skills/agent-ex-dispatch"`——**只发这一个 skill**，避免 `skills/` 下未来新增的内容被动进包。（⚠️ 原先的理由"不写 `skills` 是为了避开 `.DS_Store`"**不成立**：实测 `files:["skills"]` 时 npm 也不会打包 `.DS_Store`，`.gitignore`/npm 默认排除。）分发以包内那份为准。 |
 | D2 | 新增 `agent-ex skill install` / `remove` / `status` 三个子命令。 |
 | D3 | **不提供 `update`**。`install` 幂等即刷新；开发者路线是软链、天然实时。 |
 | D4 | **用户路线=拷贝，开发者路线=软链**。两条路线显式分开，不追求"一份实现覆盖两边"。 |
 | D5 | **canonical + 宿主链接**两层：canonical **固定**在 `~/.agents/skills/agent-ex-dispatch`（不开放覆盖——自动桥接只认这个源，§2.4.3 约束 A），每个宿主一条软链指向它。宿主表 `SKILL_HOSTS` 是唯一真相源。 |
 | D6 | **init 只打印 `agent-ex skill install`，不执行安装**。 |
-| D7 | **init 收尾信息精简**（33 行 → 14 行），且 `AGENT_EX_HOME` 写进 MCP 片段的 `env` 字段、不再单独成步。 |
+| D7 | **init 收尾信息精简**（实测 39 行 → 24 行；非默认 home 26 行）。`AGENT_EX_HOME` **只在非默认路径时**保留 export 那一步（默认路径整步省略；同时写进 MCP 片段的 `env` 字段，**但那不能替代 export**——它只影响 MCP client 拉起的 server，用户手敲的 CLI 命令仍需要这个变量）。 |
 | D8 | **doctor 加 skill 段**，但**不塞进 `collectConfigIssues()`**——那是 `config.json` 的真相源，skill 状态不是 config。新建 `collectSkillIssues()` 与之平行。 |
 | D9 | **不引入状态文件**。装了什么、能删什么、有没有过期，全部从文件系统推导（`lstat` + `readlink` + 内容 hash）。多一份状态文件就是多一份会漂移的真相。 |
 
@@ -245,7 +253,7 @@ agent-ex skill status
     否则"从开发者路线切回用户路线"之后永远卸不干净（§2.4.3 约束 B）。
     唯一的例外是它指向 canonical 本身时，删 canonical 与删链接要**按顺序**做，别把 canonical 删成断链。
   - 是**实体目录** → **拒绝删**，提示用户手工处理（分不清是用户自己的还是被改过的）
-- `ln` 陷阱（`README.md:149-150`）：`ln -s` 对已存在的目录目标不报错，会把软链塞进目录里。
+- `ln` 陷阱（`README.md:150-151`）：`ln -s` 对已存在的目录目标不报错，会把软链塞进目录里。
   ⇒ 一律用 `fs.symlinkSync` + 前置 `lstat`，**绝不**用 shell `ln`。
 
 ### 4.5 status 的输出
@@ -281,15 +289,18 @@ Skill: agent-ex-dispatch
 | 文件 | 职责 |
 | :--- | :--- |
 | `src/skill.ts`（新） | `SKILL_HOSTS` 宿主表 + `collectSkillIssues()` + `inspect/install/remove` 纯逻辑 + 内容 hash。**宿主表与安装状态的唯一真相源** |
-| `src/cli.ts` | `runSkill(args)`：`install` / `remove` / `status` 的 CLI 入口与文案 |
-| `src/server.ts` | `USAGE` 加一行；新增 `skill` 分支，**分支内动态 import** `src/skill.js`（AGENTS.md 硬约束 7） |
+| `src/skill-cmd.ts`（新） | `runSkill(args)`：`install` / `remove` / `status` 的 CLI 入口与文案。**独立模块，不放 `cli.ts`**——`cli.ts:8` 静态 import `./doctor.js` → `model-check.js` → `executors/types.js` → claude/opencode/fake，为一个纯文件操作拖进整套 executor 依赖（不违反硬约束 7 的字面禁令，但违反"每个分支都要用且便宜"的精神） |
+| `src/server.ts` | `USAGE` 加一行；新增 `skill` 分支，**分支内动态 import** `./skill-cmd.js`（AGENTS.md 硬约束 7） |
 | `src/doctor.ts` | 消费 `collectSkillIssues()`，加 skill 段（info 级） |
 | `src/init.ts` | `nextSteps()` 精简；skill 段换成 `agent-ex skill install` |
 | `scripts/install-skill.sh` | 改成薄壳，调 TS 实现（开发者软链路线），避免 bash/TS 两份实现漂移 |
 | `package.json` | `files` 加 `"skills/agent-ex-dispatch"` |
+| `skills/agent-ex-dispatch/SKILL.md` | **安装段（:9-11）要改**：它现在指向 `npx skills add` 与"README 的路线 A"，而路线 A 已降级为附录 |
+| `AGENTS.md` | **:43**「skills 走 GitHub 分发，**不进 npm 包**」与 D1 正面冲突，必须改；**:108** 的 files 表也要同步 |
+| `README.md` | 112-180 重写两条路线；修 §2.5 的过期处；命令表；**:726** 与 **729-731** 两处 files/分发说明 |
 | `tests/skill.test.ts`（新） | 宿主表 / 幂等 / 实体目录中止 / 拷贝 vs 软链 / hash 过期判定 |
+| `tests/doctor.test.ts` | 现有用例大量用 `doctor({ home: tmp })`；skill 状态在**用户 home** 下，必须让两者可分开注入，否则测试会去读真实的 `~/.agents/skills` |
 | `tests/init.test.ts` | `nextSteps` 断言跟着改 |
-| `README.md` | 112-180 重写两条路线；修 §2.5 的两处过期/矛盾；命令表；729 改写 |
 
 ### 宿主表（D5 的落地）
 
@@ -307,24 +318,31 @@ export interface SkillHost {
 
 ## 6. init 收尾信息精简（D7）
 
-现在 `nextSteps()`（`src/init.ts:367-400`）是 5 步 33 行。逐条处理：
+现在 `nextSteps()`（`src/init.ts:367-400`）实测渲染 **39 行**（非空 31）——原写"33 行"是估计值，以实测为准。逐条处理：
 
 | 现在 | 处理 | 理由 |
 | :--- | :--- | :--- |
-| ① `export AGENT_EX_HOME=...` 整步 | 删掉这步 | 默认路径就是 `~/.agent-ex`，本来就不用设。**非默认路径时**把它写进 MCP 片段的 `env` 字段（`mcpServerSnippet` 现在只输出 `command`+`args`）——数据目录从此是片段里的一行，不是一个步骤 |
+| ① `export AGENT_EX_HOME=...` 整步 | **改成条件保留**：默认路径（`~/.agent-ex`）整步省略；**非默认路径必须留** | ⚠️ 写成"直接删掉"是错的：MCP 片段的 `env` 只影响 MCP client 拉起的 server 进程；用户随后手敲的 `agent-ex config set …` / `agent-ex doctor --send` 仍在**没有**该变量的 shell 里 ⇒ 会读写默认 `~/.agent-ex`。"一步 export"不能换成"静默打错目录" |
 | ② MCP 片段 + "Absolute paths matter…" 三行散文 | 压成一行 | "Use absolute paths — MCP clients don't inherit your shell PATH." 必须留（挡最常见的启动失败），但三行散文是散文 |
 | ③ skill 段（npx 命令 + clone 提示 + `find ~ -maxdepth 4`） | 换成一行 `agent-ex skill install` | `find` 那条是**排障**命令不是安装步骤 → 挪进 README |
 | ④ dry-run 段 | 保留两条命令，删掉 "body must not contain the product name…" | 那是 `doctor --send` 的内部细节，不是 init 该讲的 |
 | ⑤ "Optional: edit config.json…" | 压成一行尾巴 | |
 
-改完 14 行：
+改完（默认路径，**24 行**；非默认路径多出 export 一行，**26 行**）：
 
 ```
 Next steps:
 
 1) Register the MCP server in your client (Trae: TRAE SOLO CN/User/mcp.json,
    WorkBuddy: ~/.workbuddy/mcp.json):
-     { "mcpServers": { "agent-ex": { "command": "/abs/node", "args": ["/abs/dist/server.js"] } } }
+     {
+       "mcpServers": {
+         "agent-ex": {
+           "command": "/abs/node",
+           "args": ["/abs/dist/server.js"]
+         }
+       }
+     }
    Use absolute paths — MCP clients don't inherit your shell PATH.
 
 2) Install the dispatch skill (recommended):
@@ -337,10 +355,15 @@ Next steps:
 Tune later: agent-ex config set <key> <value> | agent-ex profile set <profile> <KEY> <value>
 ```
 
+⚠️ **行数是算出来的，不是估的**：`mcpServerSnippet` 用 `JSON.stringify(…, null, 2)` ⇒ 片段展开 **10 行**；
+模板其余部分 14 行 ⇒ 合计 24 行（非默认路径 +2 行 export）。⇒ 断言写 **"默认路径 ≤ 24 行 / 非默认 ≤ 26 行"**，
+不要写成 "≤ 16"（原写的 14 行是**把片段画成单行**数出来的，与实现不符）。
+
 init 交互过程中的其它输出（CLI 探测、toolchain 提示、备份、校验）**全部保留**——那些是"正在发生的事"。
 
 ⚠️ init 的用户可见输出**必须全英文**（`tests/init.test.ts:217-232` 会扫中文字符）。
-⚠️ 连带：`tests/init.test.ts:397-408` 的断言要跟着改。
+⚠️ 连带：`tests/init.test.ts:397-408` 的断言要跟着改；
+     `mcpServerSnippet` 的签名要显式改成 `mcpServerSnippet(serverEntry, home?)`（`home` 可注入 ⇒ 测试不依赖开发机的 `homedir()`）。
 
 ## 7. 风险与取舍
 
