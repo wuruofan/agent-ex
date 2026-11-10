@@ -43,7 +43,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** dispatch skill 的名字（= canonical 目录名 = 宿主目录里的条目名）。 */
@@ -271,6 +271,8 @@ export interface CanonicalInfo {
   updateAvailable?: boolean;
   /** managed-copy 但当前 hash != marker.sha ⇒ 用户手改过。 */
   modified?: boolean;
+  /** 是软链、但**指向的目标已经不存在** ⇒ 断链（读不到内容）。 */
+  broken?: boolean;
 }
 
 function realOrSelf(p: string): string {
@@ -292,15 +294,43 @@ export function pointsAtCanonical(target: string | undefined, canonical: string)
   return realOrSelf(target) === realOrSelf(canonical);
 }
 
+/**
+ * 路径的"真实形式"：把**最近的已存在祖先**做 realpath，剩下的段原样拼上。
+ *
+ * 为什么不用 `realpathSync`：路径**不存在**时 realpath 会失败，
+ * 而 realpath 的兜底（`resolve`）是**字面**的 ⇒ macOS 上 `/var/...` 与 `/private/var/...`
+ * 会当成两个不同的地方，拦截就被绕过了（2026-11-10 第四轮评审 P2-a）。
+ * 这个函数对不存在的路径也能给出与已存在祖先一致的形式。
+ */
+function realish(p: string): string {
+  const abs = resolve(p);
+  // ⚠️ tail 要**含 basename(abs)**：只拼父目录的话，"在某目录里"会被算成"就是那个目录"。
+  const tail: string[] = [basename(abs)];
+  let dir = dirname(abs);
+  while (!existsSync(dir)) {
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    tail.unshift(basename(dir));
+    dir = parent;
+  }
+  let base = dir;
+  try {
+    base = realpathSync(dir);
+  } catch {
+    /* 祖先也不存在 ⇒ 用字面 */
+  }
+  return join(base, ...tail);
+}
+
 /** 路径 a 是不是就是路径 b（按 realpath 比，能识别 `/tmp` vs `/private/tmp` 这种别名）？ */
 function samePath(a: string, b: string): boolean {
   return realOrSelf(a) === realOrSelf(b);
 }
 
-/** a 在 b 里面吗（含 a === b）？ */
+/** a 在 b 里面吗（含 a === b）？两边都按"最近存在祖先"的真实形式比较。 */
 function isInside(a: string, b: string): boolean {
-  const x = resolve(a);
-  const y = resolve(b);
+  const x = realish(a);
+  const y = realish(b);
   return x === y || x.startsWith(y.endsWith(sep) ? y : y + sep);
 }
 
@@ -340,11 +370,10 @@ function pathOccupied(p: string): boolean {
  *     skill 目录，`--target <canonical>/references` 会在**源码树**里建出软链）。
  */
 function linkPathInsideCanonical(linkPath: string, canonical: string): boolean {
+  // 按路径（含别名归一）：链接位置落在 canonical 路径里面
   if (isInside(linkPath, canonical)) return true;
   // canonical 是软链时（开发者路线），它的**真实位置**也要算：
   // `--target <canonical>/references` 软链解析后就是**源码树**里的目录。
-  // ⚠️ 两边都要 realpath 归一（macOS 上 /var 与 /private/var 是同一条路），
-  // 否则"同一个目录"会被当成两个。
   const linkDir = realOrSelf(dirname(linkPath));
   const canonReal = realOrSelf(canonical);
   return isInside(linkDir, canonReal);
@@ -366,17 +395,22 @@ export function sourceWouldSelfLink(source: string, canonical: string): boolean 
 /**
  * source 会不会让 canonical 变成一条**指向自己的断链**？返回原因（null = 没问题）。
  *
- * ⚠️ 不能简单地比 realpath：canonical 是**软链**时（开发者路线）realpath(canonical)
- * 正好就是 source —— 那正是要装的形态，不能误伤。
- * 所以分两种：
- *   - canonical 是软链 ⇒ 只有「source 就是 canonical 这条路径」才危险；
- *   - canonical 是实体目录 ⇒ source 等于它（哪怕是别名路径）或在它里面，都危险。
+ * 判据是**真实位置**的包含关系，不是字面路径（2026-11-10 第四轮评审 P1）：
+ * 软链的字面 target 会被原样写进 canonical ⇒ 只要 source 的**真实位置**落在
+ * canonical 里面，换位后 canonical 就指向自己的子树 ⇒ ELOOP、路径不可读。
+ *
+ * ⚠️ 一条例外：**canonical 自己是软链、且 source 就是它指向的那个目录** ⇒ 放行
+ * （那正是开发者路线：canonical → 仓库里的 skill 目录，换成指向同一处的链是空操作）。
  */
 export function selfLinkReason(source: string, canonical: string): string | null {
   if (resolve(source) === resolve(canonical)) return "is the canonical location itself";
-  if (isSymlinkPath(canonical)) return null;
-  if (samePath(source, canonical)) return "is the canonical location itself";
-  if (isInside(source, canonical)) return "is inside the canonical location";
+  const canonReal = realOrSelf(canonical);
+  const sourceReal = realOrSelf(source);
+  if (sourceReal === canonReal) {
+    // source 就是 canonical 现在指向的地方
+    return isSymlinkPath(canonical) ? null : "is the canonical location itself";
+  }
+  if (isInside(sourceReal, canonReal)) return "is inside the canonical location";
   return null;
 }
 
@@ -402,7 +436,9 @@ export function inspectCanonical(canonical: string, source: string): CanonicalIn
       target = canonical;
     }
     const state: CanonicalState = target === realOrSelf(source) ? "link-to-source" : "link-elsewhere";
-    return { path: canonical, state, target };
+    // ⚠️ 断链要单独标出来：canonical 是软链但目标没了 ⇒ 那个路径**读不到内容**
+    // （第三轮评审附带项：status 只打印 `[link -> …]`，用户看不出它已经断了）。
+    return { path: canonical, state, target, broken: !existsSync(target) };
   }
 
   if (!st.isDirectory()) {
@@ -1264,7 +1300,32 @@ export async function removeSkill(opts: RemoveOptions): Promise<SkillActionResul
         errors.push(`${canonical}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+    // ---- 顺手清掉自己留下的临时物 ----
+    // 安装过程用 `.${SKILL_NAME}.tmp.<pid>` / `.old.<pid>` 做原子替换；
+    // 进程被 kill 时它们会留在 canonical 的父目录里。
+    // ⇒ "卸载干净"就得把它们也清掉（它们是 agent-ex 自己的产物，不是用户数据）。
+    for (const leftover of listLeftovers(dirname(canonical))) {
+      try {
+        rmSync(leftover, { recursive: true, force: true });
+        lines.push(`removed  ${leftover} (leftover from an interrupted install)`);
+      } catch (e) {
+        errors.push(`${leftover}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
   }
 
   return { ok: errors.length === 0 && skipped.length === 0, lines, errors, skipped };
+}
+
+/** canonical 父目录里 agent-ex 自己留下的临时物（`.agent-ex-dispatch.tmp.*` / `.old.*`）。 */
+function listLeftovers(parent: string): string[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(parent);
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((n) => n.startsWith(`.${SKILL_NAME}.tmp.`) || n.startsWith(`.${SKILL_NAME}.old.`))
+    .map((n) => join(parent, n));
 }

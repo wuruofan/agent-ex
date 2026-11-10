@@ -158,3 +158,56 @@ describe("agent-ex skill（CLI 路径）", () => {
     }
   });
 });
+
+describe("scripts/install-skill.sh（开发者路线入口）", () => {
+  const script = join(repoRoot, "scripts", "install-skill.sh");
+
+  async function runScript(
+    home: string,
+    env: Record<string, string>,
+  ): Promise<{ out: string; code: number }> {
+    try {
+      const { stdout, stderr } = await execFileAsync("/bin/bash", [script], {
+        env: { ...process.env, ...env, HOME: home },
+        encoding: "utf8",
+        timeout: 60_000,
+        cwd: home,
+      });
+      return { out: stdout + stderr, code: 0 };
+    } catch (e) {
+      const err = e as { stdout?: string; stderr?: string; code?: number };
+      return { out: `${err.stdout ?? ""}${err.stderr ?? ""}`, code: err.code ?? -1 };
+    }
+  }
+
+  /**
+   * 回归（第四轮评审 P2-b）：相对路径展开跑在空段判断**之前** ⇒
+   * env 里的空段被展开成 "$HOME/" ⇒ 在用户 HOME 根下建出一条 agent-ex-dispatch 链。
+   */
+  it("env 里的空段 ⇒ 报错，不在 HOME 根建出链接", async () => {
+    const home = mkdtempSync(join(tmpdir(), "aex-skill-sh-"));
+    try {
+      const r = await runScript(home, { AGENT_EX_SKILL_TARGETS: ":" });
+      expect(r.code).toBe(1);
+      expect(r.out).toMatch(/no target directory/);
+      expect(existsSync(join(home, "agent-ex-dispatch"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("相对 target 按 $HOME 展开（不在当前目录建目录）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "aex-skill-sh-"));
+    const work = mkdtempSync(join(tmpdir(), "aex-skill-sh-cwd-"));
+    try {
+      const r = await runScript(home, { AGENT_EX_SKILL_TARGETS: "alpha:beta" });
+      expect(r.code).toBe(0);
+      // 建在 $HOME 下
+      expect(existsSync(join(home, "alpha", "agent-ex-dispatch"))).toBe(true);
+      expect(existsSync(join(home, "beta", "agent-ex-dispatch"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+});

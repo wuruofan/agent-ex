@@ -282,6 +282,12 @@ canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖�
 `--target` 早有同类检查，`--source` 当时漏了 ⇒ 现在两边对称：
 `source` 等于 canonical（哪怕是别名路径）或在 canonical 里面，一律拒绝。
 
+⚠️ **「在 canonical 里面」按真实位置判，不按字面路径**（2026-11-10 第四轮评审 P1）：
+软链的字面 target 会被**原样**写进 canonical ⇒ 只要 source 的**真实位置**落在 canonical 里面
+（哪怕路径写的是 `<canonical>/sub`，哪怕 source 本身是个指向 canonical 内部的软链），
+换位后 canonical 就指向自己的子树 ⇒ ELOOP、路径不可读，而命令 exit 0。
+唯一放行的是**开发者路线**：canonical 自己是软链、且 source 就是它指向的那个目录。
+
 ⚠️ **`--target` 也不能指进 canonical 里面**（2026-11-10 第三轮评审 P2-a）：
 - copy 模式 ⇒ 在装好的 skill 目录里建出指向自己祖先的环（`hashDir` 跳过软链 ⇒ 告警看不见）；
 - link 模式 + canonical 是软链 ⇒ 软链落进**源码树**（仓库里凭空多出一个文件）。
@@ -301,8 +307,9 @@ canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖�
 
 **已知限制**：临时名带 pid（并发隔离的代价）⇒ 进程被 SIGKILL 时，
 `.tmp.<pid>` / `.old.<pid>` 会残留，后续进程清不掉它们（内容无害：新内容已就位，
-残留只是一份多余备份或半截临时副本）。这条没有自动清理 —— 按 mtime 清陈旧残留
-会误伤并发中的另一个安装，不值得。
+残留只是一份多余备份或半截临时副本）。
+`agent-ex skill remove` 会顺手清掉这些残留（它们是 agent-ex 自己的产物，不是用户数据）；
+`install` 不自动清 —— 按 mtime 清陈旧残留会误伤并发中的另一个安装，不值得。
 
 **宿主链接一律指向 canonical**（不是指向 source）：canonical 是唯一真源，`remove` 才能干净地删干净。
 

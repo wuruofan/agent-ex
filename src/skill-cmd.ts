@@ -136,7 +136,10 @@ function printStatus(userHome: string, source?: string): number {
           ? "[present, not installed by agent-ex]"
           : c.state === "foreign-dir"
             ? ansi.yellow("[not managed by agent-ex]")
-            : `[link -> ${c.target}]`;
+            : c.broken
+              ? // ⚠️ 断链：软链还在，但目标没了 ⇒ 这个路径**读不到内容**
+                ansi.yellow(`[broken link -> ${c.target}]`)
+              : `[link -> ${c.target}]`;
   let extra = "";
   if (c.updateAvailable) extra = ansi.yellow(`  UPDATE AVAILABLE (${c.marker?.version} -> ${st.bundled.version})`);
   else if (c.state === "managed-copy") extra = ansi.dim("  up-to-date");

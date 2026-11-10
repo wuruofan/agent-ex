@@ -17,6 +17,7 @@ import {
   readlinkSync,
   chmodSync,
   readdirSync,
+  realpathSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -426,6 +427,49 @@ describe("install —— 拷贝路线", () => {
     expect(lstatSync(canonicalPath(userHome)).isSymbolicLink()).toBe(true);
     expect(readlinkSync(canonicalPath(userHome))).toBe(source);
   });
+
+  /**
+   * 回归（第四轮评审 P1）：source 的**真实位置**落在 canonical 里面 ⇒ 拒绝。
+   * 复现 A：canonical 是软链（开发者路线），source 走 canonical 的子目录
+   * → 换位后 canonical 指向自己的子树 ⇒ ELOOP、路径不可读，而命令 exit 0。
+   */
+  it("source 在 canonical 里面（经 canonical 的软链）⇒ 拒绝", async () => {
+    const repoSkill = makeSource(join(root, "repo-skill"));
+    mkdirSync(join(repoSkill, "sub"), { recursive: true });
+    writeFileSync(join(repoSkill, "sub", "SKILL.md"), "---\nname: x\n---\n");
+    mkdirSync(join(userHome, ".agents/skills"), { recursive: true });
+    symlinkSync(repoSkill, canonicalPath(userHome), "dir");
+
+    const { confirm } = recorder();
+    const r = await installSkill({
+      userHome,
+      source: join(canonicalPath(userHome), "sub"),
+      mode: "link",
+      confirm,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/inside the canonical location/);
+    // canonical 没被换成自指环
+    expect(readlinkSync(canonicalPath(userHome))).toBe(repoSkill);
+  });
+
+  /**
+   * 回归（第四轮评审 P1，复现 B）：source 是一个**指向 canonical 内部**的软链
+   * ⇒ 真实位置在 canonical 里面 ⇒ 拒绝（字面路径看不出来，只有 realpath 看得出来）。
+   */
+  it("source 是指向 canonical 内部的软链 ⇒ 拒绝", async () => {
+    await installSkill({ userHome, source, yes: true });
+    const canonical = canonicalPath(userHome);
+    mkdirSync(join(canonical, "sub"), { recursive: true });
+    writeFileSync(join(canonical, "sub", "SKILL.md"), "---\nname: x\n---\n");
+    const alias = join(root, "alias-to-sub");
+    symlinkSync(join(canonical, "sub"), alias, "dir");
+
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source: alias, mode: "link", confirm });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/inside the canonical location/);
+  });
 });
 
 describe("install —— 软链路线（开发者）", () => {
@@ -559,6 +603,13 @@ describe("版本与内容指纹", () => {
     expect(mis?.severity).toBe("warn");
     expect(mis?.detail).toMatch(/broken/);
   });
+
+  it("canonical 自己是断链 ⇒ status 要标出来（不能只打印 `[link -> …]`）", async () => {
+    mkdirSync(join(userHome, ".agents/skills"), { recursive: true });
+    symlinkSync(join(root, "gone-canonical"), canonicalPath(userHome), "dir");
+    const st = skillStatus({ userHome, source });
+    expect(st.canonical.broken).toBe(true);
+  });
 });
 
 describe("原子替换与失败路径", () => {
@@ -607,6 +658,29 @@ describe("原子替换与失败路径", () => {
   });
 
   /**
+   * 回归（第四轮评审 P3：原子替换的测试只测了成功路径 = 假通过）：
+   * 换位**失败**时，旧链必须还在（不是"先删后建"）。
+   */
+  it("宿主链换位失败 ⇒ 旧链还在（旧链不是先删掉的）", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return; // root 无视权限
+    const claudeDir = hostDir(userHome, SKILL_HOSTS.find((h) => h.id === "claude")!);
+    mkdirSync(claudeDir, { recursive: true });
+    const elsewhere = makeSource(join(root, "stale-host2"));
+    symlinkSync(elsewhere, join(claudeDir, "agent-ex-dispatch"), "dir");
+
+    chmodSync(claudeDir, 0o555); // 目录不可写 ⇒ 建新链失败
+    try {
+      const { confirm } = recorder();
+      const r = await installSkill({ userHome, source, confirm });
+      expect(r.ok).toBe(false);
+      // ⚠️ 旧链还在，还指向原来的地方
+      expect(readlinkSync(join(claudeDir, "agent-ex-dispatch"))).toBe(elsewhere);
+    } finally {
+      chmodSync(claudeDir, 0o755);
+    }
+  });
+
+  /**
    * 回归（第三轮评审 P2-a）：`--target` 指到 canonical **里面** ⇒
    * copy 模式会在装好的 skill 目录里建出指向自己祖先的环；
    * link 模式 + canonical 是软链 ⇒ 软链落进**源码树**。
@@ -635,6 +709,23 @@ describe("原子替换与失败路径", () => {
     expect(r.ok).toBe(false);
     expect(r.errors.join(" ")).toMatch(/inside the canonical location/);
     expect(existsSync(join(source, "references", "agent-ex-dispatch"))).toBe(false);
+  });
+
+  /**
+   * 回归（第四轮评审 P2-a）：`--target` 用 canonical 的**别名路径**
+   * （macOS 上 /var vs /private/var），而 canonical **还不存在** ⇒
+   * realpath 退化成字面比较 ⇒ 绕过拦截 ⇒ 在 canonical 内建出自指环。
+   */
+  it("--target 用 canonical 的别名路径（canonical 尚不存在）⇒ 拒绝", async () => {
+    // userHome 在 tmpdir 下；macOS 上 tmpdir 的真实路径是 /private/var/... ⇒ 天然是别名
+    const aliasHome = realpathSync(userHome);
+    expect(aliasHome).not.toBe(userHome);
+    const aliasCanonical = join(aliasHome, ".agents/skills/agent-ex-dispatch");
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source, confirm, targets: [aliasCanonical] });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/canonical location/);
+    expect(existsSync(join(aliasCanonical, "agent-ex-dispatch"))).toBe(false);
   });
 
   /**
@@ -744,6 +835,22 @@ describe("remove", () => {
     expect(r.ok).toBe(true);
     expect(existsSync(canonicalPath(userHome))).toBe(false);
     expect(existsSync(source)).toBe(true);
+  });
+
+  it("卸载时顺手清掉安装过程留下的临时物（否则「卸载干净」是假的）", async () => {
+    await installSkill({ userHome, source, yes: true });
+    // 模拟一次被 kill 的安装留下的残留
+    const skillsDir = join(userHome, ".agents/skills");
+    const leftover = join(skillsDir, ".agent-ex-dispatch.old.99999");
+    mkdirSync(leftover, { recursive: true });
+    const tmpLeft = join(skillsDir, ".agent-ex-dispatch.tmp.99999");
+    mkdirSync(tmpLeft, { recursive: true });
+
+    const r = await removeSkill({ userHome, source, yes: true });
+    expect(r.ok).toBe(true);
+    expect(existsSync(leftover)).toBe(false);
+    expect(existsSync(tmpLeft)).toBe(false);
+    expect(existsSync(canonicalPath(userHome))).toBe(false);
   });
 
   it("--target 只删那个目录，**不删 canonical**", async () => {

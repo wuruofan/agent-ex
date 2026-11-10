@@ -33,21 +33,25 @@ else
   TARGETS=("$HOME/.workbuddy/skills")
 fi
 
-# 展开开头的 ~ 并丢掉空段。
+# 丢掉空段 → 展开开头的 ~ → 相对路径按 **$HOME** 展开（不是 cwd！）。
+#
+# ⚠️ **顺序很重要**：空段必须**先**判掉。
+# 空串不匹配 `/*` ⇒ 会被相对路径展开成 "$HOME/" ⇒ 不是空段了 ⇒ 在用户 HOME 根下
+# 建出一条 agent-ex-dispatch 链（2026-11-10 第四轮评审 P2-a）。
+#
 #   - ~ 展开：位置参数里的 ~ 由**调用方**的 shell 展开，但 AGENT_EX_SKILL_TARGETS
 #     里的 ~ 是变量值、调用方不会展开 ⇒ 不在这里展开的话会真的建出一个叫 "~" 的目录。
-#   - 空段：env 值写成 "a::b" 或以 ":" 结尾时，IFS 切分会产生空串；
-#     空串传给 --target 会被当成"当前目录"，装出一个 ./agent-ex-dispatch。
-#   - 相对路径按 **$HOME** 展开（不是 cwd！）：CLI 侧 `resolve()` 按 cwd 解析，
-#     而这个脚本常在仓库根跑 ⇒ 相对路径会把目录建进**源码树**（2026-11-10 第三轮评审 P3-c）。
+#     （只认裸 `~`，不支持 `~user` 形式。）
+#   - 相对路径：CLI 侧 `resolve()` 按 cwd 解析，而这个脚本常在仓库根跑
+#     ⇒ 相对路径会把目录建进**源码树**（2026-11-10 第三轮评审 P3-c）。
 EXPANDED=()
 for t in "${TARGETS[@]}"; do
+  [ -n "$t" ] || continue
   t="${t/#\~/$HOME}"
   case "$t" in
     /*) ;;                       # 已经是绝对路径
     *)  t="$HOME/$t" ;;           # 相对路径按 $HOME 展开
   esac
-  [ -n "$t" ] || continue
   EXPANDED+=("$t")
 done
 
