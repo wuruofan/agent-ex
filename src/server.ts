@@ -172,6 +172,7 @@ const USAGE = [
   "  config [list|set]               global settings",
   "  profile [list|use|create|set]   profiles (executor + env a task runs with)",
   "  wait <task_id>                  block until a task is terminal (or needs input)",
+  "  skill [install|remove|status]   manage the dispatch skill",
   "",
   "no command: start the MCP server on stdio (how MCP clients launch it)",
 ].join("\n");
@@ -218,6 +219,16 @@ if (sub === "init") {
     process.exit(await runWait(process.argv.slice(3)));
   } catch (e) {
     console.error(`[agent-ex] wait failed: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+} else if (sub === "skill") {
+  // skill install/remove/status：纯文件操作，**不碰 SQLite、不碰 MCP SDK**。
+  // 动态 import 到独立模块（skill-cmd.ts），别挂到 cli.ts 上——那个会拖进 doctor/executor 链。
+  try {
+    const { runSkill } = await import("./skill-cmd.js");
+    process.exit(await runSkill(process.argv.slice(3)));
+  } catch (e) {
+    console.error(`[agent-ex] skill failed: ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
 } else if (sub === "--help" || sub === "-h") {

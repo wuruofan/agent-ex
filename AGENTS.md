@@ -40,7 +40,7 @@
 - `tests/` — Vitest；`integration.test.ts` 真起 runner 跑完整任务生命周期
 - `scripts/` — 构建与冒烟脚本
 - `docs/` — spec / review / plan / design
-- `skills/agent-ex-dispatch/` — dispatch skill（走 GitHub 分发，**不进 npm 包**）
+- `skills/agent-ex-dispatch/` — dispatch skill（**随 npm 包分发**，`agent-ex skill install` 安装；开发者用 `./scripts/install-skill.sh` 软链到本仓库）
 
 ## 硬约束（改代码前必读）
 
@@ -105,7 +105,7 @@ npm run init         # 开发模式跑 init（tsx）
 | :--- | :--- | :--- |
 | `name` | `agent-ex-mcp` | 带 `-mcp` 规避 registry 包名相似度保护（`agent-ex` 撞已占用的 `agentex`） |
 | `bin` | `agent-ex` → `dist/server.js` | **命令名不带 `-mcp`**：全局安装后 `agent-ex` 可直接跑 server |
-| `files` | `dist` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包 |
+| `files` | `dist` / `skills/agent-ex-dispatch` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包；**dispatch skill 进包** |
 | `publishConfig.registry` | `https://registry.npmjs.org` | 锁定发布目标为官方源（见下） |
 | `prepublishOnly` | `build` + `test` | 发布前自动构建并跑全量测试，测试红则发布中止 |
 | `engines.node` | `>=22.5` | 依赖 `node:sqlite`（server 与 runner 都要用） |

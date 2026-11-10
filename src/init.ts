@@ -14,11 +14,12 @@
 import { execSync } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
+import { homedir } from "node:os";
 import { join, dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentExHome, ensureRuntimeDirs } from "./paths.js";
 import { loadConfig, validateConfig, type Config } from "./config.js";
-import { BRAND } from "./brand.js";
+import { BRAND, HOME_DIR_NAME } from "./brand.js";
 import { BUILTIN_PROFILES, ZEN_FREE_PROFILE_NAME } from "./config-cmd.js";
 import { diffConfigs, renderChangeWarning } from "./init-changes.js";
 import { ansi } from "./ansi.js";
@@ -348,13 +349,21 @@ export function nodeExecPath(): string {
  * `node_modules/.bin` 只有 npm 脚本执行时才临时注入。所以 `{command:"agent-ex"}`
  * 这类裸命令名在 IDE（GUI 应用不读 .zshrc，尤其 nvm 用户）里会直接 command not found。
  * 2026-10-10 实测：同一台机器 PATH 不含 .bin 时裸命令名失败、绝对路径正常。
+ *
+ * @param serverEntry server 入口的绝对路径
+ * @param home        数据目录；**非默认路径时**把 `AGENT_EX_HOME` 写进片段的 `env`
+ *                    （MCP client 拉起的 server 进程需要它，否则会落到默认 `~/.agent-ex`）
  */
-export function mcpServerSnippet(serverEntry: string): string {
-  return JSON.stringify(
-    { mcpServers: { [BRAND]: { command: nodeExecPath(), args: [serverEntry] } } },
-    null,
-    2,
-  );
+export function mcpServerSnippet(serverEntry: string, home?: string): string {
+  const entry: Record<string, unknown> = {
+    command: nodeExecPath(),
+    args: [serverEntry],
+  };
+  const h = home ?? agentExHome();
+  if (h !== join(homedir(), HOME_DIR_NAME)) {
+    entry.env = { AGENT_EX_HOME: h };
+  }
+  return JSON.stringify({ mcpServers: { [BRAND]: entry } }, null, 2);
 }
 
 /**
@@ -363,40 +372,47 @@ export function mcpServerSnippet(serverEntry: string): string {
  * 为什么要专门提示 dry_run：init 写出的 config 一律 `dry_run: true`（安全默认），
  * 于是"配好了却没收到通知"是最常见的第一手困惑 —— 卡片只打到 stderr。
  * 这里把这一句和它的修复命令直接摆出来。
+ *
+ * ⚠️ `AGENT_EX_HOME` 的 export **只在非默认路径时保留**：MCP 片段里的 `env` 只影响
+ * MCP client 拉起的 server 进程；用户随后手敲的 `agent-ex config set …` / `doctor --send`
+ * 仍在没有该变量的 shell 里 ⇒ 会读写默认 `~/.agent-ex`。删掉这一步 = "静默打错目录"。
  */
 export function nextSteps(home: string, serverEntry: string): string {
-  return [
-    "",
+  const customHome = home !== join(homedir(), HOME_DIR_NAME);
+  const out: string[] = [];
+  if (customHome) {
+    out.push(
+      `Set the data dir for this shell first (every agent-ex command below needs it):`,
+      `  export AGENT_EX_HOME=${home}`,
+      "",
+    );
+  }
+  out.push(
     "Next steps:",
     "",
-    "1) Set the data dir (put it in your MCP server env):",
-    `     export AGENT_EX_HOME=${home}`,
+    "1) Register the MCP server in your client (Trae: TRAE SOLO CN/User/mcp.json,",
+    "   WorkBuddy: ~/.workbuddy/mcp.json):",
+    indentBlock(mcpServerSnippet(serverEntry, home)),
+    "   Use absolute paths — MCP clients don't inherit your shell PATH.",
     "",
-    "2) Register the MCP server — paste into your client's MCP config",
-    "   (Trae: TRAE SOLO CN/User/mcp.json, WorkBuddy: ~/.workbuddy/mcp.json):",
-    mcpServerSnippet(serverEntry),
+    "2) Install the dispatch skill (recommended):",
+    "     agent-ex skill install",
     "",
-    "   Absolute paths matter: MCP clients spawn the server without your shell PATH,",
-    "   so a bare \"agent-ex\" command often fails to start (common with nvm).",
-    "",
-    "3) Install the dispatch skill (optional but recommended — gives you the",
-    "   dispatch workflow and the background waiter):",
-    "     npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y",
-    "",
-    "   Already have a clone? ./scripts/install-skill.sh links it instead.",
-    "   Skill dirs differ per host; if the load does not take effect, find yours with:",
-    "     find ~ -maxdepth 4 -type d -name skills -path '*<host>*' 2>/dev/null",
-    "",
-    "4) Feishu notifications are in dry-run mode (nothing is delivered yet).",
-    "   When the bot's keyword matches, turn delivery on:",
+    "3) Feishu notifications are in dry-run mode — nothing is delivered yet:",
     "     agent-ex config set notify.dry_run false",
-    "   Then verify with a clean self-check card (body must not contain the",
-    "   product name, or the keyword gate may pass by accident):",
     "     agent-ex doctor --send",
     "",
-    "5) Optional: edit " + join(home, "config.json") + " to tune model aliases / env.",
-    "   Or use the targeted commands: agent-ex config set <key> <value> / agent-ex profile set <profile> <KEY> <value>",
-  ].join("\n");
+    "Tune later: agent-ex config set <key> <value> | agent-ex profile set <profile> <KEY> <value>",
+  );
+  return out.join("\n");
+}
+
+/** 给多行文本每行加五个空格缩进（与下面的命令块对齐）。 */
+function indentBlock(text: string): string {
+  return text
+    .split("\n")
+    .map((l) => `     ${l}`)
+    .join("\n");
 }
 
 /**

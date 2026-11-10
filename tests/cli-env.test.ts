@@ -213,7 +213,7 @@ describe("agent-ex profile（CLI 路径）", () => {
       }, null, 2));
       // 夹具要健康：webhook 变量不在 .env 里时 doctor 会正确地报 error 并 exit 1
       writeFileSync(join(sHome, ".env"), "FEISHU_WEBHOOK_URL=https://open.feishu.cn/hook/test\n");
-      for (const args of [["doctor"], ["config", "list"], ["profile", "list"]]) {
+      for (const args of [["doctor"], ["config", "list"], ["profile", "list"], ["skill", "status"]]) {
         const r = await runCliAt(sHome, args);
         expect(r.code).toBe(0);
         expect(r.out).not.toContain("ExperimentalWarning");
@@ -232,6 +232,23 @@ describe("agent-ex profile（CLI 路径）", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("p1");
     expect(r.out).toContain("default");
+  });
+
+  it("skill status 不加载 MCP SDK / node:sqlite（纯文件操作，懒加载）", async () => {
+    // 断言方式：子进程里 import skill-cmd 模块，然后看 moduleLoadList
+    // （内置模块不进 require.cache，只能用 process.moduleLoadList）。
+    // 用 tsx 跑：skill-cmd.ts 要 import "./skill.js"（源码模式下是 .ts 文件）。
+    const script = `
+      await import(${JSON.stringify(join(repoRoot, "src", "skill-cmd.ts"))});
+      const loaded = process.moduleLoadList.filter((m) => m.includes("sqlite") || m.includes("modelcontextprotocol"));
+      console.log("HEAVY_LOADED=" + (loaded.length > 0));
+    `;
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [tsxCli, "--input-type=module", "-e", script],
+      { encoding: "utf8", timeout: 30_000 },
+    );
+    expect(stdout).toContain("HEAVY_LOADED=false");
   });
 
   it("profile use 切默认（只切换，不物化）", async () => {

@@ -6,9 +6,12 @@ agent_created: true
 
 # Agent Flow Dispatch
 
-> 📦 **安装方式**：使用者用 `npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y`
-> （装出实体副本，落 `~/.agents/skills`）；本仓库开发者用 `./scripts/install-skill.sh`（软链到本仓库，改完即时生效）。
-> **WorkBuddy 只扫 `~/.workbuddy/skills`、不读 `~/.agents/skills`**，`npx` 装完还得再补一条软链——命令见 README 的「路线 A」。
+> 📦 **安装方式**：skill **随 npm 包分发** —— 使用者 `npm i -g agent-ex-mcp` 后跑 `agent-ex skill install`
+> （装出实体副本到 `~/.agents/skills`，并给本机存在的宿主各建一条软链）；本仓库开发者用
+> `./scripts/install-skill.sh`（软链到本仓库，改完即时生效）。
+> **WorkBuddy 只扫 `~/.workbuddy/skills`、不读 `~/.agents/skills`** —— 但多数 WorkBuddy 安装自带
+> 自动桥接脚本（`~/.workbuddy/hooks/sync-agents-skills.sh`），`agent-ex skill install` 会检测到并提示
+> 「不用手工链」；没有该脚本的机器用 `agent-ex skill install --target ~/.workbuddy/skills` 补一条。
 > ⚙️ **运行依赖**：等待环节调用 `agent-ex wait`，要求 **`agent-ex-mcp >= 0.3.1`**（`agent-ex` 需在 PATH 上）。
 > 0.3.0 只有 `wait`；「[回来先查]」兜底所需的 `include_finished` 是 0.3.1 加的，旧 server 会静默吞掉它。
 > 使用者 `npm i -g agent-ex-mcp`；本仓库开发者在仓库根 `npm link`。CLI 与 MCP server 的探针见「前置检查」。

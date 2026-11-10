@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isAbsolute } from "node:path";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
@@ -396,13 +396,34 @@ describe("MCP 配置片段（2026-10-10 实测：必须绝对路径）", () => {
 
 describe("nextSteps 收尾指引", () => {
   const text = nextSteps("/home/u/.agent-ex", "/abs/dist/server.js");
+  const defaultText = nextSteps(join(homedir(), ".agent-ex"), "/abs/dist/server.js");
+
   it("包含数据目录、注册片段与 skill 安装指引", () => {
-    expect(text).toContain("AGENT_EX_HOME=/home/u/.agent-ex");
+    expect(text).toContain("export AGENT_EX_HOME=/home/u/.agent-ex");
     expect(text).toContain("/abs/dist/server.js");
-    expect(text).toContain("skills add wuruofan/agent-ex");
+    expect(text).toContain("agent-ex skill install");
   });
-  it("解释了绝对路径的原因（PATH 不可继承）与宿主 skills 目录查找法", () => {
-    expect(text).toMatch(/without your shell PATH|不继承/);
-    expect(text).toContain("find ~ -maxdepth 4");
+
+  it("不再提旧的 npx skills / find 排障命令（都已换掉）", () => {
+    expect(text).not.toContain("skills add wuruofan/agent-ex");
+    expect(text).not.toContain("find ~ -maxdepth 4");
+  });
+
+  it("解释了绝对路径的原因（PATH 不可继承）", () => {
+    expect(text).toMatch(/inherit your shell PATH|without your shell PATH|不继承/);
+  });
+
+  it("非默认路径时，MCP 片段里也带 AGENT_EX_HOME（server 进程需要它）", () => {
+    expect(mcpServerSnippet("/abs/dist/server.js", "/home/u/.agent-ex")).toContain("AGENT_EX_HOME");
+  });
+
+  it("默认路径时：不出现 export，片段也不带 env（不加噪音）", () => {
+    expect(defaultText).not.toContain("export AGENT_EX_HOME");
+    expect(mcpServerSnippet("/abs/dist/server.js", join(homedir(), ".agent-ex"))).not.toContain("env");
+  });
+
+  it("行数不超阈值（防回潮；实测 默认 24 / 非默认 30）", () => {
+    expect(defaultText.split("\n").length).toBeLessThanOrEqual(26);
+    expect(text.split("\n").length).toBeLessThanOrEqual(32);
   });
 });

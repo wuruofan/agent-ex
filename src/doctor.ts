@@ -15,6 +15,7 @@
  */
 import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { agentExHome, logsDir } from "./paths.js";
 import { BRAND } from "./brand.js";
 import {
@@ -27,6 +28,7 @@ import {
 } from "./config.js";
 import { buildFeishuCard, sendFeishuCard } from "./notifier.js";
 import { extractModelRef, checkModelLiveness, type RunImpl } from "./model-check.js";
+import { collectSkillIssues } from "./skill.js";
 
 export type Severity = "error" | "warn" | "info" | "ok";
 
@@ -299,7 +301,7 @@ export function applyFixes(home: string): FixResult {
   return { applied, skipped, notes };
 }
 
-export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: typeof fetch; delays?: number[]; probeImpl?: RunImpl } = {}): Promise<DoctorReport> {
+export async function doctor(opts: { home?: string; userHome?: string; send?: boolean; fetchImpl?: typeof fetch; delays?: number[]; probeImpl?: RunImpl } = {}): Promise<DoctorReport> {
   /**
    * 体检（只读，不改任何东西）。
    *
@@ -601,6 +603,19 @@ export async function doctor(opts: { home?: string; send?: boolean; fetchImpl?: 
           : "check whether FEISHU_WEBHOOK_URL is valid",
       });
     }
+  }
+
+  // ---- 7. dispatch skill（**可选件**：最高只到 warn，绝不影响 ok / exit code）----
+  //
+  // ⚠️ 这里刻意**不**用 collectConfigIssues()：那是 config.json 的真相源，
+  // skill 状态不是 config（AGENTS.md 硬约束 6 的边界）。skill.ts 里的
+  // collectSkillIssues() 与它**平行**，installer 与 doctor 同源消费。
+  //
+  // ⚠️ `userHome`（~/.agents/skills 在这底下）与 `home`（$AGENT_EX_HOME，配置在这）
+  // 是**两个不同的目录**：混用会让 doctor 去看 ~/.agent-ex/.agents/skills（不存在）。
+  // `userHome` 可注入 ⇒ 测试用临时目录，不会读到开发机真实的 ~/.agents。
+  for (const si of collectSkillIssues({ userHome: opts.userHome ?? homedir() })) {
+    findings.push({ severity: si.severity, title: si.title, detail: si.detail, fix: si.fix });
   }
 
   // 一屏里最该被一眼抓到的是 error。按级别排序，否则 warn（比如 dry_run）会把

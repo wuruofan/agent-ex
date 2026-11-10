@@ -1,115 +1,53 @@
 #!/usr/bin/env bash
 #
-# install-skill.sh — symlink the agent-ex-dispatch skill into AI-tool skill dirs.
+# install-skill.sh — 开发者路线：把仓库里的 dispatch skill 链到宿主目录。
 #
-# The skill has a single canonical source of truth at <repo>/skills/agent-ex-dispatch.
-# This script fans it out as symlinks into each tool's user-level skills directory.
+# 实现已经收敛到 src/skill.ts（与 `agent-ex skill install` 是同一套逻辑），
+# 这个脚本只做转发 —— 避免 bash 与 TS 两份实现各自漂移。
 #
-# Why symlinks and not copies: the skill is under active development. A copy would
-# drift the moment SKILL.md is edited; a symlink makes repo edits take effect
-# immediately with no sync step.
+# 与旧版脚本的差异（**有意的破坏性变更**）：
+#   - 旧版把 skill 软链到 ~/.agents/skills + ~/.workbuddy/skills；
+#     现在 ~/.agents/skills/agent-ex-dispatch 就是 canonical（由 --link 直接建），
+#     所以默认的额外目标只剩 ~/.workbuddy/skills。
+#   - 旧版的默认目标列表里含 ~/.agents/skills —— 那个位置现在是 canonical 本身，
+#     传进去会变成自链，所以**不再**作为 --target 传。
 #
-# Scope — the links land in USER-level skill dirs, so the skill is visible from every
-# project, not just this repo. The two default targets are NOT interchangeable per host:
-# WorkBuddy only scans ~/.workbuddy/skills, while ~/.agents/skills is the cross-tool shared
-# dir that most other hosts (codex / cursor / gemini-cli / ...) read directly. That is why
-# both are linked by default. The repo's own ./skills/ dir is NOT a project-level skill path
-# (that would be ./.workbuddy/skills), so it is never picked up as a project-scoped skill
-# and never shadows this install.
-#
-# Default targets: ~/.agents/skills (shared, tool-agnostic convention on this machine)
-# and ~/.workbuddy/skills.
-#
-# Trae hosts are NOT a default because the skill dir differs per install and layout:
-# this machine runs "TRAE SOLO CN", whose user-level skills path is ~/.trae-cn/skills
-# (~/.trae-cn is also where the IDE reads MCP configs from). Pass the target explicitly:
-#   ./install-skill.sh ~/.trae-cn/skills
-# Verified 2026-10-10: with that symlink in place the skill loads and works in Trae,
-# including dispatch -> background wait -> new turn on completion.
-#
-# Usage:
-#   ./install-skill.sh                         # default: ~/.agents/skills + ~/.workbuddy/skills
-#   ./install-skill.sh /path/a/skills /path/b  # explicit targets (overrides default)
-#   AGENT_EX_SKILL_TARGETS="~/.x/skills:~/.y" ./install-skill.sh   # env override
-#
-# This is the DEVELOPER route (symlink to a local clone). End users should install from
-# GitHub instead, which needs no clone and is the distribution path that works everywhere:
-#   npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y
-# Don't install both into the same target dir — pick one, delete the other.
+# 用法：
+#   ./install-skill.sh                         # 默认：额外链到 ~/.workbuddy/skills
+#   ./install-skill.sh ~/.some/other/skills    # 显式指定额外目标
+#   AGENT_EX_SKILL_TARGETS="a:b" ./install-skill.sh
 #
 set -euo pipefail
 
-# Resolve repo root from this script: <repo>/scripts/install-skill.sh -> <repo>
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKILL_NAME="agent-ex-dispatch"
-CANONICAL="$REPO_ROOT/skills/$SKILL_NAME"
 
-if [ ! -f "$CANONICAL/SKILL.md" ]; then
-  echo "ERROR: canonical skill not found at $CANONICAL/SKILL.md" >&2
-  exit 1
-fi
-
-# Default host tool skill dirs (user-level), most-shared first.
-DEFAULT_TARGETS=(
-  "$HOME/.agents/skills"
-  "$HOME/.workbuddy/skills"
-)
-
-# Targets: CLI args > AGENT_EX_SKILL_TARGETS env > defaults
+# 目标优先级：位置参数 > AGENT_EX_SKILL_TARGETS > 默认
 TARGETS=()
 if [ "$#" -gt 0 ]; then
   TARGETS=("$@")
 elif [ -n "${AGENT_EX_SKILL_TARGETS:-}" ]; then
   IFS=':' read -ra TARGETS <<< "$AGENT_EX_SKILL_TARGETS"
 else
-  TARGETS=("${DEFAULT_TARGETS[@]}")
+  TARGETS=("$HOME/.workbuddy/skills")
 fi
 
-echo "Canonical skill: $CANONICAL"
-echo "Installing into ${#TARGETS[@]} target(s):"
+ARGS=()
+for t in "${TARGETS[@]}"; do
+  ARGS+=(--target "$t")
+done
+
+echo "Canonical skill: $REPO_ROOT/skills/$SKILL_NAME"
+echo "Extra targets:"
 printf '  - %s\n' "${TARGETS[@]}"
 echo
 
-for target_dir in "${TARGETS[@]}"; do
-  # Expand a leading ~ (in case a target was passed literally)
-  target_dir="${target_dir/#\~/$HOME}"
-  link="$target_dir/$SKILL_NAME"
-
-  # Ensure the host tool's skills directory exists
-  mkdir -p "$target_dir"
-
-  if [ -L "$link" ]; then
-    existing="$(readlink "$link")"
-    if [ "$existing" = "$CANONICAL" ]; then
-      echo "[skip]    $link -> already canonical"
-      continue
-    fi
-    echo "[replace] $link -> $existing (stale; relinking to canonical)"
-    rm -f "$link"
-  elif [ -e "$link" ]; then
-    # A real file/dir at the link path: never clobber blindly.
-    echo "[abort]   $link exists and is not a symlink; remove it manually to avoid data loss" >&2
-    exit 1
-  fi
-
-  ln -s "$CANONICAL" "$link"
-  echo "[linked]  $link -> $CANONICAL"
-done
-
-echo
-echo "Done. Verify:"
-for t in "${TARGETS[@]}"; do
-  echo "  ls -la ${t/#\~/$HOME}/$SKILL_NAME"
-done
-
-# The skill's wait step is no longer a bundled script. Make sure the CLI exists.
-echo
-if command -v agent-ex >/dev/null 2>&1; then
-  echo "Runtime check: 'agent-ex' found. Verify the version with: agent-ex wait --help"
-  echo "  (exit 0 + 'usage: agent-ex wait <task_id>' means >= 0.3.0; exit 2 means an old package)"
-else
-  echo "Runtime check: 'agent-ex' NOT on PATH — the skill's wait step needs agent-ex-mcp >= 0.3.0."
-  echo "  For this checkout:  npm link      # run from the repo root"
-  echo "  For a normal install: npm i -g agent-ex-mcp"
+# 用 tsx 跑源码（开发者的 source of truth，改完即时生效，不要求先 build）。
+if [ -x "$REPO_ROOT/node_modules/.bin/tsx" ]; then
+  exec "$REPO_ROOT/node_modules/.bin/tsx" "$REPO_ROOT/src/server.ts" skill install --link \
+    --source "$REPO_ROOT/skills/$SKILL_NAME" "${ARGS[@]}"
 fi
+
+echo "ERROR: tsx not found. Run 'npm install' in $REPO_ROOT first." >&2
+exit 1

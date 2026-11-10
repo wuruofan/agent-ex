@@ -115,66 +115,58 @@ MCP 工具是「底层能力」，dispatch skill 是叠加在上面的**派发�
 同一目录的**写**任务为什么禁止并发、`needs_input` 怎么续跑、什么时候干脆别派（返工量小且强依赖当前会话上下文时，
 自己更快更准）。装了它，你只说「把 X 派给 worker」，它会按规范把任务拆好、检查并发、拼好 prompt 再提交。
 
-两条路线，按「你是使用者还是本仓库开发者」选一条，**不要两条都装**（目标路径会互相打架）。
-
-### 路线 A：`npx skills`（推荐给使用者，不依赖本地仓库）
-
-本仓库的 skill 遵循 [Agent Skills](https://github.com/agentskills) 开放规范（`SKILL.md` + `scripts/` + `references/`），
-因此可以直接用 Vercel 的 [`skills` CLI](https://www.npmjs.com/package/skills) 从 GitHub 装——**无需 clone 本仓库**：
+**skill 随 npm 包一起分发** —— 装完包跑一条命令即可：
 
 ```bash
-# 先看这个仓库里有哪些 skill（dry-run，不落盘）
-npx -y skills add wuruofan/agent-ex --list
-
-# 全局安装单个 skill
-npx -y skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y
+npm i -g agent-ex-mcp
+agent-ex skill install
 ```
 
-> ⚠️ **但 skill 的等待环节需要 `agent-ex` 这个二进制**（skill 用 `agent-ex wait <task_id>` 等结果，
-> 不再自带脚本）。所以走路线 A 还要补一次全局安装：`npm i -g agent-ex-mcp`。
-> 不想装包也行——skill 会退回 `npx -y agent-ex-mcp@latest wait <task_id>`，代价是每次调用都走 npx（更慢、且要联网）。
+`agent-ex skill install` 做三件事：
 
-- 缺省安装到 `~/.agents/skills/`（用户级，**全局生效**，任何项目里都能用）：这是 Agent Skills 规范的共享目录，
-  直接读它的 20+ 个宿主（codex / cursor / gemini-cli / amp …）装完即可用，其余宿主由 CLI 顺手建软链。
-- 只给某一个宿主装（如只给 Claude Code）：去掉 `-g`，或 `-a claude-code`。
-- 更新：`npx skills update -g`；已装列表：`npx skills list -g`。
-- ⚠️ 若你机器上 `~/.npm/_npx` 不可写，报权限错，加临时 cache：`npm_config_cache=/tmp/npm-cache npx -y skills add …`。
+1. 把 `skills/agent-ex-dispatch` **拷贝**到 `~/.agents/skills/agent-ex-dispatch`（Agent Skills 规范的共享目录）；
+2. 在拷贝目录里写一个 `.agent-ex-skill.json`（记下**版本号**与内容指纹）——
+   以后 `agent-ex skill status` / `agent-ex doctor` 靠它判断「装的是哪一版、要不要更新」；
+3. 给本机存在的宿主（Claude Code / Trae / WorkBuddy …）各建一条软链。
 
-**WorkBuddy 装完还要补一条软链**：它只扫 `~/.workbuddy/skills`，不读 `~/.agents/skills`
-（`skills` CLI 宿主表里最接近的 `codebuddy` 指向 `~/.codebuddy/skills`，也不是 WorkBuddy 的路径，`-a` 没有可选项）：
+几个要点：
+
+- **版本与 CLI 同步**：skill 的版本号 = 打包它的 `agent-ex-mcp` 版本。已发布的包不可变 ⇒ 装出来的 skill
+  永远和你的 CLI 对得上（skill 里写死了 `agent-ex-mcp >= 0.3.1` 这类门槛，版本错配会直接踩坏）。
+  升级 CLI 后再跑一次 `agent-ex skill install`，它会问「是否更新」。
+- **不会覆盖别人的东西**：目标路径已有**实体目录**且不是 agent-ex 装的 ⇒ 直接中止并提示，绝不覆盖。
+- **WorkBuddy**：它只扫 `~/.workbuddy/skills`，不读 `~/.agents/skills`。多数 WorkBuddy 安装自带一个
+  自动桥接脚本（`~/.workbuddy/hooks/sync-agents-skills.sh`），会自己把 `~/.agents/skills` 桥接过去 ⇒
+  `agent-ex skill install` 检测到就会告诉你「不用手工链」。没有该脚本的机器，显式指定：
+  `agent-ex skill install --target ~/.workbuddy/skills`。
+- **Trae**：用户级 skills 目录随安装版本而变（本机 `TRAE SOLO CN` 用 `~/.trae-cn/skills`），
+  `agent-ex skill install` 会探测；探测不到就 `--target ~/.trae-cn/skills`。
+- **更新**：`agent-ex skill install`（幂等：已是最新就 skip，版本落后会问是否更新）。
+- **看状态**：`agent-ex skill status`（只读）；`agent-ex doctor` 也会顺带报一条。
+- **卸载**：`agent-ex skill remove`。
+
+> ⚠️ 非交互环境（CI / 管道）里 `agent-ex skill install` **不替你做决定**：它会提示加上 `--yes`。
+> `--yes` 会建链、会重指、会覆盖 —— 别在 CI 里随手加。
+
+#### 开发者路线：软链到本地仓库
 
 ```bash
-ln -s ~/.agents/skills/agent-ex-dispatch ~/.workbuddy/skills/agent-ex-dispatch
+./scripts/install-skill.sh                    # 软链到 canonical + ~/.workbuddy/skills
+./scripts/install-skill.sh ~/some/other/skills # 或指定额外目录
 ```
 
-> ⚠️ `ln` 对**已存在的目录**目标不会报错——它会把软链塞进那个目录里（`…/agent-ex-dispatch/agent-ex-dispatch`），
-> 看着成功、实际没生效。链之前先 `ls -la ~/.workbuddy/skills/`：若那里已有路线 B 留下的软链或实体目录，删掉再链。
-> 软链指向的是路径不是内容，所以 `npx skills update -g` 之后不用重链。
+脚本现在是 `agent-ex skill install --link` 的**薄壳**（实现只有一份，在 `src/skill.ts`）：
+它把仓库里的 `skills/agent-ex-dispatch` **软链**到 canonical，改完立刻生效、不产生副本漂移，适合边写 skill 边验证。
+软链路线**永远实时**，所以没有版本对比、也不需要更新。
 
-### 路线 B：`install-skill.sh`（开发者路线，软链到本地仓库）
+> 用户路线（拷贝）与开发者路线（软链）**别混着装同一个目录**：同一个路径只能有一种。
 
-```bash
-./scripts/install-skill.sh          # 默认装到 ~/.agents/skills + ~/.workbuddy/skills
-./scripts/install-skill.sh ~/some/other/skills   # 或指定目录
-```
+**生效范围是全局的，不是当前仓库**：入口必须落在**宿主自己**的用户级 skills 目录 —— 所以每家宿主一条软链。
+仓库里的 `./skills/` 是普通目录，**不是**项目级 skill 路径（那会是 `./.workbuddy/skills`），
+因此既不会只在本仓库生效，也不会与项目级 skill 冲突。
 
-脚本把仓库里的 `skills/agent-ex-dispatch` **软链**到各宿主工具的用户级 skills 目录——
-它是仓库的软链，**改完立刻生效、不会产生副本漂移**，适合边写 skill 边验证。可重复执行（幂等：已指向正确位置会 skip；
-若目标路径已有**实体目录**则会中止并提示手动处理，不会覆盖）。
-
-> 两条路线的取舍：路线 B 是**软链**，本地改了马上生效，但换台机器就没有；路线 A 是**实体副本**，
-> 能独立分发但要手动 `update`。同一目标目录只能有一种——若想从 A 切到 B（或反过来），
-> 先删掉旧的那份再装。
-
-**生效范围是全局的，不是当前仓库**：入口必须落在**宿主自己**的用户级 skills 目录——WorkBuddy 只扫
-`~/.workbuddy/skills`；`~/.agents/skills` 是跨工具共享的中转站（多数宿主读它，WorkBuddy 不读），
-所以两个目录默认都链。仓库里的 `./skills/` 是普通目录，**不是**项目级 skill 路径
-（那会是 `./.workbuddy/skills`），因此既不会只在本仓库生效，也不会与项目级 skill 冲突。
-
-> **Trae**：它的用户级 skills 目录因安装版本而异（本机 `TRAE SOLO CN` 用 `~/.trae-cn/skills`），
-> 所以不在默认目标里，显式传进去即可：`./install-skill.sh ~/.trae-cn/skills`（路线 A 则去掉 `-g`，按 CLI 提示选 Trae）。
-> 2026-10-10 实测：软链装好后 skill 在 Trae 里正常加载，派发 → 后台等待 → 用户回话后推进整条链路都通。
-> ⚠️ 2026-10-21 复测（见 [`docs/diagnostics/2026-10-20-trae-no-wake-channel.md`](docs/diagnostics/2026-10-20-trae-no-wake-channel.md) §9）：Trae **不会**因后台进程完成自动开新 turn，MCP 主动通知通道也不能替代；loop 只能是「用户每次回话推进一轮」，靠 SKILL.md 的「[回来先查]」兜底接上。
+> **Trae 不会因后台进程完成自动开新 turn**：MCP 主动通知通道也不能替代；loop 只能是「用户每次回话推进一轮」，
+> 靠 SKILL.md 的「[回来先查]」兜底接上（见 [`docs/diagnostics/2026-10-20-trae-no-wake-channel.md`](docs/diagnostics/2026-10-20-trae-no-wake-channel.md) §9）。
 
 > 🛠️ **要从源码装、或者想给这个仓库改代码** → 看 [`AGENTS.md`](https://github.com/wuruofan/agent-ex/blob/main/AGENTS.md)：
 > 里面有构建/测试命令、改代码前必读的硬约束、改动时的连带规则，以及发版流程。
@@ -228,7 +220,7 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
 | `profiles.<name>.path_dirs` | 插进 worker `PATH` 的额外**绝对路径目录**列表（位于 executor 的 bin 目录之后、系统目录之前）。典型用途：让 worker 用 nvm 的 `node`。 |
 | `notify.feishu_webhook_url` | 飞书机器人 webhook；支持 `{env:FEISHU_WEBHOOK_URL}` 占位符。 |
 | `notify.dry_run` | `true`（缺省）→ 只打印通知内容不真发；`false` → 真发。 |
-| `notify.keyword` | 附加在卡片末尾的「关键词」安全闸门。**缺省 = `agent-ex`（`src/brand.ts` 的 `BRAND`，`loadConfig` 自动填入）**，一般无需手写。详见「飞书通知配置」。 |
+| `notify.keyword` | 附加在卡片末尾的「关键词」安全闸门。**缺省 = `agent-ex`（`src/brand.ts` 的 `BRAND`，`loadConfig` 自动填入）**，一般无需手写。同一行还会标出这次用的 profile 与模型。详见「飞书通知配置」。 |
 | `defaults.profile` | `submit` 不指定 profile 时用的默认 profile（必须在 `profiles` 中存在）。 |
 | `defaults.timeout_sec` | 单轮超时（秒），超时 SIGTERM 杀掉 agent。 |
 
@@ -371,6 +363,12 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
 
 配置关键词时，**填的词必须与卡片正文里出现的词一致**。本工具缺省把 `agent-ex` 追加到卡片末尾的一行小字（`notifier.ts` 的 `buildFeishuCard`，`text_size: "notation"`），因此机器人侧的关键词填 `agent-ex` 即可。若你在 `config.json` 里自定义了 `notify.keyword`，**两边都要跟着改**。
 
+这行小字同时标出这张卡是**哪个 profile、哪个模型**跑出来的，形如
+`agent-ex  ·  opencode-zen-free  ·  opencode/mimo-v2.6-flash-free`（关键词在前，值之间用 `·` 分隔，不加字段名）。
+模型取「真的跑起来的那个」：`{model:zen-free}` 这种动态占位符会显示 spawn 前解析出的真实模型 id；
+profile 里压根没声明模型时（opencode 可以走它自己的全局配置）这一格直接省略，不编一个假模型名。
+一张群里几张同样格式的卡靠这行才能区分，排查「同一份 prompt 为什么这次结果差」时先看它。
+
 #### 3. 打开真实发送
 
 `notify.dry_run` **缺省是 `true`**（只把卡片打到 stderr，不 POST）。链路验证通过后改成 `false` 才会真发。
@@ -422,6 +420,9 @@ agent-ex doctor --send
 | `agent-ex profile create <built-in> [--bin <path>]` | **物化**一个内置预设（当前：`opencode-zen-free`，零密钥的 opencode 免费模型）。只创建，不切默认；`--bin` 用于 executor 不在 PATH 上时指定绝对路径。 |
 | `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段（如 `ZEN_FREE_PREFER`），或用保留字 `executor` 改它用哪个 executor、用 `path_dirs` 声明 worker PATH 的额外目录（逗号分隔的绝对路径；空值清空）。 |
 | `agent-ex wait <task_id>` | **阻塞等一个任务到终态**（`completed` / `failed` / `cancelled`）或到 `needs_input`，并把 worker 的最终报告提出来。给 agent 派活后用它在后台等结果，见下节。 |
+| `agent-ex skill install` | 把 dispatch skill 装到 `~/.agents/skills`（**随 npm 包分发**，不用 clone），并给本机存在的宿主各建一条软链。幂等：已是最新就 skip，版本落后会问是否更新。 |
+| `agent-ex skill remove` | 卸载：删掉宿主软链与安装的拷贝。**只删软链**，实体目录一律不碰。 |
+| `agent-ex skill status` | 只读：装在哪、是哪一版、哪些宿主还没链、有没有新版本。 |
 
 > `doctor` 也有对应的 MCP 工具 `agent_ex_doctor`，让 agent 自己就能排错，不用手抄命令。
 
@@ -633,6 +634,11 @@ server 无状态（状态全在 `tasks.db`），在跑 worker 位于独立进程
 - **任务频繁超时，且日志里反复出现 `ran out of context`**：上下文被反复压缩，agent 丢失状态后重复劳动。查压缩阈值配置（见上「上下文压缩」）——若 `ANTHROPIC_MODEL` 没带 `[1m]`，窗口会被锁在 200k；工单过大（工具调用 ≫150 次）也会撞阈值，应先拆单。
 - **改了代码但行为没变**：MCP host 会复用常驻 server 进程。`npm run build` 后调 `restart`，再用 `version` 核对 `gitSha`。
 - **opencode 报 `UnknownError: "Unexpected server error..."`（且 exit=0）**：多半是配置里的模型已被下线。这个报错与真实服务端故障**无法区分**，别靠报错自愈——改用 `{model:zen-free}` 让模型在 spawn 前动态解析（见「免费模型动态解析」）。
+- **skill 装了但宿主里没加载**：先 `agent-ex skill status` 看装到哪、哪些宿主没链。宿主各自的 skills 目录位置不同，找出来：
+  ```bash
+  find ~ -maxdepth 4 -type d -name skills -path '*<host>*' 2>/dev/null
+  ```
+  找到后用 `agent-ex skill install --target <那个目录>` 补一条链。
 
 ## 快速初始化（`init` 命令）
 
@@ -723,12 +729,13 @@ node dist/server.js init    # 即 `agent-ex init`
 |---|---|---|
 | `name` | `agent-ex-mcp` | 带 `-mcp` 规避 registry 包名相似度保护（`agent-ex` 撞已占用的 `agentex`），见「快速开始」下的说明 |
 | `bin` | `agent-ex` → `dist/server.js` | **命令名不带 `-mcp`**：全局安装后 `agent-ex` 可直接跑 server |
-| `files` | `dist` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包 |
+| `files` | `dist` / `skills/agent-ex-dispatch` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包；**dispatch skill 进包**（`agent-ex skill install` 从包内安装） |
 | `engines.node` | `>=22.5` | 依赖 `node:sqlite`（server 与 runner 都要用） |
 
-> ⚠️ **npm 包不含 dispatch skill**：`skills/` 与 `scripts/` 不在 `files` 白名单里。
-> 但这已不再是分发缺口——skill 走 [Agent Skills](https://github.com/agentskills) 规范，
-> 使用者用 `npx skills add wuruofan/agent-ex --skill agent-ex-dispatch -g -y` 从 GitHub 直接装（见「安装 dispatch skill」）。
+> ℹ️ **npm 包内含 dispatch skill**：`skills/agent-ex-dispatch` 在 `files` 白名单里，
+> 装完包跑 `agent-ex skill install` 即可（见「安装 dispatch skill」）。
+> ⚠️ 包体积因此涨了约 50%（skill 目录 gzip 后约 62 KB）。
+> `scripts/` 仍**不进包**（只有本仓库开发者用得到）。
 
 > 🔧 **发版流程（认证、2FA、打包校验、发布后核验）见 [`AGENTS.md`](https://github.com/wuruofan/agent-ex/blob/main/AGENTS.md#发布npm)**
 > —— 那是维护者文档，不随 npm 包分发。
