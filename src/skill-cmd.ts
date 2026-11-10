@@ -185,6 +185,12 @@ export async function runSkill(args: string[]): Promise<number> {
     console.error(`${ansi.red(MARK.error)} Unknown subcommand "${p.sub}"\n\n${USAGE}`);
     return 2;
   }
+  // status 是只读的、只报**本机**状态 ⇒ 没有"额外目标目录"可言。
+  // 照单全收然后默默忽略，比报错更让人以为它生效了（2026-11-10 第三轮评审 P3-h）。
+  if (p.sub === "status" && p.targets.length > 0) {
+    console.error(`${ansi.red(MARK.error)} skill status takes no --target\n\n${USAGE}`);
+    return 2;
+  }
 
   const userHome = homedir();
   const confirm = makeConfirm(p.yes);

@@ -563,6 +563,81 @@ describe("版本与内容指纹", () => {
 
 describe("原子替换与失败路径", () => {
   /**
+   * 回归（第三轮评审 P1-a）：canonical 是**悬空软链**时（开发者路线的目标被删很常见），
+   * 旧的判断用 `existsSync`（**跟随**软链）⇒ 返回 false ⇒ 不把占位的链接名挪开
+   * ⇒ `rename(目录, 悬空软链)` 报 ENOTDIR ⇒ 安装必失败，
+   * 而 doctor 给的修法恰恰是 `agent-ex skill install` ⇒ 告警永远修不掉。
+   */
+  it("canonical 是断链 ⇒ 照样装得上（不是 ENOTDIR）", async () => {
+    mkdirSync(join(userHome, ".agents/skills"), { recursive: true });
+    symlinkSync(join(root, "gone-target"), canonicalPath(userHome), "dir");
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source, confirm });
+    expect(r.ok).toBe(true);
+    expect(lstatSync(canonicalPath(userHome)).isSymbolicLink()).toBe(false);
+    expect(existsSync(join(canonicalPath(userHome), "SKILL.md"))).toBe(true);
+  });
+
+  it("canonical 是断链 + 切软链 ⇒ 也装得上", async () => {
+    mkdirSync(join(userHome, ".agents/skills"), { recursive: true });
+    symlinkSync(join(root, "gone-target"), canonicalPath(userHome), "dir");
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source, mode: "link", confirm });
+    expect(r.ok).toBe(true);
+    expect(lstatSync(canonicalPath(userHome)).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(canonicalPath(userHome))).toBe(source);
+  });
+
+  /**
+   * 回归（第三轮评审 P1-b）：宿主链的重指 / 断链修复也必须是**原子替换**，
+   * 不能「先删后建」——建链失败就只剩"链没了"。
+   */
+  it("宿主链重指是原子替换（旧的链在换位成功前一直在）", async () => {
+    const claudeDir = hostDir(userHome, SKILL_HOSTS.find((h) => h.id === "claude")!);
+    mkdirSync(claudeDir, { recursive: true });
+    const elsewhere = makeSource(join(root, "stale-host"));
+    symlinkSync(elsewhere, join(claudeDir, "agent-ex-dispatch"), "dir");
+
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source, confirm });
+    expect(r.ok).toBe(true);
+    expect(readlinkSync(join(claudeDir, "agent-ex-dispatch"))).toBe(canonicalPath(userHome));
+    // 宿主目录里不留临时文件
+    expect(readdirSync(claudeDir).filter((n) => n.startsWith("."))).toEqual([]);
+  });
+
+  /**
+   * 回归（第三轮评审 P2-a）：`--target` 指到 canonical **里面** ⇒
+   * copy 模式会在装好的 skill 目录里建出指向自己祖先的环；
+   * link 模式 + canonical 是软链 ⇒ 软链落进**源码树**。
+   */
+  it("--target 指进 canonical 里面 ⇒ 拒绝", async () => {
+    await installSkill({ userHome, source, yes: true });
+    const inner = join(canonicalPath(userHome), "inner");
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source, confirm, targets: [inner] });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/inside the canonical location/);
+    expect(existsSync(join(inner, "agent-ex-dispatch"))).toBe(false);
+  });
+
+  it("--target 指进 canonical 的软链目标（源码树）⇒ 拒绝", async () => {
+    // canonical 是软链 ⇒ 它的真实位置是 source；--target 指到 source 里面就会写穿源码树
+    await installSkill({ userHome, source, mode: "link", yes: true });
+    const { confirm } = recorder();
+    const r = await installSkill({
+      userHome,
+      source,
+      mode: "link",
+      confirm,
+      targets: [join(source, "references")],
+    });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/inside the canonical location/);
+    expect(existsSync(join(source, "references", "agent-ex-dispatch"))).toBe(false);
+  });
+
+  /**
    * 回归（P2-1）：`rename(canonical, old)` 失败时旧实现会**泄漏** `.tmp.<pid>`，
    * 而临时名带 pid ⇒ 下次运行（另一个 pid）永远清不掉。
    */

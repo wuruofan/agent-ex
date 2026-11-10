@@ -197,8 +197,8 @@ agent-ex skill remove [options]
   --target <dir>   只移除指定目标（默认：移除所有我们能认出来的）
   --yes            不询问
 
-agent-ex skill status
-  只读，无参数
+agent-ex skill status [--source <dir>]
+  只读，无参数（--target 不接受：status 只报本机状态，没有"额外目标"可言）
 ```
 
 退出码沿用现有 CLI 约定：**0** 成功 / **1** 有失败 / **2** 用法错误。
@@ -280,12 +280,29 @@ canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖�
 `--link --source ~/.agents/skills/agent-ex-dispatch` 会把 canonical 换成一条**指向自己的软链**
 （自指循环 ⇒ 该路径不可读），而命令还会返回 0。
 `--target` 早有同类检查，`--source` 当时漏了 ⇒ 现在两边对称：
-`source` 等于 canonical（哪怕是别名路径或 canonical 的子目录）一律拒绝。
+`source` 等于 canonical（哪怕是别名路径）或在 canonical 里面，一律拒绝。
+
+⚠️ **`--target` 也不能指进 canonical 里面**（2026-11-10 第三轮评审 P2-a）：
+- copy 模式 ⇒ 在装好的 skill 目录里建出指向自己祖先的环（`hashDir` 跳过软链 ⇒ 告警看不见）；
+- link 模式 + canonical 是软链 ⇒ 软链落进**源码树**（仓库里凭空多出一个文件）。
+⇒ 检查按**两条**算：链接位置在 canonical 路径里面，或在 canonical 的 realpath 里面
+（开发者路线下 canonical 指向仓库里的 skill 目录）。
 
 ⚠️ canonical 与宿主链的改动都是**原子替换**（先在临时名上做好新内容，再换位，失败回滚）：
 - 失败时 canonical 原封不动，且**不留临时目录**（临时名带 pid，留着下次进程也清不掉）；
 - 切成软链时**先建好新链再换位**——不是"先删 canonical 再建链"，
-  否则建链失败就永久丢了那份安装。
+  否则建链失败就永久丢了那份安装；
+- 宿主链的重指 / 断链修复同理（旧的链在换位成功前一直都在）。
+
+⚠️ **占位探测用 lstat、不是 existsSync**（2026-11-10 第三轮评审 P1-a）：
+`existsSync` **跟随软链** ⇒ canonical 是悬空软链时返回 false ⇒ 不把占位的链接名挪开
+⇒ `rename(目录, 悬空软链)` 报 ENOTDIR ⇒ 安装必失败，
+而 doctor 给该状态的修法恰恰是 `agent-ex skill install` ⇒ 告警永远修不掉。
+
+**已知限制**：临时名带 pid（并发隔离的代价）⇒ 进程被 SIGKILL 时，
+`.tmp.<pid>` / `.old.<pid>` 会残留，后续进程清不掉它们（内容无害：新内容已就位，
+残留只是一份多余备份或半截临时副本）。这条没有自动清理 —— 按 mtime 清陈旧残留
+会误伤并发中的另一个安装，不值得。
 
 **宿主链接一律指向 canonical**（不是指向 source）：canonical 是唯一真源，`remove` 才能干净地删干净。
 

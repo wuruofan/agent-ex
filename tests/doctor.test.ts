@@ -251,6 +251,9 @@ describe("doctor —— 把证据聚合成结论", () => {
     const skill = r.findings.find((f) => f.title.includes("Dispatch skill"));
     expect(skill).toBeDefined();
     expect(skill?.severity).toBe("info");
+    // ⚠️ summary 不能说"其余都没查"——skill 段在早退之前已经查完了
+    expect(r.summary).toContain("config-dependent checks were skipped");
+    expect(r.summary).not.toContain("the rest could not be checked");
   });
 
   it("历史拒收记录是 warn 不是 error（过去的事，不该让 doctor 永远红）", async () => {

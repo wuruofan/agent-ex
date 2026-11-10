@@ -38,9 +38,15 @@ fi
 #     里的 ~ 是变量值、调用方不会展开 ⇒ 不在这里展开的话会真的建出一个叫 "~" 的目录。
 #   - 空段：env 值写成 "a::b" 或以 ":" 结尾时，IFS 切分会产生空串；
 #     空串传给 --target 会被当成"当前目录"，装出一个 ./agent-ex-dispatch。
+#   - 相对路径按 **$HOME** 展开（不是 cwd！）：CLI 侧 `resolve()` 按 cwd 解析，
+#     而这个脚本常在仓库根跑 ⇒ 相对路径会把目录建进**源码树**（2026-11-10 第三轮评审 P3-c）。
 EXPANDED=()
 for t in "${TARGETS[@]}"; do
   t="${t/#\~/$HOME}"
+  case "$t" in
+    /*) ;;                       # 已经是绝对路径
+    *)  t="$HOME/$t" ;;           # 相对路径按 $HOME 展开
+  esac
   [ -n "$t" ] || continue
   EXPANDED+=("$t")
 done

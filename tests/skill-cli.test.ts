@@ -126,6 +126,17 @@ describe("agent-ex skill（CLI 路径）", () => {
     }
   });
 
+  /** status 只报本机状态，没有"额外目标目录"可言 ⇒ 收下 --target 却默默忽略是骗人。 */
+  it("status 收 --target ⇒ 报用法错误（而不是默默忽略）", async () => {
+    const r = await runSkillCli(["skill", "status", "--target", "/tmp"]);
+    try {
+      expect(r.code).toBe(2);
+      expect(r.out).toMatch(/status takes no --target/);
+    } finally {
+      rmSync(r.home, { recursive: true, force: true });
+    }
+  });
+
   /** 回归（P2-4）：指向**别处**的宿主链不能标成"正常"（绿勾）。 */
   it("status 里链到别处的宿主要标出来（不是绿勾）", async () => {
     const home = mkdtempSync(join(tmpdir(), "aex-skill-cli-"));
