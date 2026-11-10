@@ -12,6 +12,7 @@ import { isFileMutatingTool } from "./executors/file-tools.js";
 import { buildAgentEnv } from "./agent-env.js";
 import { wrapInitialPrompt, wrapContinuePrompt, extractNeedsInput } from "./prompt.js";
 import { resolveZenFreeEnv } from "./zen-free.js";
+import { profileModelLabel } from "./model-check.js";
 import { sendFeishuCard, buildFeishuCard } from "./notifier.js";
 import { dbPath } from "./paths.js";
 import { killTree } from "./proc-tree.js";
@@ -60,6 +61,29 @@ interface RunOutcome {
 
 /** 当前轮 finalize 启动的通知 promise；SIGTERM handler 等待它完成（防止被截断导致 notify_failed 未落库）。 */
 let pendingNotify: Promise<void> | null = null;
+
+/**
+ * 本次运行**实际用到的**模型（zen-free 占位符解析后才非空），只用于卡片底部小字。
+ *
+ * 为什么让它当模块级变量：runner 是单任务进程（一次只跑一个 task），而终态由 finalize /
+ * pushQuotaWarning 两个模块级函数收尾，模型却只有 main 的重试循环里解析得出来
+ * （`resolveZenFreeEnv` 每次 attempt 前重算，撞限会换模）。穿参得改两处签名、还要一路透传，
+ * 换来的是"更纯"——但这里没有第二个调用方，纯度没有承接者。
+ */
+let activeModel: string | null = null;
+
+/**
+ * 卡片底部小字：这次用哪个 profile、哪个模型跑的（与 keyword 同一行，见 notifier.ts）。
+ *
+ * 只列事实、不加 `profile：`/`模型：` 标签——三个值都是标识符，位置即语义，
+ * 标签只会让这行 12px 灰字变长、挤在一起反而不好扫（2026-11-10 用户定的格式）。
+ * 模型取不到（opencode 可以完全不声明模型，走它自己的全局配置）就只留 profile：
+ * 宁可少一个字段，也不写"默认模型"这种既不精确又占位的词。
+ */
+function cardFooter(task: Task, cfg: Awaited<ReturnType<typeof loadConfig>>): string {
+  const model = activeModel ?? profileModelLabel(cfg.profiles[task.profile]?.env);
+  return model ? `${task.profile}  ·  ${model}` : task.profile;
+}
 
 async function main(): Promise<void> {
   const taskId = process.argv[2];
@@ -178,7 +202,7 @@ async function main(): Promise<void> {
         // 配额告警：识别到首个 429 / 硬配额信号时立即推一张 ⚠️ 卡，不再静默等终态。
         if (ev.quotaWarning && !quotaWarned) {
           quotaWarned = true;
-          pushQuotaWarning(cfg, task.id, ev.quotaWarning);
+          pushQuotaWarning(cfg, task, ev.quotaWarning);
         }
         if (Object.keys(patch).length) store.patch(taskId, patch);
       });
@@ -209,6 +233,7 @@ async function main(): Promise<void> {
     attempt++;
     const resolved = await resolveZenFreeEnv(profileEnv, zenExcluded);
     if (resolved.model) {
+      activeModel = resolved.model;
       appendFileSync(task.log_path, JSON.stringify({ type: "_runner", event: "zen_model", attempt, model: resolved.model, excluded: [...zenExcluded] }) + "\n");
     }
     outcome = await runAgent(attempt, buildAgentEnv(executorCfg.bin, resolved.env, pathDirs));
@@ -262,7 +287,7 @@ function finalize(
   const dryRun = cfg.notify.dry_run ?? true;
   const webhook = dryRun ? cfg.notify.feishu_webhook_url
     : resolveEnvPlaceholders({ url: cfg.notify.feishu_webhook_url }).url;
-  pendingNotify = sendFeishuCard(webhook, buildFeishuCard(to, task.id, detail, cfg.notify.keyword), { dryRun })
+  pendingNotify = sendFeishuCard(webhook, buildFeishuCard(to, task.id, detail, cfg.notify.keyword, cardFooter(task, cfg)), { dryRun })
     .then((r) => { if (!r.ok) store.patch(task.id, { notify_failed: true }); })
     .catch((e) => { console.error("[notifier] unexpected:", e); store.patch(task.id, { notify_failed: true }); })
     .finally(() => { pendingNotify = null; });
@@ -290,7 +315,7 @@ function trunc(s: string, max = MAX_RESULT_LEN): string {
  */
 function pushQuotaWarning(
   cfg: Awaited<ReturnType<typeof loadConfig>>,
-  taskId: string,
+  task: Task,
   q: { status?: number; message: string; attempt?: number },
 ): void {
   const dryRun = cfg.notify.dry_run ?? true;
@@ -302,7 +327,7 @@ function pushQuotaWarning(
   parts.push(`worker 触发配额/限流信号，正在重试；持续下去任务大概率失败，会自动推送终态卡片。`);
   if (q.message) parts.push(`\n> ${q.message}`);
   const detail = parts.join("\n\n");
-  sendFeishuCard(webhook, buildFeishuCard("quota_warning", taskId, detail, cfg.notify.keyword), { dryRun })
+  sendFeishuCard(webhook, buildFeishuCard("quota_warning", task.id, detail, cfg.notify.keyword, cardFooter(task, cfg)), { dryRun })
     .catch((e) => { console.error("[quota-warn] unexpected:", e); });
 }
 

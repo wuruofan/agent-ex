@@ -3,6 +3,7 @@ import {
   parseModelList,
   parseOpencodeModel,
   extractModelRef,
+  profileModelLabel,
   checkModelLiveness,
   type RunImpl,
 } from "../src/model-check.js";
@@ -66,6 +67,29 @@ describe("extractModelRef", () => {
   it("returns null when OPENCODE_CONFIG_CONTENT is absent or invalid", () => {
     expect(extractModelRef("opencode", {})).toBeNull();
     expect(extractModelRef("opencode", { OPENCODE_CONFIG_CONTENT: "nope" })).toBeNull();
+  });
+});
+
+describe("profileModelLabel", () => {
+  const oc = (model: string) => ({ OPENCODE_CONFIG_CONTENT: JSON.stringify({ model }) });
+
+  it("prefers ANTHROPIC_MODEL (claude profiles)", () => {
+    expect(profileModelLabel({ ANTHROPIC_MODEL: "MiniMax-M3[1m]" })).toBe("MiniMax-M3[1m]");
+  });
+
+  it("falls back to OPENCODE_CONFIG_CONTENT.model (opencode profiles)", () => {
+    expect(profileModelLabel(oc("minimax-cn-coding-plan/MiniMax-M3.1-Flash"))).toBe("minimax-cn-coding-plan/MiniMax-M3.1-Flash");
+  });
+
+  it("renders the zen-free placeholder as 'zen-free' instead of raw placeholder text", () => {
+    expect(profileModelLabel(oc("{model:zen-free}"))).toBe("zen-free");
+  });
+
+  it("returns null when the profile declares no model (opencode may use its own global config)", () => {
+    expect(profileModelLabel({})).toBeNull();
+    expect(profileModelLabel(undefined)).toBeNull();
+    expect(profileModelLabel({ OPENCODE_CONFIG_CONTENT: "nope" })).toBeNull();
+    expect(profileModelLabel({ ANTHROPIC_MODEL: "   " })).toBeNull();
   });
 });
 

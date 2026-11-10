@@ -133,4 +133,23 @@ describe("buildFeishuCard", () => {
     const card = buildFeishuCard("failed", "task_abc", "boom") as Record<string, any>;
     expect(card.body.elements.some((e: Record<string, any>) => e.tag === "markdown" && e.text_size === "notation")).toBe(false);
   });
+  // 2026-11-10：底部小字加上「哪个 profile、哪个模型」——keyword 在前（闸门词），meta 跟后。
+  // meta 由 runner 拼成 `profile  ·  model`（纯值、无标签，见 runner.ts 的 cardFooter）
+  it("puts meta on the same notation line, after the keyword", () => {
+    const card = buildFeishuCard("completed", "task_abc", "done", BRAND, "ds-v4  ·  deepseek-v4-pro[1m]") as Record<string, any>;
+    const kws = card.body.elements.filter((e: Record<string, any>) => e.tag === "markdown" && e.text_size === "notation");
+    expect(kws).toHaveLength(1);
+    expect(kws[0].content).toBe(`${BRAND}  ·  ds-v4  ·  deepseek-v4-pro[1m]`);
+    expect(kws[0].content.startsWith(BRAND)).toBe(true);
+  });
+  it("emits the notation line when only meta is present (empty keyword must not swallow it)", () => {
+    const card = buildFeishuCard("completed", "task_abc", "done", "", "ds-v4") as Record<string, any>;
+    const kws = card.body.elements.filter((e: Record<string, any>) => e.tag === "markdown" && e.text_size === "notation");
+    expect(kws).toHaveLength(1);
+    expect(kws[0].content).toBe("ds-v4");
+  });
+  it("omits the notation line when both keyword and meta are blank", () => {
+    const card = buildFeishuCard("failed", "task_abc", "boom", "  ", "") as Record<string, any>;
+    expect(card.body.elements.some((e: Record<string, any>) => e.tag === "markdown" && e.text_size === "notation")).toBe(false);
+  });
 });

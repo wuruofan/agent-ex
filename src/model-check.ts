@@ -45,6 +45,29 @@ export function parseOpencodeModel(raw: string | undefined): string | null {
   }
 }
 
+/**
+ * profile 的**模型显示名**（飞书终态卡底部小字用）。
+ *
+ * 与 `extractModelRef` 的分工：那个回答"能不能拿去探测存活"（拿不准就返回 null、不探测）；
+ * 这个回答"给用户看到的是什么"——只求如实，不参与任何判定，所以它比 extractModelRef 宽：
+ * claude 走 `ANTHROPIC_MODEL`，opencode 走 `OPENCODE_CONFIG_CONTENT.model`，
+ * 两者的手写模型名都能拿到（extractModelRef 只看 opencode）。
+ *
+ * `{model:zen-free}` 是 spawn 前才解析的占位符 ⇒ 显示成 `zen-free`（"动态免费模型"比原样
+ * 吐出一个占位符可读）。真实模型由 runner 的 `resolveZenFreeEnv` 解析得到，**那个更权威**，
+ * 调用方应当优先用它，这里只是解析不出时的兜底。
+ *
+ * 两处都没声明时返回 null：opencode 可以走它自己的全局配置，agent-ex 无从得知 ⇒ 不编。
+ */
+export function profileModelLabel(env: Record<string, string> | undefined): string | null {
+  const explicit = env?.ANTHROPIC_MODEL?.trim();
+  if (explicit) return explicit;
+  const fromOpencode = parseOpencodeModel(env?.OPENCODE_CONFIG_CONTENT)?.trim();
+  if (!fromOpencode) return null;
+  const placeholder = /^\{model:(.+)\}$/.exec(fromOpencode);
+  return placeholder ? placeholder[1] : fromOpencode;
+}
+
 /** 解析 `opencode models <provider>` 的 stdout → 模型 id 数组（每行一个完整 id）。 */
 export function parseModelList(stdout: string): string[] {
   return stdout

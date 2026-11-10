@@ -107,6 +107,11 @@ export async function sendFeishuCard(webhookUrl: string, card: Record<string, un
  * text_size=notation（12px 辅助信息灰字）置于正文后，效果等价；缺省时由 loadConfig
  * 填入 BRAND（见 brand.ts），只有显式配成空串才真的不加。
  *
+ * 同一行还挂「这次是哪个 profile、哪个模型跑的」（`meta`，由 runner 传，见 runner.ts 的
+ * `cardFooter`）：一张卡只写任务 ID 时，同一个群里几张卡长得一模一样，回头对账只能去翻库。
+ * 顺序是 keyword 在前——它是闸门词，放在行首更不容易被长文挤走视线；再者闸门匹配的是整张卡，
+ * 与它在行内第几个字无关。`meta` 与 keyword 都为空时才没有这一行。
+ *
  * ⚠️ 飞书对**整张卡片**做关键词子串匹配，不只匹配这一行 ⇒ worker 的报告正文里
  * 只要偶然出现该词，卡也能过闸。2026-10-16 实测：live config 留着旧名 `agent-flow-ex`
  * 连续 23 个任务 0 通知，却因某张卡的正文提到新名而误判为"已恢复"。
@@ -120,13 +125,16 @@ export function buildFeishuCard(
   taskId: string,
   detail: string,
   keyword?: string,
+  /** 底部小字的附加信息（profile / 实际模型）；与 keyword 同行，跟在它后面。 */
+  meta?: string,
 ): Record<string, unknown> {
   const statusEmoji = { needs_input: "❓", completed: "✅", failed: "❌", quota_warning: "⚠️" }[status];
   const statusText = { needs_input: "需要输入", completed: "任务完成", failed: "任务失败", quota_warning: "配额告警" }[status];
   const elements: Record<string, unknown>[] = [
     { tag: "markdown", content: `${statusEmoji} **${statusText}**\n\n**任务ID**：\`${taskId}\`\n\n${detail}` },
   ];
-  if (keyword) elements.push({ tag: "markdown", text_size: "notation", content: keyword });
+  const footer = [keyword, meta].map((s) => s?.trim() ?? "").filter(Boolean).join("  ·  ");
+  if (footer) elements.push({ tag: "markdown", text_size: "notation", content: footer });
   return {
     schema: "2.0",
     body: { elements },
