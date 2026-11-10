@@ -276,11 +276,12 @@ export async function runSkill(args: string[]): Promise<number>;
 
 - `install` / `remove` 需要交互提问 ⇒ 用 `node:readline/promises`（与 `src/init.ts` 同款）。
   ⚠️ **非 TTY（管道 / CI）默认拒绝写操作**：打印一行"检测到非交互环境，请显式加 `--yes`"并 exit 2。
-  原先写的"非 TTY 按 `--yes` 语义走"**不安全**——`install --yes` 会给所有探测到的宿主建链/重指，
+  原先写的"非 TTY 按 `--yes` 语义走"**不安全**——`install --yes` 会给探测到的宿主建链/重指，
   `remove --yes` 会删链、删 canonical 拷贝。CI 里一条非交互命令就可能改掉用户的
   `~/.agents` / `~/.claude` / `~/.trae-cn` / `~/.workbuddy`。
 - `status` 只读，无参数；**绝不创建任何目录或文件**。
 - 退出码：0 成功 / 1 有失败 / 2 用法错误（与 `runConfig` / `runProfile` 一致）。
+  ⚠️ 补充（2026-11-10 复审）："还有东西留在原地"（实体目录 / 外来目录删不掉）也算失败 ⇒ 退出码 1。
 - ⚠️ **"提问"必须可注入**：把提问做成一个回调参数（`prompt?: (q: string, def: boolean) => Promise<boolean>`），
   默认实现走 readline。测试直接注入假回调，不去模拟 TTY。
 

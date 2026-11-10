@@ -16,9 +16,10 @@ import {
   rmSync,
   readlinkSync,
   chmodSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import {
   MARKER_FILE,
   SKILL_HOSTS,
@@ -30,10 +31,12 @@ import {
   inspectCanonical,
   inspectTarget,
   installSkill,
+  pointsAtCanonical,
   readMarker,
   removeSkill,
   resolveBundledSkillDir,
   skillStatus,
+  workBuddyBridges,
   writeMarker,
 } from "../src/skill.js";
 
@@ -209,6 +212,64 @@ describe("inspectTarget", () => {
   });
 });
 
+describe("pointsAtCanonical", () => {
+  it("同一条路径 ⇒ true；指向别处 ⇒ false；undefined ⇒ false", () => {
+    const canonical = canonicalPath(userHome);
+    expect(pointsAtCanonical(canonical, canonical)).toBe(true);
+    expect(pointsAtCanonical(join(root, "elsewhere"), canonical)).toBe(false);
+    expect(pointsAtCanonical(undefined, canonical)).toBe(false);
+  });
+
+  it("软链的 target 与 canonical 是同一条路径（realpath 之后）⇒ true", () => {
+    const canonical = canonicalPath(userHome);
+    // ⚠️ canonical 必须**真实存在**：realpath 解析悬空软链会失败 ⇒ 拿不到可比的目标
+    mkdirSync(canonical, { recursive: true });
+    symlinkSync(canonical, join(root, "alias"), "dir");
+    expect(pointsAtCanonical(join(root, "alias"), canonical)).toBe(true);
+  });
+});
+
+describe("workBuddyBridges —— 自动桥接的判定", () => {
+  const hookPath = (): string => join(userHome, ".workbuddy/hooks/sync-agents-skills.sh");
+  const tablePath = (name: string): string => join(userHome, ".workbuddy/skills", name);
+
+  function withHook(): void {
+    mkdirSync(join(userHome, ".workbuddy/hooks"), { recursive: true });
+    writeFileSync(hookPath(), "#!/bin/sh\nexit 0\n");
+  }
+
+  it("hook 不在 ⇒ 不桥接", () => {
+    expect(workBuddyBridges(userHome)).toBe(false);
+  });
+
+  it("hook 在 ⇒ 桥接", () => {
+    withHook();
+    expect(workBuddyBridges(userHome)).toBe(true);
+  });
+
+  it("reserved 表里点了我们的名字 ⇒ **不**桥接（hook 会跳过它）", () => {
+    // 回归 P2-7：以前只查 excluded 表，漏了 reserved（builtin/plugin 占用）表
+    withHook();
+    mkdirSync(join(userHome, ".workbuddy/skills"), { recursive: true });
+    writeFileSync(tablePath(".reserved-skill-names"), "# comment\nagent-ex-dispatch\n");
+    expect(workBuddyBridges(userHome)).toBe(false);
+  });
+
+  it("excluded 表里点了我们的名字 ⇒ 不桥接", () => {
+    withHook();
+    mkdirSync(join(userHome, ".workbuddy/skills"), { recursive: true });
+    writeFileSync(tablePath(".excluded-skill-names"), "agent-ex-dispatch\n");
+    expect(workBuddyBridges(userHome)).toBe(false);
+  });
+
+  it("表里点的是别的名字 ⇒ 照旧桥接", () => {
+    withHook();
+    mkdirSync(join(userHome, ".workbuddy/skills"), { recursive: true });
+    writeFileSync(tablePath(".reserved-skill-names"), "some-other-skill\n");
+    expect(workBuddyBridges(userHome)).toBe(true);
+  });
+});
+
 describe("install —— 拷贝路线", () => {
   it("missing ⇒ 装上、写 marker；第二次 ⇒ skip 且文件系统不变", async () => {
     const { confirm } = recorder();
@@ -313,13 +374,57 @@ describe("install —— 拷贝路线", () => {
 
   it("source 是相对路径 ⇒ 解析成绝对路径（软链的字面 target 是相对链接所在目录解析的）", async () => {
     // 回归 P1-2：`--link --source <相对路径>` 曾装出**必然断掉**的链并返回 0。
-    // 用仓库里真实存在的相对路径来测：cwd 就是仓库根。
+    // ⚠️ 相对路径由 `relative(cwd, …)` 现算 ⇒ 不依赖 "cwd == 仓库根" 这种巧合。
     const { confirm } = recorder();
-    const r = await installSkill({ userHome, source: "skills/agent-ex-dispatch", mode: "link", confirm });
+    const rel = relative(process.cwd(), source);
+    expect(rel.startsWith("/")).toBe(false); // 确实是相对路径
+    const r = await installSkill({ userHome, source: rel, mode: "link", confirm });
     expect(r.ok).toBe(true);
     const target = readlinkSync(canonicalPath(userHome));
     expect(target.startsWith("/")).toBe(true); // 绝对路径
     expect(existsSync(canonicalPath(userHome))).toBe(true); // 不是断链
+  });
+
+  it("source 就是 canonical 自己 ⇒ 拒绝（否则装出自指的断链却返回 0）", async () => {
+    // 回归 P1-2（复审轮）：`--link --source <canonical>` 曾把 canonical 换成
+    // 一条指向自己的软链 ⇒ 该路径不可读，而命令 exit 0。
+    await installSkill({ userHome, source, yes: true });
+    const canonical = canonicalPath(userHome);
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source: canonical, mode: "link", confirm });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/refusing to link it to itself/);
+    // canonical 没被动过（还是原来那份拷贝）
+    expect(lstatSync(canonical).isSymbolicLink()).toBe(false);
+    expect(existsSync(join(canonical, "SKILL.md"))).toBe(true);
+  });
+
+  it("source 是 canonical 的别名路径（同一目录、写法不同）⇒ 也拒绝", async () => {
+    await installSkill({ userHome, source, yes: true });
+    const canonical = canonicalPath(userHome);
+    // 用 `..` 拼一个指向同一目录的路径（不同写法、同一处）
+    const alias = join(canonical, "..", "agent-ex-dispatch");
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source: alias, mode: "link", confirm });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/refusing to link it to itself/);
+  });
+
+  it("source 在 canonical 里面 ⇒ 拒绝（会形成环）", async () => {
+    await installSkill({ userHome, source, yes: true });
+    const inner = join(canonicalPath(userHome), "references");
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source: inner, mode: "link", confirm });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/refusing to link it to itself/);
+  });
+
+  it("开发者路线（canonical 是软链、source 是它的目标）⇒ **不**被自链检查误伤", async () => {
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source, mode: "link", confirm });
+    expect(r.ok).toBe(true);
+    expect(lstatSync(canonicalPath(userHome)).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(canonicalPath(userHome))).toBe(source);
   });
 });
 
@@ -381,6 +486,23 @@ describe("宿主链接", () => {
     expect(r.lines.some((l) => /not linked by default/.test(l))).toBe(true);
   });
 
+  it("默认不链的宿主上**已有一条指向别处的旧链** ⇒ 照样重指（spec §4.4）", async () => {
+    // 回归 P1-1（复审轮）：以前「默认不链」的判断在 inspectTarget **之前**就 continue 了，
+    // 于是旧链永远不重指 ⇒ status/doctor 永远告警，而告警给的修法还修不了。
+    const host = SKILL_HOSTS.find((h) => h.id === "codex")!;
+    mkdirSync(hostDir(userHome, host), { recursive: true });
+    const elsewhere = makeSource(join(root, "stale-codex"));
+    symlinkSync(elsewhere, join(hostDir(userHome, host), "agent-ex-dispatch"), "dir");
+
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source, confirm });
+    expect(r.ok).toBe(true);
+    expect(readlinkSync(join(hostDir(userHome, host), "agent-ex-dispatch"))).toBe(
+      canonicalPath(userHome),
+    );
+    expect(r.lines.some((l) => /repointed/.test(l))).toBe(true);
+  });
+
   it("用户拒绝重指 canonical ⇒ **一个宿主链都不建**（别链到不是 bundled skill 的目录上）", async () => {
     const claudeDir = hostDir(userHome, SKILL_HOSTS.find((h) => h.id === "claude")!);
     mkdirSync(claudeDir, { recursive: true });
@@ -424,6 +546,84 @@ describe("版本与内容指纹", () => {
     const mis = issues.find((i) => i.code === "skill.host-link-elsewhere");
     expect(mis?.severity).toBe("warn");
     expect(mis?.detail).toContain(elsewhere);
+  });
+
+  it("宿主链**断掉**（目标没了）⇒ doctor 也要报（以前只有 status 报）", async () => {
+    const claudeDir = hostDir(userHome, SKILL_HOSTS.find((h) => h.id === "claude")!);
+    mkdirSync(claudeDir, { recursive: true });
+    // 指向一个不存在的目录 ⇒ 断链
+    symlinkSync(join(root, "gone"), join(claudeDir, "agent-ex-dispatch"), "dir");
+
+    const issues = collectSkillIssues({ userHome, source });
+    const mis = issues.find((i) => i.code === "skill.host-link-elsewhere");
+    expect(mis?.severity).toBe("warn");
+    expect(mis?.detail).toMatch(/broken/);
+  });
+});
+
+describe("原子替换与失败路径", () => {
+  /**
+   * 回归（P2-1）：`rename(canonical, old)` 失败时旧实现会**泄漏** `.tmp.<pid>`，
+   * 而临时名带 pid ⇒ 下次运行（另一个 pid）永远清不掉。
+   */
+  it("替换失败 ⇒ 不留临时目录，canonical 原封不动", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return; // root 无视权限
+    await installSkill({ userHome, source, yes: true });
+    const skillsDir = join(userHome, ".agents/skills");
+    const canonical = canonicalPath(userHome);
+    // ⚠️ 先把内容改掉（marker 的 sha 对不上）⇒ 这次 install 会真的去替换
+    writeFileSync(join(canonical, "SKILL.md"), "hand edited\n");
+    chmodSync(skillsDir, 0o555); // 目录不可写 ⇒ rename 必然失败
+    try {
+      const r = await installSkill({ userHome, source, yes: true });
+      expect(r.ok).toBe(false);
+      expect(r.errors.length).toBeGreaterThan(0);
+      // canonical 还在、内容没变
+      expect(existsSync(join(canonical, "SKILL.md"))).toBe(true);
+      // ⚠️ 父目录里没有残留的临时目录（.tmp.<pid> / .old.<pid>）
+      expect(readdirSync(skillsDir).filter((n) => n.startsWith("."))).toEqual([]);
+    } finally {
+      chmodSync(skillsDir, 0o755);
+    }
+  });
+
+  /**
+   * 回归（P2-2）：link 路线以前是「先 rm canonical，再建链」——
+   * symlinkSync 失败就**永久丢了这份安装**（连备份都没有）。
+   */
+  it("切成软链失败 ⇒ 原来那份拷贝还在（不是删了再建）", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return; // root 无视权限
+    await installSkill({ userHome, source, yes: true });
+    const canonical = canonicalPath(userHome);
+    const skillsDir = join(userHome, ".agents/skills");
+    chmodSync(skillsDir, 0o555); // 目录不可写 ⇒ symlinkSync 失败
+    try {
+      const r = await installSkill({ userHome, source, mode: "link", yes: true });
+      expect(r.ok).toBe(false);
+      // ⚠️ 拷贝还在，没被删掉
+      expect(lstatSync(canonical).isSymbolicLink()).toBe(false);
+      expect(existsSync(join(canonical, "SKILL.md"))).toBe(true);
+    } finally {
+      chmodSync(skillsDir, 0o755);
+    }
+  });
+});
+
+describe("库 API 的默认行为", () => {
+  it("removeSkill 不给 yes / confirm ⇒ **拒绝执行**（不静默删东西）", async () => {
+    // 回归 P2-3：以前默认 confirm 按默认值（=是）放行 ⇒ 程序化误用会静默删掉安装。
+    await installSkill({ userHome, source, yes: true });
+    await expect(removeSkill({ userHome, source })).rejects.toThrow(/cannot ask interactively/);
+    expect(existsSync(canonicalPath(userHome))).toBe(true);
+  });
+
+  it("installSkill 不给 yes / confirm、但需要提问时 ⇒ 拒绝执行", async () => {
+    // canonical 指向别处 ⇒ 会问"要不要重指"；没人能答 ⇒ 抛错，不静默重指。
+    const elsewhere = makeSource(join(root, "elsewhere3"));
+    mkdirSync(join(userHome, ".agents/skills"), { recursive: true });
+    symlinkSync(elsewhere, canonicalPath(userHome), "dir");
+    await expect(installSkill({ userHome, source })).rejects.toThrow(/cannot ask interactively/);
+    expect(readlinkSync(canonicalPath(userHome))).toBe(elsewhere);
   });
 });
 

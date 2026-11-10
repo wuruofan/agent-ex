@@ -76,8 +76,8 @@ describe("agent-ex skill（CLI 路径）", () => {
    */
   it("--target 后面紧跟另一个选项 ⇒ 报用法错误，且不建出那个名字的目录", async () => {
     const work = mkdtempSync(join(tmpdir(), "aex-skill-cli-opt-"));
+    const r = await runSkillCli(["skill", "install", "--target", "--source", "x", "--yes"], { cwd: work });
     try {
-      const r = await runSkillCli(["skill", "install", "--target", "--source", "x", "--yes"], { cwd: work });
       expect(r.code).toBe(2);
       expect(r.out).toMatch(/--target needs a directory/);
       // 工作目录里没多出 "--source" / "--yes" 这两个目录
@@ -85,6 +85,7 @@ describe("agent-ex skill（CLI 路径）", () => {
       expect(readdirSync(work)).not.toContain("--yes");
     } finally {
       rmSync(work, { recursive: true, force: true });
+      rmSync(r.home, { recursive: true, force: true });
     }
   });
 

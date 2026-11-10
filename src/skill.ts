@@ -292,6 +292,42 @@ export function pointsAtCanonical(target: string | undefined, canonical: string)
   return realOrSelf(target) === realOrSelf(canonical);
 }
 
+/** 路径 a 是不是就是路径 b（按 realpath 比，能识别 `/tmp` vs `/private/tmp` 这种别名）？ */
+function samePath(a: string, b: string): boolean {
+  return realOrSelf(a) === realOrSelf(b);
+}
+
+/** a 在 b 里面吗（含 a === b）？ */
+function isInside(a: string, b: string): boolean {
+  const x = resolve(a);
+  const y = resolve(b);
+  return x === y || x.startsWith(y.endsWith(sep) ? y : y + sep);
+}
+
+/** canonical 这条路径现在是不是软链？ */
+function isSymlinkPath(p: string): boolean {
+  try {
+    return lstatSync(p).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `source` 会不会让 canonical 变成一条**指向自己的断链**（自指循环）？
+ *
+ * ⚠️ 不能简单地比 realpath：canonical 是**软链**时（开发者路线）realpath(canonical)
+ * 正好就是 source —— 那正是要装的形态，不能误伤。
+ * 所以分两种：
+ *   - canonical 是软链 ⇒ 只有「source 就是 canonical 这条路径」才危险；
+ *   - canonical 是实体目录 ⇒ source 等于它（哪怕是别名路径）或在它里面，都危险。
+ */
+export function sourceWouldSelfLink(source: string, canonical: string): boolean {
+  if (resolve(source) === resolve(canonical)) return true;
+  if (isSymlinkPath(canonical)) return false;
+  return samePath(source, canonical) || isInside(source, canonical);
+}
+
 /**
  * 判定 canonical 的状态。**只读**，不创建任何东西。
  *
@@ -511,18 +547,36 @@ export function collectSkillIssues(opts: { userHome: string; source?: string }):
   }
 
   const canonicalAbs = realOrSelf(st.canonical.path);
-  // 链到别处的宿主：链还在，但它指的不是 canonical ⇒ 宿主看到的可能是一份旧内容。
+  // 链到别处的宿主 / 断掉的链：链还在，但它指的不是 canonical ⇒ 宿主看到的可能是一份旧内容，
+  // 或者根本读不到。两种都要报 —— 只在 status 里报、doctor 静默，等于体检漏项。
   const mislinked = st.hosts.filter(
-    (h) => h.state.kind === "link" && h.state.target !== canonicalAbs,
+    (h) =>
+      h.state.kind === "broken-link" ||
+      (h.state.kind === "link" && h.state.target !== canonicalAbs),
   );
   if (mislinked.length > 0) {
+    const broken = mislinked.filter((h) => h.state.kind === "broken-link");
+    const elsewhere = mislinked.filter((h) => h.state.kind === "link");
+    const detailParts: string[] = [];
+    if (elsewhere.length > 0) {
+      detailParts.push(
+        `These links do not point at ${st.canonical.path}: ${elsewhere
+          .map((h) => `${h.host.label} (${h.state.path} -> ${h.state.target})`)
+          .join(", ")}.`,
+      );
+    }
+    if (broken.length > 0) {
+      detailParts.push(
+        `These links are broken (their target is gone): ${broken
+          .map((h) => `${h.host.label} (${h.state.path})`)
+          .join(", ")}.`,
+      );
+    }
     issues.push({
       code: "skill.host-link-elsewhere",
       severity: "warn",
       title: "Some hosts link the dispatch skill to a different location",
-      detail: `These links do not point at ${st.canonical.path}: ${mislinked
-        .map((h) => `${h.host.label} (${h.state.path} -> ${h.state.target})`)
-        .join(", ")}.`,
+      detail: detailParts.join(" "),
       fix: "agent-ex skill install (it will ask whether to repoint them)",
     });
   }
@@ -577,11 +631,12 @@ export interface InstallOptions {
   /** 额外宿主目录（显式指定 ⇒ 直接建链，不问）。 */
   targets?: string[];
   /**
-   * 跳过所有提问（一律按默认值走）。
+   * 跳过所有提问（每个问题都按 yes 答）。
    *
-   * ⚠️ 默认 **false**：默认 `confirm` 取每个问题的默认值（多数问题的默认值是 yes），
-   * 但**显式 `--yes`** 才会把每个问题都强制成 yes。CLI 层（`skill-cmd.ts`）在
-   * 非 TTY 且没有 `--yes` 时直接拒绝执行写操作，不走到这里。
+   * ⚠️ 默认 **false**。默认 `confirm` 在**没人能答问题**时会抛错（拒绝执行），
+   * 而不是默认按"是"放行 —— 库 API 被误用时不该静默删东西。
+   * 要放行就显式给 `yes: true`，或自己注入 `confirm`。
+   * CLI 层（`skill-cmd.ts`）在非 TTY 且没有 `--yes` 时直接拒绝执行写操作。
    */
   yes?: boolean;
   /** 提问回调。 */
@@ -593,23 +648,33 @@ export interface RemoveOptions {
   source?: string;
   /** 只移除这些目录下的条目；**不给则连 canonical 一起移除**。 */
   targets?: string[];
-  /** 跳过确认（一律执行）。默认 false。 */
+  /**
+   * 跳过确认（一律执行）。
+   *
+   * ⚠️ 默认 **false**：不传 `confirm` 时，卸载会**拒绝执行并抛错**
+   * （库 API 被误用时不该静默删东西）。要放行就显式给 `yes: true`。
+   */
   yes?: boolean;
   confirm?: ConfirmFn;
 }
 
 /**
- * 原子拷贝：先写同目录临时目录，再把旧的挪开、rename 到位。
+ * **原子替换 canonical**：先在同目录的临时名上把新内容做好，成功了才换上去。
+ *
+ * `build(tmp)` 负责把新内容写到 tmp（拷贝目录 / 软链），失败时它自己抛。
+ * 本函数负责剩下的：挪走旧的 → 换新的 → 失败回滚。
  *
  * ⇒ 宿主永远读不到"写了一半"的 skill；失败时 canonical 原封不动。
  *
- * ⚠️ **失败路径必须保住上一份 canonical**（2026-11-10 评审发现的 P1）：
- *   - `cpSync` 失败 ⇒ 删掉 tmp（临时目录名带 pid，留着下次进程也清不掉），canonical 没动过；
+ * ⚠️ **失败路径必须保住上一份 canonical**（2026-11-10 评审 P1-1 / P2-1 / P2-2）：
+ *   - `build` 失败 ⇒ canonical 没动过，只要把半截的 tmp 收掉
+ *     （临时名带 pid，留着**下次进程也清不掉** ⇒ 必须无条件清）；
+ *   - `rename(canonical, old)` 失败 ⇒ canonical 原地不动（还是好的），清 tmp 后抛；
  *   - `rename(tmp, canonical)` 失败 ⇒ 尝试把 `old` 挪回 canonical；
  *     **挪不回去就绝不能删 `old`** —— 那是用户上一份安装的唯一副本。
  *     （原实现用 `finally { rmSync(old) }` 无条件删，与它自己的注释相反。）
  */
-function copyAtomically(source: string, canonical: string): void {
+function replaceAtomically(canonical: string, build: (tmp: string) => void): void {
   const parent = dirname(canonical);
   mkdirSync(parent, { recursive: true });
   const tmp = join(parent, `.${SKILL_NAME}.tmp.${process.pid}`);
@@ -618,18 +683,27 @@ function copyAtomically(source: string, canonical: string): void {
   rmSync(old, { recursive: true, force: true });
 
   try {
-    cpSync(source, tmp, { recursive: true });
+    build(tmp);
   } catch (e) {
-    // 拷贝失败：canonical 根本没被碰过，只要把半截的 tmp 收掉。
+    // 新内容没做好：canonical 根本没被碰过，只要把半截的 tmp 收掉。
     rmSync(tmp, { recursive: true, force: true });
     throw e;
   }
 
   const hadOld = existsSync(canonical);
-  if (hadOld) renameSync(canonical, old);
+  if (hadOld) {
+    try {
+      renameSync(canonical, old);
+    } catch (e) {
+      // 旧的挪不动 ⇒ canonical 原地不动（还是好的）；tmp 是多余的，收掉。
+      rmSync(tmp, { recursive: true, force: true });
+      throw e;
+    }
+  }
   try {
     renameSync(tmp, canonical);
   } catch (e) {
+    rmSync(tmp, { recursive: true, force: true });
     let restored = false;
     if (hadOld) {
       try {
@@ -639,7 +713,6 @@ function copyAtomically(source: string, canonical: string): void {
         /* 挪不回去 —— old 必须留在原处，它是唯一副本 */
       }
     }
-    rmSync(tmp, { recursive: true, force: true });
     if (hadOld && !restored) {
       throw new Error(
         `failed to install and failed to restore the previous copy — it is kept at ${old}. ` +
@@ -652,6 +725,22 @@ function copyAtomically(source: string, canonical: string): void {
   rmSync(old, { recursive: true, force: true });
 }
 
+/** 拷贝路线：把 source 整个拷成 canonical（原子）。 */
+function copyAtomically(source: string, canonical: string): void {
+  replaceAtomically(canonical, (tmp) => cpSync(source, tmp, { recursive: true }));
+}
+
+/** 软链路线：把 canonical 换成指向 target 的软链（原子；旧的挪开失败 ⇒ 原地不动）。 */
+function linkAtomically(canonical: string, target: string): void {
+  replaceAtomically(canonical, (tmp) => symlinkSync(target, tmp, "dir"));
+}
+
+/** 在 linkPath 处建一条指向 target 的软链（父目录不存在就建）。 */
+function symlinkAt(linkPath: string, target: string): void {
+  mkdirSync(dirname(linkPath), { recursive: true });
+  symlinkSync(target, linkPath, "dir");
+}
+
 /** 建一条宿主软链（先 lstat，**绝不用 shell ln**——ln 对已存在的目录目标不报错）。 */
 function linkHost(dir: string, canonical: string): void {
   mkdirSync(dir, { recursive: true });
@@ -661,7 +750,7 @@ function linkHost(dir: string, canonical: string): void {
   else if (st.kind === "dir" || st.kind === "file") {
     throw new Error(`${linkPath} exists and is not a symlink`);
   }
-  symlinkSync(canonical, linkPath, "dir");
+  symlinkAt(linkPath, canonical);
 }
 
 /**
@@ -681,27 +770,48 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
   const source = resolve(opts.source ?? resolveBundledSkillDir());
   const mode = opts.mode ?? "copy";
   const yes = opts.yes ?? false;
-  // 默认提问实现：给了 --yes 就一律 yes；否则取默认值。
-  const confirm: ConfirmFn = opts.confirm ?? (async (_q, def) => (yes ? true : def));
+  // 默认提问实现：**没人能答问题时拒绝执行**，而不是默认按"是"放行。
+  // CLI 层总是注入带 TTY 检查的 confirm；程序化调用方必须显式给
+  // `yes: true`（全答 yes）或自己的 confirm —— 否则这行会抛。
+  const confirm: ConfirmFn =
+    opts.confirm ??
+    (async (q, _def) => {
+      if (yes) return true;
+      throw new Error(
+        `cannot ask interactively: "${q}" — pass yes: true (accept every answer) or a confirm callback`,
+      );
+    });
 
   // source 必须**像个 skill 目录**：否则装出去的是个空目录，宿主那边根本不会加载。
   if (!existsSync(source)) {
     errors.push(`skill source not found: ${source}`);
     return { ok: false, lines, errors, skipped: [] };
   }
+
+  const canonical = canonicalPath(opts.userHome);
+
+  // ⚠️ source 不能是 canonical 自己：那会装出一条**指向自己的断链**（自指循环），
+  // 而且命令还会返回 0（2026-11-10 评审 P1-2）。`--target` 早有同类检查，source 之前漏了。
+  // ⚠️ 这个检查**排在 SKILL.md 校验之前**：canonical 里面有子目录（references/），
+  // 拿它当 source 时更根本的问题是"自指"，不是"没有 SKILL.md"。
+  if (sourceWouldSelfLink(source, canonical)) {
+    errors.push(
+      `--source ${source} is the canonical location itself (${canonical}) — refusing to link it to itself`,
+    );
+    return { ok: false, lines, errors, skipped: [] };
+  }
+
   if (!existsSync(join(source, "SKILL.md"))) {
     errors.push(`skill source has no SKILL.md: ${source} (not a skill directory?)`);
     return { ok: false, lines, errors, skipped: [] };
   }
-
-  const canonical = canonicalPath(opts.userHome);
 
   // `--target` 不能等于 canonical 本身或它的父目录：
   //   - 等于 canonical   → 自链（link 指向自己）
   //   - 等于 canonical 的父目录 → canonical 就在那儿，等于让 canonical 自己链到自己
   for (const t of opts.targets ?? []) {
     const dir = resolve(t);
-    if (dir === canonical || dir === dirname(canonical)) {
+    if (dir === canonical || dir === dirname(canonical) || samePath(dir, canonical)) {
       errors.push(
         `--target ${dir} is the canonical location itself (${canonical}) — refusing to link it to itself`,
       );
@@ -748,7 +858,7 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
     case "missing": {
       if (mode === "link") {
         // 目标就是 source
-        if (!attempt(`link ${canonical}`, () => linkHost(dirname(canonical), source))) break;
+        if (!attempt(`link ${canonical}`, () => linkAtomically(canonical, source))) break;
         lines.push(`linked   ${canonical} -> ${source}`);
       } else {
         if (!attempt(`install ${canonical}`, doCopy)) break;
@@ -767,10 +877,8 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
           true,
         );
         if (go) {
-          if (!attempt(`install ${canonical}`, () => {
-            rmSync(canonical, { force: true });
-            doCopy();
-          })) break;
+          // ⚠️ 不用先 rm：copyAtomically 自己就是原子替换（旧的挪开、新的换位、失败回滚）。
+          if (!attempt(`install ${canonical}`, doCopy)) break;
           lines.push(`installed ${canonical} (copy of v${version}, replaced the link)`);
         } else {
           lines.push(`skip     ${canonical} (kept the existing link)`);
@@ -786,8 +894,7 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
       );
       if (go) {
         if (!attempt(`install ${canonical}`, () => {
-          rmSync(canonical, { force: true });
-          if (mode === "link") linkHost(dirname(canonical), source);
+          if (mode === "link") linkAtomically(canonical, source);
           else doCopy();
         })) break;
         lines.push(
@@ -811,10 +918,9 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
           true,
         );
         if (go) {
-          if (!attempt(`link ${canonical}`, () => {
-            rmSync(canonical, { recursive: true, force: true });
-            linkHost(dirname(canonical), source);
-          })) break;
+          // ⚠️ 原子替换：先建好新链再换位。直接 rm 再建的话，
+          // symlinkSync 失败就**永久丢了这份安装**（2026-11-10 评审 P2-2）。
+          if (!attempt(`link ${canonical}`, () => linkAtomically(canonical, source))) break;
           lines.push(`linked   ${canonical} -> ${source}`);
           canonicalReady = true;
         } else {
@@ -855,10 +961,7 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
           true,
         );
         if (go) {
-          if (!attempt(`link ${canonical}`, () => {
-            rmSync(canonical, { recursive: true, force: true });
-            linkHost(dirname(canonical), source);
-          })) break;
+          if (!attempt(`link ${canonical}`, () => linkAtomically(canonical, source))) break;
           lines.push(`linked   ${canonical} -> ${source}`);
         } else {
           lines.push(`skip     ${canonical} (kept the existing directory)`);
@@ -896,15 +999,6 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
     const dir = hostDir(opts.userHome, host);
     const isExplicit = explicit.has(resolve(dir));
     if (!isExplicit && !existsSync(dir)) continue; // 没这个宿主的目录 ⇒ 不打扰
-    // ⚠️ codex / opencode 默认**不**建链：未验证这两个宿主真的会读自己的 skills 目录，
-    // 而 codex 直接读共享目录 `~/.agents/skills`，本来就不需要链。
-    // 需要时用 `--target <dir>` 显式指定（显式指定 ⇒ 直接建，不问）。
-    if (!isExplicit && host.linkByDefault === false) {
-      lines.push(
-        `note     ${host.label} is not linked by default (use --target ${dir} if that host reads its own skills dir)`,
-      );
-      continue;
-    }
     const linkPath = join(dir, SKILL_NAME);
     const st = inspectTarget(linkPath);
 
@@ -915,6 +1009,9 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
       }
       if (st.kind === "link") {
         // 已有一条指向别处的链 —— 自动桥接机制**不会**接管它，必须主动重指。
+        // ⚠️ 这条对"默认不链"的宿主（codex / opencode）同样成立：
+        // 「默认不链」限定的是**没有条目**时要不要新建，不是"放着一条旧链不管"
+        // （spec §4.4）。放着不管 ⇒ status/doctor 永远告警，而告警给的修法还修不了。
         const go = isExplicit
           ? true
           : await confirm(
@@ -923,7 +1020,7 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
             );
         if (go) {
           rmSync(linkPath, { force: true });
-          symlinkSync(canonical, linkPath, "dir");
+          symlinkAt(linkPath, canonical);
           lines.push(`repointed ${linkPath} -> ${canonical}`);
         } else {
           lines.push(`skip     ${linkPath} (kept the existing link)`);
@@ -939,14 +1036,25 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
       if (st.kind === "broken-link") {
         // 断链：指向的目标没了。直接换成指向 canonical。
         rmSync(linkPath, { force: true });
-        symlinkSync(canonical, linkPath, "dir");
+        symlinkAt(linkPath, canonical);
         lines.push(`repaired ${linkPath} -> ${canonical}`);
         continue;
       }
-      // 没有条目
+      // ---- 没有条目 ----
       if (!isExplicit && host.autoBridge && host.autoBridge(opts.userHome)) {
         lines.push(
           `note     ${host.label} bridges ${join(opts.userHome, ".agents/skills")} automatically — no link needed`,
+        );
+        continue;
+      }
+      // ⚠️ codex / opencode 默认**不**建链：未验证这两个宿主真的会读自己的 skills 目录，
+      // 而 codex 直接读共享目录 `~/.agents/skills`，本来就不需要链。
+      // 需要时用 `--target <dir>` 显式指定（显式指定 ⇒ 直接建，不问）。
+      // ⚠️ 这个判断只管"**没有条目**"的情形；上面已有的链（link / broken-link）
+      // 照样要处理 —— 见上面「指向别处的链必须重指」那条注释。
+      if (!isExplicit && host.linkByDefault === false) {
+        lines.push(
+          `note     ${host.label} is not linked by default (use --target ${dir} if that host reads its own skills dir)`,
         );
         continue;
       }
@@ -954,8 +1062,7 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
         ? true
         : await confirm(`Link the dispatch skill into ${host.label} (${dir})?`, true);
       if (go) {
-        mkdirSync(dir, { recursive: true });
-        symlinkSync(canonical, linkPath, "dir");
+        symlinkAt(linkPath, canonical);
         lines.push(`linked   ${linkPath} -> ${canonical}`);
       } else {
         lines.push(`skip     ${linkPath} (not linked)`);
@@ -982,8 +1089,7 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
         continue;
       }
       rmSync(linkPath, { force: true });
-      mkdirSync(dir, { recursive: true });
-      symlinkSync(canonical, linkPath, "dir");
+      symlinkAt(linkPath, canonical);
       lines.push(`linked   ${linkPath} -> ${canonical}`);
     } catch (e) {
       errors.push(`${linkPath}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1012,8 +1118,15 @@ export async function removeSkill(opts: RemoveOptions): Promise<SkillActionResul
   /** 留着没删的东西。 */
   const skipped: string[] = [];
   const yes = opts.yes ?? false;
-  // 默认提问实现：给了 --yes 就一律 yes；否则取默认值（CLI 层会自己注入带 TTY 检查的 confirm）。
-  const confirm: ConfirmFn = opts.confirm ?? (async (_q, def) => (yes ? true : def));
+  // 同 installSkill：没人能答问题时**拒绝执行**，不默认按"是"放行。
+  const confirm: ConfirmFn =
+    opts.confirm ??
+    (async (q, _def) => {
+      if (yes) return true;
+      throw new Error(
+        `cannot ask interactively: "${q}" — pass yes: true (accept every answer) or a confirm callback`,
+      );
+    });
 
   const dirs = (opts.targets ?? []).map((t) => resolve(t));
   const explicitOnly = dirs.length > 0;
@@ -1060,9 +1173,10 @@ export async function removeSkill(opts: RemoveOptions): Promise<SkillActionResul
   // ---- canonical（后删）----
   if (!explicitOnly) {
     const canonical = canonicalPath(opts.userHome);
-    if (hostLinkFailed) {
+    if (hostLinkFailed && existsSync(canonical)) {
       // ⚠️ 先链后 canonical：宿主链还在（删不掉），canonical 先别动 ——
       // 删了 canonical，留在原地的链就全成了断链。
+      // ⚠️ 只有 canonical **真的存在**时才说"kept"；它压根不存在时说"kept"是误导。
       skipped.push(canonical);
       lines.push(
         `kept     ${canonical} (some host links could not be removed — deleting it now would leave them dangling)`,

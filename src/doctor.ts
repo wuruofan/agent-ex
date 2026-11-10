@@ -347,7 +347,13 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
       fix: "agent-ex init (rebuilds the config; the broken file is backed up first)",
     });
     sortFindings();
-    return { ok: false, summary: "config.json is unusable — the rest could not be checked", findings };
+    // ⚠️ 文案不能说"其余都没查"：skill 段在早退**之前**已经跑完了。
+    // 准确的说法是"依赖 config 的检查跳过了"。
+    return {
+      ok: false,
+      summary: "config.json is unusable — config-dependent checks were skipped",
+      findings,
+    };
   }
   const c = cfg!;
 

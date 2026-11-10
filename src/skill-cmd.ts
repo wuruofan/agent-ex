@@ -7,13 +7,15 @@
  * （不违反 AGENTS 硬约束 7 的字面禁令，但违反"每个分支都要用且便宜"的精神）。
  *
  * 这个模块只 import `skill.ts` + node 内置 ⇒ 轻。
+ *
+ * ⚠️ 这里**不**再 re-export `collectSkillIssues` / `canonicalPath`：没有调用方从本模块取它们
+ * （都直接从 `./skill.js` 取），留着只是让人以为 skill 逻辑有两处入口。
  */
 import { homedir } from "node:os";
 import { createInterface } from "node:readline/promises";
 import {
   SKILL_NAME,
   canonicalPath,
-  collectSkillIssues,
   installSkill,
   pointsAtCanonical,
   removeSkill,
@@ -231,6 +233,3 @@ export async function runSkill(args: string[]): Promise<number> {
     return 2;
   }
 }
-
-/** 给 doctor 用的薄封装（保持 skill 逻辑只在一处）。 */
-export { collectSkillIssues, canonicalPath };

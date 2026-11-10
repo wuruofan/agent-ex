@@ -190,7 +190,7 @@ agent-ex skill install [options]
   --target <dir>   额外宿主目录（可重复）：不经询问直接建链
   --source <dir>   skill 源目录（默认：本模块内置的那份）
   --link           开发者路线：canonical 用软链而不是拷贝
-  --yes            跳过所有询问，给所有探测到的宿主建链
+  --yes            跳过所有询问（默认不链的宿主仍需 --target 显式指定）
   -h, --help
 
 agent-ex skill remove [options]
@@ -276,6 +276,17 @@ canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖�
 5. 打印结果清单
 ```
 
+⚠️ **source 不能是 canonical 自己**（2026-11-10 复审 P1-2）：
+`--link --source ~/.agents/skills/agent-ex-dispatch` 会把 canonical 换成一条**指向自己的软链**
+（自指循环 ⇒ 该路径不可读），而命令还会返回 0。
+`--target` 早有同类检查，`--source` 当时漏了 ⇒ 现在两边对称：
+`source` 等于 canonical（哪怕是别名路径或 canonical 的子目录）一律拒绝。
+
+⚠️ canonical 与宿主链的改动都是**原子替换**（先在临时名上做好新内容，再换位，失败回滚）：
+- 失败时 canonical 原封不动，且**不留临时目录**（临时名带 pid，留着下次进程也清不掉）；
+- 切成软链时**先建好新链再换位**——不是"先删 canonical 再建链"，
+  否则建链失败就永久丢了那份安装。
+
 **宿主链接一律指向 canonical**（不是指向 source）：canonical 是唯一真源，`remove` 才能干净地删干净。
 
 ⚠️ **"软链指向别处"是本机当前的真实状态**，不是理论情况：
@@ -306,6 +317,11 @@ canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖�
 ⚠️ **canonical 不是"一份可用的安装"时，一个宿主链都不建**：canonical 仍指向别处
 （用户拒绝了重指）或写失败了 ⇒ 宿主链过去只会链到一个不是 bundled skill 的目录上。
 
+⚠️ **"默认不链"只管"没有条目"的情形，不管"已经有一条旧链"**（2026-11-10 复审 P1-1）：
+codex / opencode 目录里若已有一条指向别处的 `agent-ex-dispatch` 链，那条链**照样要重指**到
+canonical —— 自动桥接机制从不接管已存在的条目，放着不管就是坏状态；
+而且 `doctor` 会把它报成告警，若 `install` 修不了，那个告警就永远修不掉。
+
 ### 4.5 remove 的规则
 
 - canonical 是**拷贝**（`managed-copy` / `adoptable`）→ 删掉这个目录
@@ -335,13 +351,16 @@ canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖�
 
 ```
 Skill: agent-ex-dispatch
-  bundled   /usr/local/lib/node_modules/agent-ex-mcp/skills/agent-ex-dispatch  (v0.3.2, 132 KB, sha a1b2c3d4e5f6)
+  bundled   /usr/local/lib/node_modules/agent-ex-mcp/skills/agent-ex-dispatch  (v0.3.2, sha a1b2c3d4e5f6)
   canonical ~/.agents/skills/agent-ex-dispatch  [copy v0.3.1]  UPDATE AVAILABLE (0.3.1 -> 0.3.2)
   hosts
     ok   ~/.claude/skills/agent-ex-dispatch      -> ~/.agents/skills/agent-ex-dispatch
     ok   ~/.workbuddy/skills/agent-ex-dispatch   -> ~/.agents/skills/agent-ex-dispatch
     --   ~/.trae-cn/skills/agent-ex-dispatch      (not linked)
+    !    ~/.codex/skills/agent-ex-dispatch        -> /somewhere/else  (not the canonical copy)
 ```
+
+⚠️ **链到别处 / 断掉的链不能标成绿勾**（实现只打印 sha，不打印体积）。
 
 **过期判定**（读 marker，不额外记状态）：
 - canonical 是软链 → 永远不过期（指向源，源变了自动跟随）
