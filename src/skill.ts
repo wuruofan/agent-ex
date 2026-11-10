@@ -741,18 +741,6 @@ function symlinkAt(linkPath: string, target: string): void {
   symlinkSync(target, linkPath, "dir");
 }
 
-/** 建一条宿主软链（先 lstat，**绝不用 shell ln**——ln 对已存在的目录目标不报错）。 */
-function linkHost(dir: string, canonical: string): void {
-  mkdirSync(dir, { recursive: true });
-  const linkPath = join(dir, SKILL_NAME);
-  const st = inspectTarget(linkPath);
-  if (st.kind === "link") rmSync(linkPath, { force: true });
-  else if (st.kind === "dir" || st.kind === "file") {
-    throw new Error(`${linkPath} exists and is not a symlink`);
-  }
-  symlinkAt(linkPath, canonical);
-}
-
 /**
  * 安装。
  *
