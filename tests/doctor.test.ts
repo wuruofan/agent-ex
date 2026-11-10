@@ -6,8 +6,21 @@ import { doctor, applyFixes, scanNotifyFailures, classifyKeyword, FEISHU_ERRORS 
 import { BRAND } from "../src/brand.js";
 
 let home: string;
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), "aex-doctor-")); });
-afterEach(() => { rmSync(home, { recursive: true, force: true }); });
+/**
+ * 用户的 home（`~/.agents/skills` 在这底下）—— **与 `home`（$AGENT_EX_HOME）不是同一个目录**。
+ *
+ * ⚠️ 必须注入：不注入的话 doctor 会去读**开发机真实的** `~/.agents` ⇒ 测试结果取决于
+ * 开发机当时装没装 skill（2026-11-10 评审 P1-4：28 处 doctor 调用全都在读真实 home）。
+ */
+let userHome: string;
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), "aex-doctor-"));
+  userHome = mkdtempSync(join(tmpdir(), "aex-doctor-user-"));
+});
+afterEach(() => {
+  rmSync(home, { recursive: true, force: true });
+  rmSync(userHome, { recursive: true, force: true });
+});
 
 function writeCfg(cfg: unknown): void {
   mkdirSync(home, { recursive: true });
@@ -39,14 +52,14 @@ function baseCfg(over: Record<string, unknown> = {}): Record<string, unknown> {
 describe("doctor —— 把证据聚合成结论", () => {
   it("配置正常时 ok", async () => {
     writeHealthy();
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     expect(r.ok).toBe(true);
     expect(r.findings.some((f) => f.severity === "error")).toBe(false);
   });
 
   it("dry_run=true 报为 warn（是偏好不是缺陷），并给出修复命令", async () => {
     writeHealthy();
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const f = r.findings.find((x) => x.title.includes("dry-run"));
     expect(f?.severity).toBe("warn");
     expect(f?.fix).toContain("config set notify.dry_run false");
@@ -56,7 +69,7 @@ describe("doctor —— 把证据聚合成结论", () => {
     // 夹具要补 .env：否则 webhook 那条会先报 error，遮住这条断言
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true } }));
     writeFileSync(join(home, ".env"), "FEISHU_WEBHOOK_URL=https://open.feishu.cn/hook/test\n");
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const f = r.findings.find((x) => x.title.includes("Keyword not set explicitly"));
     expect(f?.severity).toBe("info");
     expect(f?.fixable).toBeFalsy();
@@ -66,7 +79,7 @@ describe("doctor —— 把证据聚合成结论", () => {
 
   it("keyword 是本工具的旧产品名时报错并指出不一致（2026-10-13 零通知的根因）", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "agent-flow-ex" } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const f = r.findings.find((x) => x.title.includes("pre-rename product name"));
     expect(f?.severity).toBe("error");
     expect(f?.fixable).toBe(true);
@@ -76,7 +89,7 @@ describe("doctor —— 把证据聚合成结论", () => {
 
   it("自定义 keyword 只报 warn、不判错（机器人登记什么词是用户的界面，见 brand.ts）", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "my-bot-word" } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const f = r.findings.find((x) => x.title.includes("custom value"));
     expect(f?.severity).toBe("warn");
     expect(f?.fixable).toBeFalsy();
@@ -87,7 +100,7 @@ describe("doctor —— 把证据聚合成结论", () => {
 
   it("显式空串 keyword 是 error 且可自动修（卡片不带关键词 ⇒ 必然 19024）", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "" } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const f = r.findings.find((x) => x.title.includes("explicitly empty"));
     expect(f?.severity).toBe("error");
     expect(f?.fixable).toBe(true);
@@ -95,7 +108,7 @@ describe("doctor —— 把证据聚合成结论", () => {
 
   it("明文 webhook 落在 config.json 里报凭证泄露风险", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "https://open.feishu.cn/hook/secret", dry_run: true, keyword: BRAND } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const f = r.findings.find((x) => x.title.includes("plaintext"));
     expect(f?.severity).toBe("error");
     expect(f?.fixable).toBe(true);
@@ -107,7 +120,7 @@ describe("doctor —— 把证据聚合成结论", () => {
     delete process.env.FEISHU_WEBHOOK_URL;
     try {
       writeCfg(baseCfg());
-      const r = await doctor({ home });
+      const r = await doctor({ home, userHome });
       expect(r.findings.some((f) => f.title.includes("Webhook URL is not set"))).toBe(true);
     } finally {
       if (saved !== undefined) process.env.FEISHU_WEBHOOK_URL = saved;
@@ -116,14 +129,14 @@ describe("doctor —— 把证据聚合成结论", () => {
 
   it("默认 profile 不存在时报错（会导致每次派发都失败）", async () => {
     writeCfg(baseCfg({ defaults: { profile: "ghost", timeout_sec: 3600 } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const f = r.findings.find((x) => x.title.includes("Default profile does not exist"));
     expect(f?.severity).toBe("error");
   });
 
   it("executor 的 bin 不可执行时报错", async () => {
     writeCfg(baseCfg({ executors: { claude: { bin: "/definitely/not/here" } } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     expect(r.findings.some((f) => f.title.includes("bin is unusable"))).toBe(true);
   });
 
@@ -134,7 +147,7 @@ describe("doctor —— 把证据聚合成结论", () => {
    */
   it("executor 缺 bin 字段时报错而不是崩掉", async () => {
     writeCfg(baseCfg({ executors: { claude: {} as never } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     expect(r.ok).toBe(false);
     const f = r.findings.find((x) => x.title.includes("has no bin"));
     expect(f?.severity).toBe("error");
@@ -148,7 +161,7 @@ describe("doctor —— 把证据聚合成结论", () => {
    */
   it("timeout_sec 是字符串时报 error（曾完全沉默）", async () => {
     writeCfg(baseCfg({ defaults: { profile: "default", timeout_sec: "3600" } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     expect(r.ok).toBe(false);
     const f = r.findings.find((x) => x.title.includes("timeout_sec"));
     expect(f?.severity).toBe("error");
@@ -158,14 +171,14 @@ describe("doctor —— 把证据聚合成结论", () => {
 
   it("defaults 整块缺失时报 error（曾被静态跳过名单吞掉）", async () => {
     writeCfg(baseCfg({ defaults: undefined }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     expect(r.ok).toBe(false);
     expect(r.findings.some((f) => f.severity === "error")).toBe(true);
   });
 
   it("profile 指向未知 executor 时报 error", async () => {
     writeCfg(baseCfg({ profiles: { p: { executor: "nope", env: {} } } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     expect(r.ok).toBe(false);
     expect(r.findings.some((f) => f.title.includes("nope"))).toBe(true);
   });
@@ -174,7 +187,7 @@ describe("doctor —— 把证据聚合成结论", () => {
     writeCfg(baseCfg({
       executors: { a: { bin: "/nope-a" }, b: { bin: "/nope-b" } },
     }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const titles = r.findings.map((f) => f.title).join(" ");
     expect(titles).toContain("\"a\"");
     expect(titles).toContain("\"b\"");
@@ -191,7 +204,7 @@ describe("doctor —— 把证据聚合成结论", () => {
       // error：明文 webhook
       notify: { feishu_webhook_url: "https://open.feishu.cn/hook/secret", dry_run: true, keyword: BRAND },
     }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     expect(r.findings.length).toBeGreaterThan(1);
     expect(r.findings[0].severity).toBe("error");
     const lastSeverity = r.findings[r.findings.length - 1].severity;
@@ -200,7 +213,7 @@ describe("doctor —— 把证据聚合成结论", () => {
 
   it("占位符形状不合规（如 {env:bad_lower}）不被误报成明文凭证", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:bad_lower}", dry_run: true, keyword: BRAND } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     expect(r.findings.some((f) => f.title.includes("plaintext"))).toBe(false);
     const f = r.findings.find((x) => x.title.includes("wrong shape"));
     expect(f?.severity).toBe("error");
@@ -210,7 +223,7 @@ describe("doctor —— 把证据聚合成结论", () => {
 
   it("默认 profile 不存在时不可自动修（applyFixes 没有这个分支）", async () => {
     writeCfg(baseCfg({ defaults: { profile: "ghost", timeout_sec: 3600 } }));
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const f = r.findings.find((x) => x.title.includes("Default profile does not exist"));
     expect(f?.severity).toBe("error");
     expect(f?.fixable).toBe(false);
@@ -221,9 +234,23 @@ describe("doctor —— 把证据聚合成结论", () => {
   it("config.json 坏掉时也能体检（不崩），并指出是 config 的问题", async () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "config.json"), "{ not json");
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     expect(r.ok).toBe(false);
     expect(r.findings[0].title).toContain("config.json");
+  });
+
+  /**
+   * 回归（P2-5）：config 坏掉时的早退路径曾把 **skill 体检项一起吞掉**。
+   * skill 状态与 config 无关（AGENTS.md 硬约束 6 的边界），早退不该连带吞掉它。
+   */
+  it("config.json 坏掉时，skill 体检项仍然在（skill 状态与 config 无关）", async () => {
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "config.json"), "{ not json");
+    const r = await doctor({ home, userHome });
+    expect(r.ok).toBe(false);
+    const skill = r.findings.find((f) => f.title.includes("Dispatch skill"));
+    expect(skill).toBeDefined();
+    expect(skill?.severity).toBe("info");
   });
 
   it("历史拒收记录是 warn 不是 error（过去的事，不该让 doctor 永远红）", async () => {
@@ -233,7 +260,7 @@ describe("doctor —— 把证据聚合成结论", () => {
       join(home, "logs", "runner-task_x.log"),
       "[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found (attempt 1/3)\n",
     );
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const f = r.findings.find((x) => x.title.includes("in the past"));
     expect(f?.severity).toBe("warn");
     // 当前配置没问题 ⇒ 整体仍算 ok
@@ -254,7 +281,7 @@ describe("doctor —— 把证据聚合成结论", () => {
       join(home, "logs", "runner-task_b.log"),
       "[notifier] feishu rejected: HTTP 200 code=19001 msg=param invalid (attempt 1/3)\n",
     );
-    const r = await doctor({ home });
+    const r = await doctor({ home, userHome });
     const f = r.findings.find((x) => x.title.includes("in the past"));
     expect(f?.title).toContain("2 task(s)");       // 受影响任务数
     expect(f?.title).toContain("4 attempt(s)");    // 拒收尝试次数
@@ -426,7 +453,7 @@ describe("doctor --send —— 自检卡的结论里必须带飞书 code", () =>
     const fetchMock = vi.fn(async () => ({
       ok: true, status: 200, json: async () => ({ code: 19024, msg: "Key Words Not Found" }),
     }) as Response);
-    const r = await doctor({ home, send: true, fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
+    const r = await doctor({ home, userHome, send: true, fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
     const f = r.findings.find((x) => x.title.includes("was rejected"));
     expect(f?.severity).toBe("error");
     expect(f?.detail).toContain("code=19024");
@@ -438,7 +465,7 @@ describe("doctor --send —— 自检卡的结论里必须带飞书 code", () =>
   it("投递成功时记 ok", async () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: false, keyword: BRAND } }));
     const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ code: 0 }) }) as Response);
-    const r = await doctor({ home, send: true, fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
+    const r = await doctor({ home, userHome, send: true, fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
     const f = r.findings.find((x) => x.title.includes("Self-check card delivered"));
     expect(f?.severity).toBe("ok");
   });
@@ -450,7 +477,7 @@ describe("doctor --send —— 自检卡的结论里必须带飞书 code", () =>
       bodies.push(String(init.body));
       return { ok: true, status: 200, json: async () => ({ code: 0 }) } as Response;
     });
-    const r = await doctor({ home, send: true, fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
+    const r = await doctor({ home, userHome, send: true, fetchImpl: fetchMock as unknown as typeof fetch, delays: [0, 0] });
     // 卡片里必须有关键词元素，且内容是 BRAND（与真实投递一致）
     expect(bodies[0]).toContain(BRAND);
     expect(r.findings.some((f) => f.title.includes("Self-check card delivered"))).toBe(true);
@@ -480,7 +507,7 @@ describe("doctor —— 模型存活预检", () => {
 
   it("missing → error finding naming the profile and model", async () => {
     writeOpencodeCfg("prov/Offline");
-    const r = await doctor({ home, probeImpl: async () => ({ code: 0, stdout: "prov/Live\n", stderr: "" }) });
+    const r = await doctor({ home, userHome, probeImpl: async () => ({ code: 0, stdout: "prov/Live\n", stderr: "" }) });
     const f = r.findings.find((x) => x.title.includes("not available"));
     expect(f?.severity).toBe("error");
     expect(f?.title).toContain('"oc"');
@@ -489,7 +516,7 @@ describe("doctor —— 模型存活预检", () => {
 
   it("unknown → warn finding, never error", async () => {
     writeOpencodeCfg("prov/Maybe");
-    const r = await doctor({ home, probeImpl: async () => ({ code: 1, stdout: "", stderr: "boom" }) });
+    const r = await doctor({ home, userHome, probeImpl: async () => ({ code: 1, stdout: "", stderr: "boom" }) });
     const f = r.findings.find((x) => x.title.includes("could not be verified"));
     expect(f?.severity).toBe("warn");
     expect(r.findings.some((x) => x.severity === "error" && /model/i.test(x.title))).toBe(false);
@@ -497,14 +524,14 @@ describe("doctor —— 模型存活预检", () => {
 
   it("ok → no model-related finding", async () => {
     writeOpencodeCfg("prov/Live");
-    const r = await doctor({ home, probeImpl: async () => ({ code: 0, stdout: "prov/Live\nprov/Other\n", stderr: "" }) });
+    const r = await doctor({ home, userHome, probeImpl: async () => ({ code: 0, stdout: "prov/Live\nprov/Other\n", stderr: "" }) });
     expect(r.findings.some((x) => /model/i.test(x.title))).toBe(false);
   });
 
   it("unsupported executor → no model-related finding", async () => {
     writeOpencodeCfg("claude-sonnet-4", "claude");
     let called = false;
-    const r = await doctor({ home, probeImpl: async () => { called = true; return { code: 0, stdout: "", stderr: "" }; } });
+    const r = await doctor({ home, userHome, probeImpl: async () => { called = true; return { code: 0, stdout: "", stderr: "" }; } });
     expect(called).toBe(false);
     expect(r.findings.some((x) => /model/i.test(x.title))).toBe(false);
   });

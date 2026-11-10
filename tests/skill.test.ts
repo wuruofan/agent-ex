@@ -15,6 +15,7 @@ import {
   symlinkSync,
   rmSync,
   readlinkSync,
+  chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -298,6 +299,28 @@ describe("install —— 拷贝路线", () => {
     expect(r.ok).toBe(false);
     expect(r.errors.join(" ")).toMatch(/refusing to link it to itself/);
   });
+
+  it("source 不是 skill 目录（没有 SKILL.md）⇒ 拒绝安装，什么都不落地", async () => {
+    const bogus = join(root, "not-a-skill");
+    mkdirSync(bogus, { recursive: true });
+    writeFileSync(join(bogus, "readme.txt"), "nope\n");
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source: bogus, confirm });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/no SKILL\.md/);
+    expect(existsSync(canonicalPath(userHome))).toBe(false);
+  });
+
+  it("source 是相对路径 ⇒ 解析成绝对路径（软链的字面 target 是相对链接所在目录解析的）", async () => {
+    // 回归 P1-2：`--link --source <相对路径>` 曾装出**必然断掉**的链并返回 0。
+    // 用仓库里真实存在的相对路径来测：cwd 就是仓库根。
+    const { confirm } = recorder();
+    const r = await installSkill({ userHome, source: "skills/agent-ex-dispatch", mode: "link", confirm });
+    expect(r.ok).toBe(true);
+    const target = readlinkSync(canonicalPath(userHome));
+    expect(target.startsWith("/")).toBe(true); // 绝对路径
+    expect(existsSync(canonicalPath(userHome))).toBe(true); // 不是断链
+  });
 });
 
 describe("install —— 软链路线（开发者）", () => {
@@ -339,6 +362,69 @@ describe("宿主链接", () => {
     await installSkill({ userHome, source, confirm });
     expect(asked.every((q) => !/Link the dispatch skill/.test(q))).toBe(true);
   });
+
+  it("默认不链的宿主（codex / opencode）⇒ 不建链，也不问", async () => {
+    // 这两个宿主的 skills 目录在机器上存在，但**未验证**它们会读自己的目录
+    // （codex 直接读共享目录 ~/.agents/skills）⇒ 不能默认给它们建链。
+    for (const id of ["codex", "opencode"]) {
+      const host = SKILL_HOSTS.find((h) => h.id === id)!;
+      mkdirSync(hostDir(userHome, host), { recursive: true });
+    }
+    const { confirm, asked } = recorder();
+    const r = await installSkill({ userHome, source, confirm });
+    expect(r.ok).toBe(true);
+    for (const id of ["codex", "opencode"]) {
+      const host = SKILL_HOSTS.find((h) => h.id === id)!;
+      expect(existsSync(join(hostDir(userHome, host), "agent-ex-dispatch"))).toBe(false);
+    }
+    expect(asked.some((q) => /Codex|OpenCode/.test(q))).toBe(false);
+    expect(r.lines.some((l) => /not linked by default/.test(l))).toBe(true);
+  });
+
+  it("用户拒绝重指 canonical ⇒ **一个宿主链都不建**（别链到不是 bundled skill 的目录上）", async () => {
+    const claudeDir = hostDir(userHome, SKILL_HOSTS.find((h) => h.id === "claude")!);
+    mkdirSync(claudeDir, { recursive: true });
+    const elsewhere = makeSource(join(root, "elsewhere"));
+    symlinkSync(elsewhere, join(claudeDir, "agent-ex-dispatch"), "dir");
+    // canonical 指向别处
+    mkdirSync(join(userHome, ".agents/skills"), { recursive: true });
+    symlinkSync(elsewhere, canonicalPath(userHome), "dir");
+
+    const { confirm, asked } = recorder([false]); // 拒绝重指
+    const r = await installSkill({ userHome, source, confirm });
+    expect(r.ok).toBe(true);
+    expect(asked.some((q) => /Repoint it\?/.test(q))).toBe(true);
+    // 宿主链没有被建/重指
+    expect(readlinkSync(join(claudeDir, "agent-ex-dispatch"))).toBe(elsewhere);
+    expect(r.lines.some((l) => /skip     host links/.test(l))).toBe(true);
+  });
+});
+
+describe("版本与内容指纹", () => {
+  it("版本相同但**内容被手改** ⇒ 也要问（不能静默覆盖用户的修改）", async () => {
+    await installSkill({ userHome, source, yes: true });
+    // 改掉 canonical 里的一个文件（marker 记录的 sha 随即对不上）
+    writeFileSync(join(canonicalPath(userHome), "SKILL.md"), "---\nname: x\n---\n\nhand edited\n");
+
+    const { confirm, asked } = recorder();
+    const r = await installSkill({ userHome, source, confirm });
+    expect(asked.some((q) => /local modifications/.test(q))).toBe(true);
+    // 用户否认 ⇒ 保持用户的修改
+    expect(readFileSync(join(canonicalPath(userHome), "SKILL.md"), "utf8")).toContain("hand edited");
+    expect(r.lines.some((l) => /kept v/.test(l))).toBe(true);
+  });
+
+  it("宿主链指向别处（不是 canonical）⇒ status / doctor 要报出来", async () => {
+    const claudeDir = hostDir(userHome, SKILL_HOSTS.find((h) => h.id === "claude")!);
+    mkdirSync(claudeDir, { recursive: true });
+    const elsewhere = makeSource(join(root, "elsewhere2"));
+    symlinkSync(elsewhere, join(claudeDir, "agent-ex-dispatch"), "dir");
+
+    const issues = collectSkillIssues({ userHome, source });
+    const mis = issues.find((i) => i.code === "skill.host-link-elsewhere");
+    expect(mis?.severity).toBe("warn");
+    expect(mis?.detail).toContain(elsewhere);
+  });
 });
 
 describe("remove", () => {
@@ -355,21 +441,24 @@ describe("remove", () => {
     expect(existsSync(canonicalPath(userHome))).toBe(false);
   });
 
-  it("宿主目录下的实体目录 ⇒ 拒绝删", async () => {
+  it("宿主目录下的实体目录 ⇒ 拒绝删，且**结果不是成功**", async () => {
     const claudeDir = hostDir(userHome, SKILL_HOSTS.find((h) => h.id === "claude")!);
     mkdirSync(join(claudeDir, "agent-ex-dispatch"), { recursive: true });
     const r = await removeSkill({ userHome, source, yes: true });
-    expect(r.ok).toBe(true);
+    // ⚠️ 东西还在原地 ⇒ 不能报"卸载成功"（2026-11-10 评审 P2-8：静默 exit 0 会骗人）。
+    expect(r.ok).toBe(false);
+    expect(r.skipped).toContain(join(claudeDir, "agent-ex-dispatch"));
     expect(r.lines.join(" ")).toMatch(/not a symlink/);
     expect(existsSync(join(claudeDir, "agent-ex-dispatch"))).toBe(true);
   });
 
-  it("canonical 是 foreign-dir ⇒ 拒绝删", async () => {
+  it("canonical 是 foreign-dir ⇒ 拒绝删，且**结果不是成功**", async () => {
     const canonicalDir = canonicalPath(userHome);
     mkdirSync(canonicalDir, { recursive: true });
     writeFileSync(join(canonicalDir, "SKILL.md"), "user data\n");
     const r = await removeSkill({ userHome, source, yes: true });
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.skipped).toContain(canonicalDir);
     expect(r.lines.join(" ")).toMatch(/not installed by agent-ex/);
     expect(existsSync(canonicalDir)).toBe(true);
   });
@@ -393,6 +482,32 @@ describe("remove", () => {
     expect(r.ok).toBe(true);
     expect(existsSync(join(extra, "agent-ex-dispatch"))).toBe(false);
     expect(existsSync(canonicalPath(userHome))).toBe(true);
+  });
+
+  /**
+   * 回归（P1-3）：宿主链删不掉时，**canonical 也不能删**。
+   *
+   * 先链后 canonical 的理由：留着 canonical，断的只是链；
+   * 删了 canonical 还留着链，断的是整份 skill。
+   */
+  it("宿主链删不掉 ⇒ canonical 也保留（不留断链）", async () => {
+    // root 无视权限 ⇒ 这个场景在 root 下测不了
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    await installSkill({ userHome, source, yes: true });
+    const claudeDir = hostDir(userHome, SKILL_HOSTS.find((h) => h.id === "claude")!);
+    mkdirSync(claudeDir, { recursive: true });
+    symlinkSync(canonicalPath(userHome), join(claudeDir, "agent-ex-dispatch"), "dir");
+    chmodSync(claudeDir, 0o555); // 目录不可写 ⇒ unlink 必然失败
+    try {
+      const r = await removeSkill({ userHome, source, yes: true });
+      expect(r.ok).toBe(false);
+      expect(r.errors.length).toBeGreaterThan(0);
+      // canonical 还在（没被顺手删掉）
+      expect(existsSync(canonicalPath(userHome))).toBe(true);
+      expect(r.lines.join(" ")).toMatch(/kept/);
+    } finally {
+      chmodSync(claudeDir, 0o755);
+    }
   });
 });
 

@@ -310,6 +310,33 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
   const home = opts.home ?? agentExHome();
   const findings: Finding[] = [];
 
+  /**
+   * 一屏里最该被一眼抓到的是 error。按级别排序，否则 warn（比如 dry_run）会把
+   * 真正的病灶挤到屏幕外——用户扫完前两行就以为"只是没开投递"。
+   *
+   * ⚠️ 两条出口（config 坏掉的早退、正常收尾）都要排序 ⇒ 定义提到函数开头共用。
+   */
+  const RANK: Record<string, number> = { error: 0, warn: 1, info: 2, ok: 3 };
+  const sortFindings = (): void => {
+    findings.sort((a, b) => (RANK[a.severity] ?? 9) - (RANK[b.severity] ?? 9));
+  };
+
+  // ---- 0. dispatch skill（**可选件**：最高只到 warn，绝不影响 ok / exit code）----
+  //
+  // ⚠️ 这里刻意**不**用 collectConfigIssues()：那是 config.json 的真相源，
+  // skill 状态不是 config（AGENTS.md 硬约束 6 的边界）。skill.ts 里的
+  // collectSkillIssues() 与它**平行**，installer 与 doctor 同源消费。
+  //
+  // ⚠️ `userHome`（~/.agents/skills 在这底下）与 `home`（$AGENT_EX_HOME，配置在这）
+  // 是**两个不同的目录**：混用会让 doctor 去看 ~/.agent-ex/.agents/skills（不存在）。
+  // `userHome` 可注入 ⇒ 测试用临时目录，不会读到开发机真实的 ~/.agents。
+  //
+  // ⚠️ 这一段刻意放在 **config 读取之前**：config.json 坏了也要能报 skill 状态
+  // ——skill 的体检项与 config 无关，早退会把它一起吞掉（2026-11-10 评审 P2-5）。
+  for (const si of collectSkillIssues({ userHome: opts.userHome ?? homedir() })) {
+    findings.push({ severity: si.severity, title: si.title, detail: si.detail, fix: si.fix });
+  }
+
   // ---- 1. config 本身 ----
   const { cfg, error } = readConfigLoose(home);
   if (error) {
@@ -319,6 +346,7 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
       detail: error,
       fix: "agent-ex init (rebuilds the config; the broken file is backed up first)",
     });
+    sortFindings();
     return { ok: false, summary: "config.json is unusable — the rest could not be checked", findings };
   }
   const c = cfg!;
@@ -605,24 +633,7 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
     }
   }
 
-  // ---- 7. dispatch skill（**可选件**：最高只到 warn，绝不影响 ok / exit code）----
-  //
-  // ⚠️ 这里刻意**不**用 collectConfigIssues()：那是 config.json 的真相源，
-  // skill 状态不是 config（AGENTS.md 硬约束 6 的边界）。skill.ts 里的
-  // collectSkillIssues() 与它**平行**，installer 与 doctor 同源消费。
-  //
-  // ⚠️ `userHome`（~/.agents/skills 在这底下）与 `home`（$AGENT_EX_HOME，配置在这）
-  // 是**两个不同的目录**：混用会让 doctor 去看 ~/.agent-ex/.agents/skills（不存在）。
-  // `userHome` 可注入 ⇒ 测试用临时目录，不会读到开发机真实的 ~/.agents。
-  for (const si of collectSkillIssues({ userHome: opts.userHome ?? homedir() })) {
-    findings.push({ severity: si.severity, title: si.title, detail: si.detail, fix: si.fix });
-  }
-
-  // 一屏里最该被一眼抓到的是 error。按级别排序，否则 warn（比如 dry_run）会把
-  // 真正的病灶挤到屏幕外——用户扫完前两行就以为"只是没开投递"。
-  const RANK: Record<string, number> = { error: 0, warn: 1, info: 2, ok: 3 };
-  findings.sort((a, b) => (RANK[a.severity] ?? 9) - (RANK[b.severity] ?? 9));
-
+  sortFindings();
   const hasError = findings.some((f) => f.severity === "error");
   const summary = hasError
     ? `${findings.filter((f) => f.severity === "error").length} problem(s) found — the notification path is broken`

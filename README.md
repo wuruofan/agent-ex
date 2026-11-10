@@ -79,7 +79,7 @@ agent-ex init        # 交互式配置：探测 CLI、收集密钥、生成 conf
 ```
 
 > 注册后需在客户端里信任/启用该 server（首次接入通常要重启或手动连接）。
-> `init` 还会提示 dispatch skill 的安装方式与各宿主 skills 目录的查法，见「可选：安装 dispatch skill」。
+> `init` 收尾会打印一条 `agent-ex skill install`（**只提示，不自动装**），见「可选：安装 dispatch skill」。
 
 > ⚠️ **`command` 建议写绝对路径。** MCP 客户端拉起 server 时**不继承你的 shell PATH**，
 > 而 `node_modules/.bin` 只有 `npm run`/`npx` 执行时才会临时注入。已实测（2026-10-11，tarball 全新安装）：
@@ -127,7 +127,9 @@ agent-ex skill install
 1. 把 `skills/agent-ex-dispatch` **拷贝**到 `~/.agents/skills/agent-ex-dispatch`（Agent Skills 规范的共享目录）；
 2. 在拷贝目录里写一个 `.agent-ex-skill.json`（记下**版本号**与内容指纹）——
    以后 `agent-ex skill status` / `agent-ex doctor` 靠它判断「装的是哪一版、要不要更新」；
-3. 给本机存在的宿主（Claude Code / Trae / WorkBuddy …）各建一条软链。
+3. 给**本机存在、且默认该链**的宿主（Claude Code / Trae / WorkBuddy …）各建一条软链。
+   自动桥接的宿主（WorkBuddy，见下）不建链；Codex / OpenCode 默认也不建
+   （未验证这两个宿主会读自己的 skills 目录，Codex 直接读共享目录）⇒ 需要时 `--target` 指定。
 
 几个要点：
 
@@ -139,13 +141,15 @@ agent-ex skill install
   自动桥接脚本（`~/.workbuddy/hooks/sync-agents-skills.sh`），会自己把 `~/.agents/skills` 桥接过去 ⇒
   `agent-ex skill install` 检测到就会告诉你「不用手工链」。没有该脚本的机器，显式指定：
   `agent-ex skill install --target ~/.workbuddy/skills`。
-- **Trae**：用户级 skills 目录随安装版本而变（本机 `TRAE SOLO CN` 用 `~/.trae-cn/skills`），
-  `agent-ex skill install` 会探测；探测不到就 `--target ~/.trae-cn/skills`。
-- **更新**：`agent-ex skill install`（幂等：已是最新就 skip，版本落后会问是否更新）。
+- **Trae**：本机 `TRAE SOLO CN` 的用户级 skills 目录是 `~/.trae-cn/skills`，`agent-ex skill install` 按这个路径处理；
+  别的 Trae 版本路径不同 ⇒ `--target ~/.trae-cn/skills`（或你的实际路径）。
+- **更新**：`agent-ex skill install`（幂等：已是最新就 skip，版本落后会问是否更新；
+  版本一样但**内容被手改过**也会问，不会静默覆盖你的修改）。
 - **看状态**：`agent-ex skill status`（只读）；`agent-ex doctor` 也会顺带报一条。
 - **卸载**：`agent-ex skill remove`。
 
-> ⚠️ 非交互环境（CI / 管道）里 `agent-ex skill install` **不替你做决定**：它会提示加上 `--yes`。
+> ⚠️ 非交互环境（CI / 管道）里 `agent-ex skill install` / `remove` **直接拒绝执行**（退出码 2），
+> 除非显式给 `--yes`：这两个命令会建链、会重指、会删目录，不该在没人盯着的时候发生。
 > `--yes` 会建链、会重指、会覆盖 —— 别在 CI 里随手加。
 
 #### 开发者路线：软链到本地仓库
@@ -420,8 +424,8 @@ agent-ex doctor --send
 | `agent-ex profile create <built-in> [--bin <path>]` | **物化**一个内置预设（当前：`opencode-zen-free`，零密钥的 opencode 免费模型）。只创建，不切默认；`--bin` 用于 executor 不在 PATH 上时指定绝对路径。 |
 | `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段（如 `ZEN_FREE_PREFER`），或用保留字 `executor` 改它用哪个 executor、用 `path_dirs` 声明 worker PATH 的额外目录（逗号分隔的绝对路径；空值清空）。 |
 | `agent-ex wait <task_id>` | **阻塞等一个任务到终态**（`completed` / `failed` / `cancelled`）或到 `needs_input`，并把 worker 的最终报告提出来。给 agent 派活后用它在后台等结果，见下节。 |
-| `agent-ex skill install` | 把 dispatch skill 装到 `~/.agents/skills`（**随 npm 包分发**，不用 clone），并给本机存在的宿主各建一条软链。幂等：已是最新就 skip，版本落后会问是否更新。 |
-| `agent-ex skill remove` | 卸载：删掉宿主软链与安装的拷贝。**只删软链**，实体目录一律不碰。 |
+| `agent-ex skill install` | 把 dispatch skill 装到 `~/.agents/skills`（**随 npm 包分发**，不用 clone），并给本机存在的宿主各建一条软链（自动桥接的宿主与默认不链的宿主除外）。幂等：已是最新就 skip，版本落后或内容被改过会问是否覆盖。 |
+| `agent-ex skill remove` | 卸载：删掉宿主软链与安装的拷贝。**只删软链**，实体目录一律不碰；只要还有东西留在原地，退出码就是非 0。 |
 | `agent-ex skill status` | 只读：装在哪、是哪一版、哪些宿主还没链、有没有新版本。 |
 
 > `doctor` 也有对应的 MCP 工具 `agent_ex_doctor`，让 agent 自己就能排错，不用手抄命令。
@@ -666,7 +670,7 @@ node dist/server.js init    # 即 `agent-ex init`
 - 把确认/粘贴到的密钥写进 `$AGENT_EX_HOME/.env`（**chmod 600**，幂等——同值不重写）；
 - 若密钥最终没进 `.env`，会打印 ⚠ 提醒「运行时必须有该变量，否则任务失败」；
 - 打印收尾指引：`AGENT_EX_HOME` 怎么设、**可直接粘贴的 MCP 注册片段（绝对路径）**、
-  dispatch skill 的安装方式与各宿主 skills 目录的 `find` 查法、**以及怎么打开真实通知**（`config set notify.dry_run false` + `doctor --send`）。
+  dispatch skill 的安装命令（`agent-ex skill install`）、**以及怎么打开真实通知**（`config set notify.dry_run false` + `doctor --send`）。
 
 > 已有 `config.json` 时 `init` 的行为：
 >
@@ -734,7 +738,7 @@ node dist/server.js init    # 即 `agent-ex init`
 
 > ℹ️ **npm 包内含 dispatch skill**：`skills/agent-ex-dispatch` 在 `files` 白名单里，
 > 装完包跑 `agent-ex skill install` 即可（见「安装 dispatch skill」）。
-> ⚠️ 包体积因此涨了约 50%（skill 目录 gzip 后约 62 KB）。
+> ⚠️ 包体积因此涨了约 **41%**（实测：tarball 152 KB → 215 KB；skill 目录本身 136 KB，gzip 后约 62 KB）。
 > `scripts/` 仍**不进包**（只有本仓库开发者用得到）。
 
 > 🔧 **发版流程（认证、2FA、打包校验、发布后核验）见 [`AGENTS.md`](https://github.com/wuruofan/agent-ex/blob/main/AGENTS.md#发布npm)**
