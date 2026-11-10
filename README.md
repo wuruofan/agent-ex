@@ -742,7 +742,9 @@ node dist/server.js init    # 即 `agent-ex init`
 
 > ℹ️ **npm 包内含 dispatch skill**：`skills/agent-ex-dispatch` 在 `files` 白名单里，
 > 装完包跑 `agent-ex skill install` 即可（见「安装 dispatch skill」）。
-> ⚠️ 包体积因此涨了约 **41%**（实测：tarball 152 KB → 215 KB；skill 目录本身 136 KB，gzip 后约 62 KB）。
+> ⚠️ 包体积涨了不少（实测 tarball：0.3.1 的 126 KB → 0.4.0 的 **225 KB，+78%**）：
+> 其中 skill 目录本身 136 KB（gzip 后约 62 KB），
+> 把 skill 从包里去掉再打一次是 152 KB ⇒ **skill 贡献了约 41%**。
 > `scripts/` 仍**不进包**（只有本仓库开发者用得到）。
 
 > 🔧 **发版流程（认证、2FA、打包校验、发布后核验）见 [`AGENTS.md`](https://github.com/wuruofan/agent-ex/blob/main/AGENTS.md#发布npm)**

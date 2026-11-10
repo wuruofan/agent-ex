@@ -4,20 +4,25 @@
 > 步骤依据 [`docs/plans/2026-10-30-wait-cli-implementation-plan.md`](2026-10-30-wait-cli-implementation-plan.md) 的 Task 5 / Task 6。
 > **本文只是一份执行清单**，具体命令的权威版本在 `AGENTS.md` 的「发布（npm）」一节。
 
-## 当前状态（2026-11-05 发布 0.3.0；2026-11-06 已发布 0.3.1；0.3.2 待发布）
+## 当前状态（2026-11-05 发布 0.3.0；2026-11-06 已发布 0.3.1；**0.4.0 发布中**）
+
+> ⚠️ **0.3.2 这个版本号被 0.4.0 取代了**：0.3.2 的内容已经在 `main` 上，但**从未发布到 npm**
+> （npm 上最高仍是 0.3.1）。而本轮又加了**新的用户可见子命令**
+> （`agent-ex skill install|remove|status`）⇒ 按 semver 该走 minor ⇒ 直接发 **0.4.0**，
+> 跳过从未存在过的 0.3.2（不跳的话 npm 上会多出一个"只存在于 git、从没发布过"的版本号）。
 
 | 项 | 状态 |
 | :--- | :--- |
-| 0.3.2 内容 | 🕐 待发布（分支 `feat/model-liveness-and-path-prepend`，6 个 commit，**未 push**）：① 模型存活预检（死模型拒单 + doctor 告警）② `profiles.<name>.path_dirs`（worker PATH 的唯一受控来源，`PATH` 仍禁写在 profile env）③ `agent-ex init` 自动探测 node/npm/bun/git 目录并预填 ④ `wait` 报告文件改原子写 ⑤ 三处测试 flake 修掉（init-e2e 答案对齐、wait 用例 task id 唯一、proc-tree 等可用 pid） |
-| 0.3.2 版本号 | ✅ `package.json` / `package-lock.json` = `0.3.2`（`npm version 0.3.2 --no-git-tag-version`）——**走 0.3.x 小版本，不升 0.4.0**：`path_dirs` 这个字段从未发布过（`path_prepend` 只存在于未推送的分支上），所以对已发布的用户没有破坏性变更 |
-| 0.3.2 待办 | ⬜ push 分支 → 合并到 `main` → `chore(release): 0.3.2` → `v0.3.2` tag → build+test → pack → 干净目录验证 → publish → 上线核验 → 装回冒烟 |
-| 代码提交 | ✅ 14 个提交已 push 到 `origin/main`（含 `dad791a chore(release): 0.3.0`），`v0.3.0` tag 已推送 |
+| 0.4.0 内容 | 🕐 本次发布：① **原 0.3.2 的全部内容**（模型存活预检、`profiles.<name>.path_dirs`、`init` 自动探测 node/npm/bun/git、`wait` 报告原子写、三处 flake 修复）② **dispatch skill 随 npm 包分发**（`skills/agent-ex-dispatch` 进 `files`）③ **新子命令** `agent-ex skill install\|remove\|status` ④ `init` 收尾精简（39 → 24 行）⑤ 四轮独立评审的 P1/P2 全部修完（含原子替换、自链拦截、断链处理） |
+| 0.4.0 版本号 | ✅ `package.json` / `package-lock.json` = `0.4.0`（`npm version 0.4.0 --no-git-tag-version`） |
+| 0.4.0 待办 | ⬜ `chore(release): 0.4.0` → `v0.4.0` tag → build+test → pack → 干净目录验证 → publish → 上线核验 → 装回冒烟 |
+| 代码提交 | ✅ 15 个提交已 push 到 `origin/main`（`feat/skill-distribution` 合并进来） |
 | `npm run typecheck` / `npm run build` | ✅ |
-| `npm test` | ✅ 26 files / 368 passed / 4 skipped（0.3.1 前重跑，含新增的 status 用例） |
-| 打包干跑 | ✅ 干净目录装 `agent-ex-mcp-0.3.0.tgz`：`wait --help` exit 0、`WAIT=not_found` exit 3、MCP 工具面 6/6 |
+| `npm test` | ⬜ 0.4.0 前重跑 |
+| 打包干跑 | ⬜ 0.4.0 前重跑 |
 | npm 认证 | ✅ `npm whoami` → `demonsimon`；publish 仍需一次网页 2FA（见下方执行记录） |
-| npm publish | ✅ `agent-ex-mcp@0.3.0`，`dist.shasum` = `3b2ca1e1ba96578bf0ff7a58fe58b0a3f8cdca08`，线上 tgz 与本地 `cmp` 一致 |
-| 从 registry 装回 | ✅ `npm i agent-ex-mcp@0.3.0` → `wait --help` exit 0 + MCP 6/6 `ALL OK` |
+| npm publish | ⬜ |
+| 从 registry 装回 | ⬜ |
 | commit B（skill 迁移） | ✅ publish 之后完成：删旧脚本 / 去 `vitest.config.ts` 的 exclude / `SKILL.md` 加 `agent-ex >= 0.3.0` 门槛与版本探针 / `npm test` 26 files 359 passed / 已 push（见 ⑨） |
 | 0.3.1 提交 / tag | ✅ `415ff31`（文档 + 测试对齐）、`9e08490 chore(release): 0.3.1` 已 push，`v0.3.1` tag 已推送，`build-meta` = `v0.3.1 9e08490` |
 | 0.3.1 构建 / 装包验证 | ✅ `typecheck` / `build` / `npm test` 26 files 368 passed 4 skipped；干净目录装 `agent-ex-mcp-0.3.1.tgz`：`wait --help` exit 0、MCP 6/6，且 status 契约探针全绿（schema 含 `include_finished`/`limit`、`additionalProperties=false`、未知参数被 `.strict()` 拒、`agent_ex_version` = 0.3.1） |

@@ -7,7 +7,8 @@ agent_created: true
 # Agent Flow Dispatch
 
 > 📦 **安装方式**：skill **随 npm 包分发** —— 使用者 `npm i -g agent-ex-mcp` 后跑 `agent-ex skill install`
-> （装出实体副本到 `~/.agents/skills`，并给本机存在的宿主各建一条软链）；本仓库开发者用
+> （装出实体副本到 `~/.agents/skills`，并给本机存在的宿主各建一条软链；`agent-ex skill install`
+> 需要 **`agent-ex-mcp >= 0.4.0`**）；本仓库开发者用
 > `./scripts/install-skill.sh`（软链到本仓库，改完即时生效）。
 > **WorkBuddy 只扫 `~/.workbuddy/skills`、不读 `~/.agents/skills`** —— 但多数 WorkBuddy 安装自带
 > 自动桥接脚本（`~/.workbuddy/hooks/sync-agents-skills.sh`），`agent-ex skill install` 会检测到并提示
