@@ -113,16 +113,16 @@ WorkBuddy 侧永远没有链。⇒ canonical 路径**固定**为 `~/.agents/skil
 
 1. 用户从「开发者路线」（软链到仓库）切到「用户路线」（包内拷贝到 `~/.agents/skills`）时，
    **workbuddy 侧那条链仍然指向仓库** ⇒ WorkBuddy 里用的还是仓库那份，不是新装的。
-   而 hook 因为"条目已存在"也不会去改它。⇒ **必须由 install 主动发现并重指**（§4.2 第 2 步）。
+   而 hook 因为"条目已存在"也不会去改它。⇒ **必须由 install 主动发现并重指**（§4.4）。
 2. `remove` 若按"软链必须指向 canonical 才删"的规则，会**拒绝删这条链** ⇒ 卸不干净。
    ⇒ remove 的规则必须改成：**软链一律可删**（删链接不丢数据，只需打印它原本指向哪），
-   **只有实体目录才拒绝**（§4.4）。
+   **只有实体目录才拒绝**（§4.5）。
 
 ⇒ 「装完提示是否链到 workbuddy」在**没有**自动桥接的机器上仍然必要；在**有**桥接的机器上，
-真正该提示的不是"要不要链"，而是"**你已有一条指向别处的链，要不要重指到新的 canonical**"（§4.3）。
+真正该提示的不是"要不要链"，而是"**你已有一条指向别处的链，要不要重指到新的 canonical**"（§4.4）。
 
 ⚠️ 但 hook 是 **WorkBuddy 侧的行为，不是 agent-ex 可以假设的普遍事实**——别的机器可能没有这个 hook。
-⇒ 设计不能写死"WorkBuddy 会自动桥接"，只能**探测后按需分支**（§4.3）。
+⇒ 设计不能写死"WorkBuddy 会自动桥接"，只能**探测后按需分支**（§4.4）。
 
 ### 2.5 既有文档的过期与矛盾（本次一并修）
 
@@ -157,9 +157,9 @@ WorkBuddy 侧永远没有链。⇒ canonical 路径**固定**为 `~/.agents/skil
 | D4 | **用户路线=拷贝，开发者路线=软链**。两条路线显式分开，不追求"一份实现覆盖两边"。 |
 | D5 | **canonical + 宿主链接**两层：canonical **固定**在 `~/.agents/skills/agent-ex-dispatch`（不开放覆盖——自动桥接只认这个源，§2.4.3 约束 A），每个宿主一条软链指向它。宿主表 `SKILL_HOSTS` 是唯一真相源。 |
 | D6 | **init 只打印 `agent-ex skill install`，不执行安装**。 |
-| D7 | **init 收尾信息精简**（实测 39 行 → 24 行；非默认 home 26 行）。`AGENT_EX_HOME` **只在非默认路径时**保留 export 那一步（默认路径整步省略；同时写进 MCP 片段的 `env` 字段，**但那不能替代 export**——它只影响 MCP client 拉起的 server，用户手敲的 CLI 命令仍需要这个变量）。 |
+| D7 | **init 收尾信息精简**（实测 39 行 → 24 行；非默认 home 30 行）。`AGENT_EX_HOME` **只在非默认路径时**保留 export 那一步（默认路径整步省略；同时写进 MCP 片段的 `env` 字段，**但那不能替代 export**——它只影响 MCP client 拉起的 server，用户手敲的 CLI 命令仍需要这个变量）。 |
 | D8 | **doctor 加 skill 段**，但**不塞进 `collectConfigIssues()`**——那是 `config.json` 的真相源，skill 状态不是 config。新建 `collectSkillIssues()` 与之平行。 |
-| D9 | **不引入状态文件**。装了什么、能删什么、有没有过期，全部从文件系统推导（`lstat` + `readlink` + 内容 hash）。多一份状态文件就是多一份会漂移的真相。 |
+| D9 | **provenance 随 skill 内容走**：拷贝模式下在**拷贝目录内**写 `.agent-ex-skill.json`（版本 + sha）。归属判定只需读那一个目录本身 ⇒ 不用跨两处对账，**也就不需要集中状态文件**。版本号 = 打包它的 agent-ex 包版本（`dist/build-meta.json` 的 `version`）。软链模式**不写** marker（会弄脏仓库）。 |
 
 ### D1 的论据
 
@@ -203,32 +203,80 @@ agent-ex skill status
 
 退出码沿用现有 CLI 约定：**0** 成功 / **1** 有失败 / **2** 用法错误。
 
-### 4.2 install 的流程
+### 4.2 canonical 的状态机
+
+canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖——理由见 §2.4.3 约束 A：
+自动桥接机制只认 `~/.agents/skills` 这一个源，canonical 挪走就桥接不了）。
+
+**归属与版本怎么判定（单一真相源）**
+
+拷贝模式下，安装时在**拷贝目录内**写一个 marker：`.agent-ex-skill.json`
+
+```json
+{ "skill": "agent-ex-dispatch", "version": "0.3.2", "sha": "a1b2c3d4e5f6", "source": "<source 绝对路径>" }
+```
+
+- **版本号 = 打包这份 skill 的 agent-ex 包版本**（`dist/build-meta.json` 的 `version`）。
+  已发布的 npm 包不可变 ⇒ 包版本 ⟹ skill 内容版本，一一对应，**零人工维护**。
+- marker 放在**拷贝目录内**、不是集中状态文件：归属判定只需读**那一个目录本身**就得出，
+  不用跨两处对账（集中状态文件会漂移：用户手工删了 skill，状态文件还在说"已装"）。
+- ⚠️ **软链模式不写 marker**——canonical 指向仓库，写进去会弄脏 git 工作树。
+
+**canonical 的六态**
+
+| 态 | 判据 | 归属 |
+| :--- | :--- | :--- |
+| `missing` | 路径不存在 | — |
+| `link→source` | 是软链，且 target == 本次 source | 我们装的 |
+| `link→elsewhere` | 是软链，target != source | **别人的**（本机 workbuddy / trae 就是这样） |
+| `managed-copy` | 是实体目录 + 含 marker | 我们装的（版本可读） |
+| `adoptable` | 是实体目录 + 无 marker + **内容 hash == bundled** | 内容一致 ⇒ 认领（补写 marker） |
+| `foreign-dir` | 是实体目录 + 无 marker + hash != bundled | **不是我们装的**（或被改过） |
+
+**动作矩阵**
+
+| canonical 现状 | 拷贝模式（默认） | 软链模式（`--link`） |
+| :--- | :--- | :--- |
+| `missing` | 拷贝安装 + 写 marker | 建软链 |
+| `link→source` | 问：已是开发者路线，是否切成拷贝？ | skip（幂等） |
+| `link→elsewhere` | 问：删掉旧链并切成拷贝？ | 问：重指到 source？ |
+| `managed-copy`，`version == 当前` | **skip**（幂等） | 问：是否换成软链？ |
+| `managed-copy`，`version != 当前` | **问"是否更新"**（见下） | 同上 |
+| `managed-copy`，hash != marker.sha（被手改过） | 问：更新会覆盖你的修改，继续？ | 同上 |
+| `adoptable` | 认领：补写 marker，视作已装 | 问：是否换成软链？ |
+| `foreign-dir` | **中止**，提示用户手工处理 | **中止** |
+
+**"是否更新"的判定与动作**（用户提的那个问题，落在这里）
+
+1. `marker.version != 当前包版本` ⇒ **需要更新** ⇒ 问"是否更新"
+2. 问的时候**还要看有没有被手改过**：`hash(canonical) != marker.sha` ⇒ 额外提示"这份被改过，
+   更新会覆盖你的修改"
+3. 用户确认 ⇒ 覆盖（原子：写临时目录 → `rename`）
+4. 用户否认 ⇒ 保持原样，退出码 0（不是失败）
+
+⚠️ **只有 `managed-copy` 才会走"更新"这条路**。`foreign-dir` 一律中止——
+绝不能拿"更新"的名义覆盖一个我们没装过的目录。
+
+### 4.3 install 的完整流程
 
 ```
 1. 解析 source（默认 = 相对本模块位置解析的 <module>/skills/agent-ex-dispatch）
-2. 解析 canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖——理由见 §2.4.3 约束 A：
-   自动桥接机制只认 `~/.agents/skills` 这一个源，canonical 挪走就桥接不了）
-     --link → canonical 是指向 source 的**软链**
-     默认    → canonical 是 source 的**拷贝**
-3. canonical 已存在：
-     软链且指向同一 source → skip（幂等）
-     软链但指向别处        → 问是否重指（--yes 直接重指）
-     实体目录              → **中止**，提示用户手工处理（沿用 install-skill.sh:90-94 的 abort 语义）
-4. 建宿主链：逐个探测到的宿主目录，问是否建链（--yes 全建，--target 的直接建）
+2. 解析 canonical（固定）
+3. 按 §4.2 的动作矩阵处理 canonical（该问的问、该中止的中止、该 skip 的 skip）
+4. 建宿主链：逐个探测到的宿主目录，按 §4.4 的分流处理
 5. 打印结果清单
 ```
 
 **宿主链接一律指向 canonical**（不是指向 source）：canonical 是唯一真源，`remove` 才能干净地删干净。
 
-⚠️ **第 3 步的"软链但指向别处"是本机当前的真实状态**，不是理论情况：
+⚠️ **"软链指向别处"是本机当前的真实状态**，不是理论情况：
 `~/.workbuddy/skills/agent-ex-dispatch` 与 `~/.trae-cn/skills/agent-ex-dispatch` 都指向**仓库**
 （§2.4.1）。用户从开发者路线切到用户路线时，这两条必须被**重指到 canonical**，
 否则 WorkBuddy / Trae 里用的还是仓库那份——而自动桥接机制**不会**纠正它（§2.4.3 约束 B）。
 
-### 4.3 提示文案按"有没有自动桥接"分流
+### 4.4 宿主链接的三种情形
 
-对每个探测到的宿主目录，分三种情形：
+对每个探测到的宿主目录：
 
 - 该宿主**已有指向 canonical 的链** → `already linked`
 - 该宿主**已有一条指向别处的链**（本机的 workbuddy / trae 就是这样）
@@ -243,10 +291,11 @@ agent-ex skill status
 ⇒ 用户提的"装完提示是否链接到 workbuddy"落在这里：**有 hook 的机器上，若已有链则提示重指、
 若没有链则提示不用管；没有 hook 的机器上才真的问要不要链。** 事实优先，不写死。
 
-### 4.4 remove 的规则
+### 4.5 remove 的规则
 
-- canonical 是**拷贝** → 删掉这个目录
+- canonical 是**拷贝**（`managed-copy` / `adoptable`）→ 删掉这个目录
 - canonical 是**软链** → 只删链接，**不删 target**
+- canonical 是 `foreign-dir` → **拒绝删**，提示用户手工处理
 - 各宿主目录下 `agent-ex-dispatch`：
   - 是**软链** → **删**（删链接不丢数据），并打印它原本指向哪
     ⚠️ **不要求它指向 canonical**：本机 workbuddy / trae 那两条指向仓库的链也必须能删掉，
@@ -256,29 +305,34 @@ agent-ex skill status
 - `ln` 陷阱（`README.md:150-151`）：`ln -s` 对已存在的目录目标不报错，会把软链塞进目录里。
   ⇒ 一律用 `fs.symlinkSync` + 前置 `lstat`，**绝不**用 shell `ln`。
 
-### 4.5 status 的输出
+### 4.6 status 的输出
 
-只读，一次给全三件事：
+只读，一次给全三件事（**示意**，实际以本机真实状态为准）：
 
 ```
 Skill: agent-ex-dispatch
-  bundled   /usr/local/lib/node_modules/agent-ex-mcp/skills/agent-ex-dispatch  (132 KB, sha a1b2c3d4e5f6)
-  canonical ~/.agents/skills/agent-ex-dispatch  [copy]  up-to-date
+  bundled   /usr/local/lib/node_modules/agent-ex-mcp/skills/agent-ex-dispatch  (v0.3.2, 132 KB, sha a1b2c3d4e5f6)
+  canonical ~/.agents/skills/agent-ex-dispatch  [copy v0.3.1]  UPDATE AVAILABLE (0.3.1 -> 0.3.2)
   hosts
     ok   ~/.claude/skills/agent-ex-dispatch      -> ~/.agents/skills/agent-ex-dispatch
     ok   ~/.workbuddy/skills/agent-ex-dispatch   -> ~/.agents/skills/agent-ex-dispatch
     --   ~/.trae-cn/skills/agent-ex-dispatch      (not linked)
 ```
 
-**过期判定**（不需要状态文件）：
+**过期判定**（读 marker，不额外记状态）：
 - canonical 是软链 → 永远不过期（指向源，源变了自动跟随）
-- canonical 是拷贝 → 比对内容 hash（`sha256(排序后的 "相对路径\0内容")`，取前 12 位 hex）
+- canonical 是 `managed-copy` → `marker.version != 当前包版本` ⇒ **UPDATE AVAILABLE**
+- canonical 是 `adoptable`（无 marker 但内容一致）→ 视作已装，版本 = 当前
+- canonical 是 `foreign-dir` → 报 `not managed by agent-ex`，提示手工处理
 
-### 4.6 doctor 的 skill 段（info 级，不影响 exit code）
+⚠️ **status 绝不创建任何目录或文件**（只读命令）。
+
+### 4.7 doctor 的 skill 段（info 级，不影响 exit code）
 
 - 未安装 → `info`："dispatch skill is not installed" + fix `agent-ex skill install`
-- 已安装但拷贝与包内那份不一致 → `warn`："installed copy is older than the bundled one" + fix `agent-ex skill install`
-- 已安装且最新 → `ok`
+- 已安装但 `marker.version != 当前包版本` → `warn`："installed copy is older than the bundled one" + fix `agent-ex skill install`
+- 已安装且版本一致 → `ok`
+- canonical 是 `foreign-dir` → `warn`："not managed by agent-ex"（我们没装过，不自动动它）
 - 有宿主目录存在但没链 → `info`，列出可链的宿主
 
 ⚠️ **不塞进 `collectConfigIssues()`**：那是 `config.json` 的真相源，skill 状态不是 config。
@@ -328,7 +382,7 @@ export interface SkillHost {
 | ④ dry-run 段 | 保留两条命令，删掉 "body must not contain the product name…" | 那是 `doctor --send` 的内部细节，不是 init 该讲的 |
 | ⑤ "Optional: edit config.json…" | 压成一行尾巴 | |
 
-改完（默认路径，**24 行**；非默认路径多出 export 一行，**26 行**）：
+改完（默认路径，**24 行**；非默认路径多出 export 那段 + 片段里的 `env` 字段，**30 行**）：
 
 ```
 Next steps:
@@ -356,7 +410,7 @@ Tune later: agent-ex config set <key> <value> | agent-ex profile set <profile> <
 ```
 
 ⚠️ **行数是算出来的，不是估的**：`mcpServerSnippet` 用 `JSON.stringify(…, null, 2)` ⇒ 片段展开 **10 行**；
-模板其余部分 14 行 ⇒ 合计 24 行（非默认路径 +2 行 export）。⇒ 断言写 **"默认路径 ≤ 24 行 / 非默认 ≤ 26 行"**，
+模板其余部分 14 行 ⇒ 合计 24 行（非默认路径 +3 行 export 段 +3 行 `env` 字段 ⇒ 30 行）。⇒ 断言写 **"默认路径 ≤ 26 行 / 非默认 ≤ 32 行"**（留一点余量），
 不要写成 "≤ 16"（原写的 14 行是**把片段画成单行**数出来的，与实现不符）。
 
 init 交互过程中的其它输出（CLI 探测、toolchain 提示、备份、校验）**全部保留**——那些是"正在发生的事"。
@@ -373,7 +427,7 @@ init 交互过程中的其它输出（CLI 探测、toolchain 提示、备份、�
 | R2 | 宿主目录表要维护（各家 IDE 路径会变，Trae 还随版本变） | 表里只放**已验证**的路径；探测到才提示；`--target` 兜底 |
 | R3 | 软链在 pnpm/yarn 全局安装下可能悬空（包目录是 store 软链） | 用户路线用**拷贝**，不依赖包目录的软链结构 |
 | R4 | 目标已有实体目录时覆盖 = 数据丢失 | 沿用 `install-skill.sh:90-94` 的 abort 语义，绝不覆盖 |
-| R5 | 宿主侧**已存在**指向别处的同名软链（如本机 workbuddy / trae 指向仓库那两条）——自动桥接机制"从不覆盖已有条目"，永远不接管它 | install 必须**主动发现并重指**到 canonical（§4.2 第 3 步、§4.3 第二种情形）；remove 必须能删掉这类链（§4.4） |
+| R5 | 宿主侧**已存在**指向别处的同名软链（如本机 workbuddy / trae 指向仓库那两条）——自动桥接机制"从不覆盖已有条目"，永远不接管它 | install 必须**主动发现并重指**到 canonical（§4.4 第二种情形）；remove 必须能删掉这类链（§4.5） |
 | R6 | 宿主目录里已有**同名**的别的 skill（保留名/排除名） | 探测到已存在的同名条目 → 跳过并报告，不覆盖 |
 | R7 | npm 包多一份分发渠道 ⇒ 仓库与包里的 skill 是两份快照 | 源仍是仓库的 `skills/`，包只是发布产物；过期由 doctor 报，由 `install` 刷新 |
 | R8 | `remove` 误删用户自己的文件 | **软链一律可删**（删链接不丢数据，打印原指向）；**实体目录一律拒绝**并提示手工处理；canonical 是拷贝时删目录，是软链时只删链接 |
@@ -395,4 +449,4 @@ init 交互过程中的其它输出（CLI 探测、toolchain 提示、备份、�
 - Windows 的 `fs.symlinkSync(..., 'junction')` 行为：**未实测**。本仓库其它脚本也是 bash 路线
   （`install-skill.sh`），当前按 Unix 优先设计；若要支持 Windows 需要单独一轮。
 - pnpm / yarn 全局安装的目录布局：**未实测**，R3 是基于常见布局的判断。
-- WorkBuddy 的桥接 hook 是否所有 WorkBuddy 版本都有：**未验证**——本机有，所以 §4.3 用探测而不是假设。
+- WorkBuddy 的桥接 hook 是否所有 WorkBuddy 版本都有：**未验证**——本机有，所以 §4.4 用探测而不是假设。

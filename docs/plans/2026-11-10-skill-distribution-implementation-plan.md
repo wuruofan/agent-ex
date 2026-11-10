@@ -16,9 +16,10 @@
 | D4 | 用户路线=拷贝，开发者路线=软链（`--link`） | design §3 |
 | D5 | canonical **固定**在 `~/.agents/skills/agent-ex-dispatch`（不开放覆盖：自动桥接只认这个源），每宿主一条软链指向 canonical | design §3 |
 | D6 | init **只打印** `agent-ex skill install`，不执行安装 | design §3 |
-| D7 | init 收尾信息实测 39 行 → 24 行（非默认 home 26 行）；`AGENT_EX_HOME` **只在非默认路径时**保留 export 那一步，同时写进 MCP 片段的 `env` | design §6 |
+| D7 | init 收尾信息实测 39 行 → 24 行（非默认 home 30 行）；`AGENT_EX_HOME` **只在非默认路径时**保留 export 那一步，同时写进 MCP 片段的 `env` | design §6 |
 | D8 | doctor 加 skill 段（info 级）；**不进 `collectConfigIssues()`** | design §3 |
-| D9 | **不引入状态文件**，全部从文件系统推导 | design §3 |
+| D9 | **provenance 随内容走**：拷贝目录内写 `.agent-ex-skill.json`（版本 + sha）；归属判定只读那一个目录。版本 = 打包它的 agent-ex 包版本。**没有集中状态文件** | design §3 |
+| D10 | canonical 六态状态机（missing / link→source / link→elsewhere / managed-copy / adoptable / foreign-dir）× 拷贝·软链两种模式，各有确定动作 | design §4.2 |
 
 ## Global Constraints（每个 task 都隐含包含）
 
@@ -116,24 +117,59 @@ export const SKILL_HOSTS: readonly SkillHost[];
 /** 解析本模块内置的那份 skill 目录（源码模式与编译模式都对）。 */
 export function resolveBundledSkillDir(baseDir?: string): string;
 
+/** 当前 agent-ex 包版本（= 打包这份 skill 的版本；skill 的"版本号"就是它）。 */
+export function currentVersion(): string;
+
 /** 目录内容指纹：sha256(排序后的 "相对路径\0内容")，取前 12 位 hex。 */
 export function hashDir(dir: string): string | null;
 
-export interface SkillTargetState {
+/** canonical 的六态（design §4.2）。 */
+export type CanonicalState =
+  | "missing"
+  | "link-to-source"
+  | "link-elsewhere"
+  | "managed-copy"
+  | "adoptable"
+  | "foreign-dir";
+
+export interface CanonicalInfo {
   path: string;
-  kind: "link" | "copy" | "dir" | "missing" | "broken-link";
+  state: CanonicalState;
   /** 软链的指向（绝对路径）。 */
   target?: string;
+  /** managed-copy 时来自 marker。 */
+  marker?: SkillMarker;
+  /** 当前内容 hash。 */
+  sha?: string;
+  /** managed-copy 且 marker.version != currentVersion() ⇒ 需要更新。 */
+  updateAvailable?: boolean;
+  /** managed-copy 但当前 hash != marker.sha ⇒ 用户手改过。 */
+  modified?: boolean;
 }
-export function inspectTarget(path: string): SkillTargetState;
+
+/** 拷贝目录内的 provenance（design §4.2）。 */
+export interface SkillMarker {
+  skill: string;
+  version: string;
+  sha: string;
+  source: string;
+}
+
+export function inspectCanonical(canonical: string, source: string): CanonicalInfo;
+export function readMarker(dir: string): SkillMarker | null;
+export function writeMarker(dir: string, m: SkillMarker): void;
 
 export interface SkillStatus {
-  bundled: { dir: string; sha: string | null; exists: boolean };
-  canonical: SkillTargetState & { stale: boolean };
-  hosts: Array<{ host: SkillHost; state: SkillTargetState; autoBridge: boolean }>;
+  bundled: { dir: string; version: string; sha: string | null; exists: boolean };
+  canonical: CanonicalInfo;
+  hosts: Array<{ host: SkillHost; state: TargetState; autoBridge: boolean }>;
 }
-export function skillStatus(opts?: { home?: string; source?: string }): SkillStatus;
+export function skillStatus(opts: { userHome: string; source?: string }): SkillStatus;
 ```
+
+⚠️ **`userHome` 与 `agentExHome` 必须分开**（design §6 / plan Task 5）：
+`userHome` = `os.homedir()`（`~/.agents/skills` 在这底下），`agentExHome` = `$AGENT_EX_HOME`（配置在这）。
+混用会让 doctor 去看 `~/.agent-ex/.agents/skills`（错）。
 
 **宿主表初稿**（路径来自本机实测，design §2.3；**只放已验证的**）
 
@@ -143,8 +179,8 @@ export function skillStatus(opts?: { home?: string; source?: string }): SkillSta
 | `claude` | `~/.claude/skills` | 无 |
 | `workbuddy` | `~/.workbuddy/skills` | 有：`~/.workbuddy/hooks/sync-agents-skills.sh` 存在 |
 | `trae-cn` | `~/.trae-cn/skills` | 无（路径随安装版本变，只在探测到时才提示） |
-| `codex` | `~/.codex/skills` | 无 |
-| `opencode` | `~/.config/opencode/skills` | 无 |
+| `codex` | `~/.codex/skills` | ⚠️ **未验证该宿主真的会读 skills 目录** ⇒ 默认不链，只允许 `--target` 显式指定 |
+| `opencode` | `~/.config/opencode/skills` | ⚠️ 同上（本机该目录为空） |
 
 ⚠️ `autoBridge` 的判据是**探测**（那个 hook 文件在不在），不是硬编码"WorkBuddy 有"。
 hook 支持 `AGENTS_SKILLS_DIR` / `WORKBUDDY_SKILLS_DIR` 覆盖 ⇒ **可以隔离测试它的行为**
@@ -153,53 +189,77 @@ hook 支持 `AGENTS_SKILLS_DIR` / `WORKBUDDY_SKILLS_DIR` 覆盖 ⇒ **可以隔�
 **测试**（`tests/skill.test.ts`）
 
 - `resolveBundledSkillDir()` 在源码模式下解析到 `<repo>/skills/agent-ex-dispatch`。
+- `currentVersion()` 等于 `package.json` 的 version（源码模式与编译模式都对）。
 - `hashDir()` 对同一目录两次调用结果相同；改动一个文件后结果不同；空目录返回固定值。
-- `inspectTarget()` 四种形态：软链 / 实体目录 / 断链 / 不存在。
-- `skillStatus()` 能报出 canonical 是拷贝还是软链，以及拷贝与 source 不同时 `stale === true`。
-- **测试不得依赖开发机装了什么**：所有路径与宿主表都要可注入（`home` 参数 + 表的构造函数）。
+- `inspectCanonical()` 六态各一条：missing / link→source / link→elsewhere / managed-copy /
+  adoptable（无 marker 但内容一致）/ foreign-dir（无 marker 且内容不同）。
+- `readMarker()` / `writeMarker()` 往返；marker 损坏（非法 JSON）时返回 null 而不是崩。
+- `skillStatus()` 能报出 `updateAvailable` 与 `modified`。
+- **测试不得依赖开发机装了什么**：所有路径与宿主表都要可注入（`userHome` 参数 + 表的构造函数）。
 
 ---
 
 ## Task 3: `src/skill.ts` 的写层 —— install / remove
 
-**install 的流程**（design §4.2，逐条实现）
+**install 的流程**（design §4.2 动作矩阵 + §4.3，逐条实现）
 
-1. 解析 `source`（默认 `resolveBundledSkillDir()`）与 `canonical`（**固定** `~/.agents/skills/agent-ex-dispatch`，
-   不开放覆盖——自动桥接只认 `~/.agents/skills` 这一个源，design §2.4.3 约束 A）。
-2. canonical 已存在时：
-   - 软链且指向同一 source → `skip`（幂等）
-   - 软链但指向别处 → 问是否重指（`--yes` 直接重指）
-   - 实体目录 → **中止**，提示用户手工处理
+1. 解析 `source`（默认 `resolveBundledSkillDir()`）与 `canonical`
+   （**固定** `~/.agents/skills/agent-ex-dispatch`，不开放覆盖——自动桥接只认 `~/.agents/skills`，
+   design §2.4.3 约束 A）。
+2. `inspectCanonical()` 定出六态之一，然后按动作矩阵执行：
+   - `missing` → 建（拷贝 / 软链）
+   - `link→source` → skip（幂等）
+   - `link→elsewhere` → 问是否重指 / 切换
+   - `managed-copy` + `version == 当前` → skip
+   - `managed-copy` + `version != 当前` → **问"是否更新"**；确认后覆盖
+   - `managed-copy` + `modified` → 额外提示"这份被改过，更新会覆盖你的修改"
+   - `adoptable` → 认领：补写 marker，视作已装
+   - `foreign-dir` → **中止**，提示用户手工处理（目录内容**一字未改**）
 3. canonical 的建立：
-   - `--link`（开发者路线）→ `fs.symlinkSync(source, canonical, "dir")`
-   - 默认（用户路线）→ **拷贝**目录内容（递归，`fs.cpSync(source, canonical, { recursive: true })`）
-4. 宿主链：逐个探测到的宿主目录问是否建链；**有 `autoBridge` 的宿主不建链**（design §4.3），
-   **但已有指向别处的链必须重指**（design §2.4.3 约束 B——自动桥接不覆盖已有条目，永远不接管它）。
-   提示"它会自动桥接"；`--yes` 则全建；`--target` 的直接建。
+   - `--link`（开发者路线）→ `fs.symlinkSync(source, canonical, "dir")`；**不写 marker**
+   - 默认（用户路线）→ **拷贝**目录内容（`fs.cpSync(source, canonical, { recursive: true })`），
+     再写 marker（`version = currentVersion()`、`sha = hashDir(canonical)`、`source`）
+4. 宿主链：逐个探测到的宿主目录，按 design §4.4 的三种情形处理；
+   **有 `autoBridge` 的宿主不建链**（提示"它会自动桥接"），**但已有指向别处的链必须重指**
+   （design §2.4.3 约束 B——自动桥接不覆盖已有条目，永远不接管它）。
 5. 打印结果清单。
 
-**remove 的流程**（design §4.4）
+**原子性**（P1-10）：拷贝**先写同目录临时目录**（如 `~/.agents/skills/.agent-ex-dispatch.tmp.<pid>`），
+成功后 `fs.renameSync` 覆盖 canonical；失败则删临时目录、canonical 原封不动。
+⇒ 宿主不会读到"写了一半"的 skill。
 
-- canonical 是拷贝 → 删目录；是软链 → 只删链接不删 target。
+**remove 的流程**（design §4.5）
+
+- canonical 是 `managed-copy` / `adoptable` → 删目录；是软链 → 只删链接不删 target；
+  是 `foreign-dir` → **拒绝删**并提示手工处理。
 - 宿主目录下 `agent-ex-dispatch`：
   - **软链 → 一律删**（删链接不丢数据），并打印它原本指向哪。
     ⚠️ **不要求指向 canonical**：本机 workbuddy / trae 那两条指向仓库的链也必须能删，
     否则"从开发者路线切回用户路线"之后永远卸不干净（design §2.4.3 约束 B）。
   - 实体目录 → **拒绝删**并提示手工处理。
-  - 顺序：canonical 是拷贝时，先删宿主链再删 canonical（反过来会留断链）。
+  - 顺序：**先删宿主链、后删 canonical**（反过来会留断链）。两种 canonical 形态都适用。
 - 删之前先 `lstat` 确认形态，**不碰**没见过的路径。
 
 **返回值**：都返回结构化结果（`{ ok, lines[], errors[] }`），**不直接 `console.log`**——
 文案渲染归 `src/skill-cmd.ts`（与 `runDoctor` / `runConfig` 的分工一致）。
+**"提问"通过注入的回调**（`confirm?: (q: string) => Promise<boolean>`），
+纯逻辑层不自己碰 readline ⇒ 测试不需要模拟 TTY。
 
 **测试**
 
 - 幂等：连跑两次 `install`，第二次全 `skip`，且文件系统无变化。
-- 实体目录冲突：在 canonical 放一个实体目录 → install **中止**，且该目录内容**一字未改**。
-- 拷贝 vs 软链：默认装完 canonical 是实体目录；`--link` 装完是软链且指向 source。
-- 断链：canonical 是指向不存在路径的软链 → 报 `broken-link` 而不是崩。
+- **更新流程**（用户提的那个"对比版本号，询问是否更新"）：
+  - 装完后把 marker 的 version 改旧 → 再 `install` ⇒ 提示"是否更新"；确认 ⇒ 版本变新；否认 ⇒ 不变。
+  - 装完后手改 canonical 里的文件 ⇒ 再 `install` ⇒ 额外提示"这份被改过"。
+- `foreign-dir`：在 canonical 放一个**无 marker 且内容与 bundled 不同**的实体目录
+  → install **中止**，且该目录内容**一字未改**。
+- `adoptable`：放一个**无 marker 但内容与 bundled 相同**的目录 → install 认领（补 marker），不中止。
+- 拷贝 vs 软链：默认装完 canonical 是实体目录**且含 marker**；`--link` 装完是软链且**不含** marker。
+- 断链：canonical 是指向不存在路径的软链 → 报出来而不是崩。
+- 原子性：模拟拷贝失败 → canonical 原封不动、临时目录被清理。
 - remove 只删该删的：在宿主目录放一个**指向别处**的同名软链 → remove **删掉它**（软链一律可删），
   但打印它原本指向哪；放一个**实体目录** → remove **拒绝删**并提示手工处理。
+- remove 不误删：`remove --target X` 只删 X，**不删 canonical**（除非明确要求）。
 - 有 `autoBridge` 的宿主：install **不**为它建链。
 - 有 `autoBridge` 的宿主 + 已存在指向别处的链：install **主动重指**到 canonical
   （自动桥接"从不覆盖已有条目"，不会接管它 ⇒ 不重指就永远用旧的那份）。
@@ -317,8 +377,8 @@ export async function runSkill(args: string[]): Promise<number>;
     非默认路径断言**含** `export AGENT_EX_HOME=<home>` **且**片段的 `env` 里也有它
 - 新增：默认路径时片段**不含** `env` 字段；非默认路径时含且值正确。
 - ⚠️ **行数断言按实测算，别拍脑袋**：`mcpServerSnippet` 用 `JSON.stringify(…, null, 2)` ⇒ 片段展开 **10 行**；
-  模板其余 14 行 ⇒ **默认路径 24 行 / 非默认 26 行**。
-  断言写 "默认 ≤ 24 行、非默认 ≤ 26 行"。
+  模板其余 14 行 ⇒ **默认路径 24 行 / 非默认 30 行**（非默认多出 export 段 3 行 + 片段 `env` 字段 3 行）。
+  断言写 "默认 ≤ 26 行、非默认 ≤ 32 行"。
   （原先写的 "≤ 16 行" 会红：那是把片段当单行 JSON 数出来的。
   当前 `nextSteps` 实测 **39 行 / 非空 31**，也不是原先写的 33。）
 - 中文扫描测试（`:217-232`）仍绿。
@@ -439,9 +499,10 @@ TGZ=$(ls -t "$REPO"/agent-ex-mcp-*.tgz | head -1)
 - [ ] D4：`install` 默认拷贝、`--link` 软链；**两者都可测**
 - [ ] D5：canonical **固定**在 `~/.agents/skills/agent-ex-dispatch`；宿主链指向 canonical（不是 source）
 - [ ] D6：init 只**打印** `agent-ex skill install`，不执行安装
-- [ ] D7：`nextSteps()` 默认路径 ≤ 24 行 / 非默认 ≤ 26 行；`AGENT_EX_HOME` 在**非默认**路径时既进片段的 `env`、也保留 export 那一步
+- [ ] D7：`nextSteps()` 默认路径 ≤ 26 行 / 非默认 ≤ 32 行（实测 24 / 30）；`AGENT_EX_HOME` 在**非默认**路径时既进片段的 `env`、也保留 export 那一步
 - [ ] D8：doctor 有 skill 段；**`collectConfigIssues()` 里没有** skill 相关代码
-- [ ] D9：**没有**新增状态文件；`remove` 的判定全部来自 `lstat` / `readlink`
+- [ ] D9：provenance 只在**拷贝目录内**（`.agent-ex-skill.json`），**没有**集中状态文件；`remove` 的判定来自 `lstat` / `readlink` / marker
+- [ ] D10：canonical 六态全部有确定动作；`managed-copy` 版本落后 ⇒ **问"是否更新"**；`foreign-dir` ⇒ 中止且内容一字未改
 - [ ] 硬约束 1：init 的用户可见输出无中文（`tests/init.test.ts` 绿）
 - [ ] 硬约束 7：`src/server.ts` 顶层 import 未增加（`skill` 分支内动态 import `./skill-cmd.js`）；`tests/cli-env.test.ts` 绿
 - [ ] 硬约束 6：宿主表只在 `src/skill.ts` 一处
