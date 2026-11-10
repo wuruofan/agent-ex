@@ -49,7 +49,7 @@ prompt 怎么写才自包含、同一目录的写任务为什么禁止并发、`
 | `~/.agents/skills` | 实体 skill + 软链 | **真源**（Agent Skills 规范的共享目录） |
 | `~/.claude/skills` | 4 条软链 → `../../.agents/skills/*` | Claude Code 靠**软链**看共享目录 |
 | `~/.trae-cn/skills` | 9 条软链 → `../../.agents/skills/*` | Trae 同上 |
-| `~/.workbuddy/skills` | 11 条软链 | WorkBuddy **有自动桥接 hook**（见 §2.4） |
+| `~/.workbuddy/skills` | 11 条软链 | 来源分两类，**别混为一谈**（见 §2.4.1）：10-13 那条是 `install-skill.sh` 装的，10-21 那批才是 hook 桥接的 |
 | `~/.codex/skills` | 只有 `.system/`，0 条 skill | 未桥接 |
 | `~/.config/opencode/skills` | 空 | 未桥接 |
 
@@ -57,7 +57,24 @@ prompt 怎么写才自包含、同一目录的写任务为什么禁止并发、`
    实测宿主是通过**每家一条软链**指向 `~/.agents/skills` 的。
    ⇒ canonical 必须落在 `~/.agents/skills`，**且每家宿主都要一条链**——宿主表是必需品，不是可选项。
 
-### 2.4 WorkBuddy 有自动桥接 hook（**这条推翻了需求 3 的前提**）
+### 2.4 三类软链的来源归因，以及 WorkBuddy 的自动桥接 hook
+
+#### 2.4.1 本机三类软链的来源
+
+按「链接目标形态 + 时间戳」归因（`find -type l -exec stat`）：
+
+| 位置 | 目标形态 | 时间 | 来源 |
+| :--- | :--- | :--- | :--- |
+| `~/.agents/skills/agent-ex-dispatch` | 绝对路径 → **本仓库** | 10-13 09:50 | `scripts/install-skill.sh` |
+| `~/.workbuddy/skills/agent-ex-dispatch` | 绝对路径 → **本仓库** | **10-13 09:50** | **同上（同一秒、同一次运行）** |
+| `~/.trae-cn/skills/agent-ex-dispatch` | 绝对路径 → 本仓库 | 10-13 09:50 | 同上 |
+| `~/.claude/skills/*`（4 条） | **相对** `../../.agents/skills/*` | 9/4 ~ 10/29 | `npx skills` CLI |
+| `~/.workbuddy/skills/*`（10-21 那批 6 条） | 绝对路径 → `~/.agents/skills/*` | 10-21 16:50 | **WorkBuddy 桥接 hook** |
+
+⚠️ **别把 `~/.workbuddy/skills/agent-ex-dispatch` 当成 hook 的产物**——它是 `install-skill.sh` 装的
+（与 `~/.agents/skills` 那条同一次运行），不是桥接出来的。三条 `agent-ex-dispatch` 链同源于 10-13 的开发者路线。
+
+#### 2.4.2 hook 本身的行为（隔离实验实测）
 
 `~/.workbuddy/hooks/sync-agents-skills.sh` 存在，逻辑是：
 
@@ -67,12 +84,43 @@ prompt 怎么写才自包含、同一目录的写任务为什么禁止并发、`
 - **剪掉**指向 `~/.agents/skills` 的失效软链（源被删了才剪）；
 - 幂等，每个会话启动跑一次。
 
-⇒ **只要 skill 落在 `~/.agents/skills/agent-ex-dispatch`，WorkBuddy 自己就会有一条链。**
-⇒ 「装完提示用户是否手工链到 workbuddy」在这台机器上是**多余的**，而且手工链会和 hook 抢同一份事实
-   （hook 不覆盖已有条目 ⇒ 手工链会长期存在、hook 管不到它）。
+**实测（隔离，不碰真实目录）**：hook 支持 `AGENTS_SKILLS_DIR` / `WORKBUDDY_SKILLS_DIR` 覆盖目录，
+于是可以在临时目录里跑它：
 
-⚠️ 但这是 **WorkBuddy 侧的行为，不是 agent-ex 可以假设的普遍事实**——别的机器可能没有这个 hook。
-⇒ 设计不能写死"WorkBuddy 需要手工链"，只能**探测后按需提示**（§4.3）。
+```bash
+P=$(mktemp -d); mkdir -p "$P/agents/probe-skill" "$P/wb"
+printf -- '---\nname: probe-skill\n---\n' > "$P/agents/probe-skill/SKILL.md"
+AGENTS_SKILLS_DIR="$P/agents" WORKBUDDY_SKILLS_DIR="$P/wb" \
+  WORKBUDDY_SKILL_CACHE="$P/none.json" bash ~/.workbuddy/hooks/sync-agents-skills.sh
+# → synced 1 skill(s) from ~/.agents/skills
+# → $P/wb/probe-skill -> $P/agents/probe-skill/    （绝对路径软链）
+rm -rf "$P"
+```
+
+⇒ hook 确实会把 `~/.agents/skills/*` 桥接进 `~/.workbuddy/skills`。**结论方向成立，但证据是这条实验，
+不是那条手工链。**
+
+#### 2.4.3 由此逼出的两个约束（**原设计的漏洞**）
+
+**约束 A：canonical 必须在 `~/.agents/skills`，否则 hook 桥接不了。**
+hook 只认 `~/.agents/skills` 这一个源。canonical 落到别处（`--target` 指到别的目录）⇒
+WorkBuddy 侧永远没有链。⇒ canonical 路径**固定**为 `~/.agents/skills/<name>`，不开放覆盖。
+
+**约束 B：hook「从不覆盖已存在的条目」⇒ 已存在的手工链，hook 永远不接管。**
+本机 `~/.workbuddy/skills/agent-ex-dispatch` 就是这样一条手工链（指向仓库）。后果：
+
+1. 用户从「开发者路线」（软链到仓库）切到「用户路线」（包内拷贝到 `~/.agents/skills`）时，
+   **workbuddy 侧那条链仍然指向仓库** ⇒ WorkBuddy 里用的还是仓库那份，不是新装的。
+   而 hook 因为"条目已存在"也不会去改它。⇒ **必须由 install 主动发现并重指**（§4.2 第 2 步）。
+2. `remove` 若按"软链必须指向 canonical 才删"的规则，会**拒绝删这条链** ⇒ 卸不干净。
+   ⇒ remove 的规则必须改成：**软链一律可删**（删链接不丢数据，只需打印它原本指向哪），
+   **只有实体目录才拒绝**（§4.4）。
+
+⇒ 「装完提示是否链到 workbuddy」在**没有**自动桥接的机器上仍然必要；在**有**桥接的机器上，
+真正该提示的不是"要不要链"，而是"**你已有一条指向别处的链，要不要重指到新的 canonical**"（§4.3）。
+
+⚠️ 但 hook 是 **WorkBuddy 侧的行为，不是 agent-ex 可以假设的普遍事实**——别的机器可能没有这个 hook。
+⇒ 设计不能写死"WorkBuddy 会自动桥接"，只能**探测后按需分支**（§4.3）。
 
 ### 2.5 既有文档的过期与矛盾（本次一并修）
 
@@ -99,7 +147,7 @@ prompt 怎么写才自包含、同一目录的写任务为什么禁止并发、`
 | D2 | 新增 `agent-ex skill install` / `remove` / `status` 三个子命令。 |
 | D3 | **不提供 `update`**。`install` 幂等即刷新；开发者路线是软链、天然实时。 |
 | D4 | **用户路线=拷贝，开发者路线=软链**。两条路线显式分开，不追求"一份实现覆盖两边"。 |
-| D5 | **canonical + 宿主链接**两层：canonical 落在 `~/.agents/skills/agent-ex-dispatch`（共享目录），每个宿主一条软链指向它。宿主表 `SKILL_HOSTS` 是唯一真相源。 |
+| D5 | **canonical + 宿主链接**两层：canonical **固定**在 `~/.agents/skills/agent-ex-dispatch`（不开放覆盖——自动桥接只认这个源，§2.4.3 约束 A），每个宿主一条软链指向它。宿主表 `SKILL_HOSTS` 是唯一真相源。 |
 | D6 | **init 只打印 `agent-ex skill install`，不执行安装**。 |
 | D7 | **init 收尾信息精简**（33 行 → 14 行），且 `AGENT_EX_HOME` 写进 MCP 片段的 `env` 字段、不再单独成步。 |
 | D8 | **doctor 加 skill 段**，但**不塞进 `collectConfigIssues()`**——那是 `config.json` 的真相源，skill 状态不是 config。新建 `collectSkillIssues()` 与之平行。 |
@@ -151,10 +199,10 @@ agent-ex skill status
 
 ```
 1. 解析 source（默认 = 相对本模块位置解析的 <module>/skills/agent-ex-dispatch）
-2. 解析 canonical：
-     --link → <shared>/agent-ex-dispatch 是指向 source 的软链
-     默认    → <shared>/agent-ex-dispatch 是 source 的**拷贝**
-   <shared> 默认 ~/.agents/skills，可用 --target 覆盖
+2. 解析 canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖——理由见 §2.4.3 约束 A：
+   自动桥接机制只认 `~/.agents/skills` 这一个源，canonical 挪走就桥接不了）
+     --link → canonical 是指向 source 的**软链**
+     默认    → canonical 是 source 的**拷贝**
 3. canonical 已存在：
      软链且指向同一 source → skip（幂等）
      软链但指向别处        → 问是否重指（--yes 直接重指）
@@ -165,27 +213,38 @@ agent-ex skill status
 
 **宿主链接一律指向 canonical**（不是指向 source）：canonical 是唯一真源，`remove` 才能干净地删干净。
 
+⚠️ **第 3 步的"软链但指向别处"是本机当前的真实状态**，不是理论情况：
+`~/.workbuddy/skills/agent-ex-dispatch` 与 `~/.trae-cn/skills/agent-ex-dispatch` 都指向**仓库**
+（§2.4.1）。用户从开发者路线切到用户路线时，这两条必须被**重指到 canonical**，
+否则 WorkBuddy / Trae 里用的还是仓库那份——而自动桥接机制**不会**纠正它（§2.4.3 约束 B）。
+
 ### 4.3 提示文案按"有没有自动桥接"分流
 
-对每个探测到的宿主目录：
+对每个探测到的宿主目录，分三种情形：
 
-- 该宿主**已有**指向 canonical 的链 → `already linked`
-- 该宿主**没有**链：
+- 该宿主**已有指向 canonical 的链** → `already linked`
+- 该宿主**已有一条指向别处的链**（本机的 workbuddy / trae 就是这样）
+  → 提示"现有一条链指向 <target>，要不要重指到新的 canonical？"
+  → **重指**（--yes 直接重指）。⚠️ 即便该宿主有自动桥接机制，也**必须**重指：
+    hook「从不覆盖已存在的条目」，它不会接管这条链（§2.4.3 约束 B）。
+- 该宿主**没有链**：
   - 若探测到该宿主有自动桥接机制（当前只发现 WorkBuddy 的 `~/.workbuddy/hooks/sync-agents-skills.sh`）
     → 提示"它会自动桥接，不用手工链"，**不建链**
   - 否则 → 问"要不要链到它？"
 
-⇒ 用户提的"装完提示是否链接到 workbuddy"落在这里：**有 hook 的机器上提示的是"不用链"，
-没有 hook 的机器上才真的问。** 事实优先，不写死。
+⇒ 用户提的"装完提示是否链接到 workbuddy"落在这里：**有 hook 的机器上，若已有链则提示重指、
+若没有链则提示不用管；没有 hook 的机器上才真的问要不要链。** 事实优先，不写死。
 
 ### 4.4 remove 的规则
 
 - canonical 是**拷贝** → 删掉这个目录
 - canonical 是**软链** → 只删链接，**不删 target**
 - 各宿主目录下 `agent-ex-dispatch`：
-  - 是软链且指向 canonical → 删
-  - 是实体目录 → **拒绝删**，提示用户手工处理（不是我们装的，或被改过）
-  - 是指向别处的软链 → **拒绝删**，提示用户手工处理
+  - 是**软链** → **删**（删链接不丢数据），并打印它原本指向哪
+    ⚠️ **不要求它指向 canonical**：本机 workbuddy / trae 那两条指向仓库的链也必须能删掉，
+    否则"从开发者路线切回用户路线"之后永远卸不干净（§2.4.3 约束 B）。
+    唯一的例外是它指向 canonical 本身时，删 canonical 与删链接要**按顺序**做，别把 canonical 删成断链。
+  - 是**实体目录** → **拒绝删**，提示用户手工处理（分不清是用户自己的还是被改过的）
 - `ln` 陷阱（`README.md:149-150`）：`ln -s` 对已存在的目录目标不报错，会把软链塞进目录里。
   ⇒ 一律用 `fs.symlinkSync` + 前置 `lstat`，**绝不**用 shell `ln`。
 
@@ -291,10 +350,10 @@ init 交互过程中的其它输出（CLI 探测、toolchain 提示、备份、�
 | R2 | 宿主目录表要维护（各家 IDE 路径会变，Trae 还随版本变） | 表里只放**已验证**的路径；探测到才提示；`--target` 兜底 |
 | R3 | 软链在 pnpm/yarn 全局安装下可能悬空（包目录是 store 软链） | 用户路线用**拷贝**，不依赖包目录的软链结构 |
 | R4 | 目标已有实体目录时覆盖 = 数据丢失 | 沿用 `install-skill.sh:90-94` 的 abort 语义，绝不覆盖 |
-| R5 | 手工建的宿主链与 WorkBuddy 的自动桥接 hook 抢同一份事实 | §4.3 的探测式提示：有自动桥接就不手工建 |
+| R5 | 宿主侧**已存在**指向别处的同名软链（如本机 workbuddy / trae 指向仓库那两条）——自动桥接机制"从不覆盖已有条目"，永远不接管它 | install 必须**主动发现并重指**到 canonical（§4.2 第 3 步、§4.3 第二种情形）；remove 必须能删掉这类链（§4.4） |
 | R6 | 宿主目录里已有**同名**的别的 skill（保留名/排除名） | 探测到已存在的同名条目 → 跳过并报告，不覆盖 |
 | R7 | npm 包多一份分发渠道 ⇒ 仓库与包里的 skill 是两份快照 | 源仍是仓库的 `skills/`，包只是发布产物；过期由 doctor 报，由 `install` 刷新 |
-| R8 | `remove` 误删用户自己的文件 | 只删"指向 canonical 的软链"+"我们拷的 canonical"；其它一律拒绝并提示手工处理 |
+| R8 | `remove` 误删用户自己的文件 | **软链一律可删**（删链接不丢数据，打印原指向）；**实体目录一律拒绝**并提示手工处理；canonical 是拷贝时删目录，是软链时只删链接 |
 
 ## 8. 不做什么
 

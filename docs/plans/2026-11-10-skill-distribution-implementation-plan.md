@@ -14,7 +14,7 @@
 | D2 | 子命令：`agent-ex skill install` / `remove` / `status` | design §3 |
 | D3 | **不做 `update`** | design §3 |
 | D4 | 用户路线=拷贝，开发者路线=软链（`--link`） | design §3 |
-| D5 | canonical 在 `~/.agents/skills/agent-ex-dispatch`，每宿主一条软链指向 canonical | design §3 |
+| D5 | canonical **固定**在 `~/.agents/skills/agent-ex-dispatch`（不开放覆盖：自动桥接只认这个源），每宿主一条软链指向 canonical | design §3 |
 | D6 | init **只打印** `agent-ex skill install`，不执行安装 | design §3 |
 | D7 | init 收尾信息 33 行 → 14 行；`AGENT_EX_HOME` 写进 MCP 片段的 `env` | design §6 |
 | D8 | doctor 加 skill 段（info 级）；**不进 `collectConfigIssues()`** | design §3 |
@@ -136,6 +136,10 @@ export function skillStatus(opts?: { home?: string; source?: string }): SkillSta
 | `codex` | `~/.codex/skills` | 无 |
 | `opencode` | `~/.config/opencode/skills` | 无 |
 
+⚠️ `autoBridge` 的判据是**探测**（那个 hook 文件在不在），不是硬编码"WorkBuddy 有"。
+hook 支持 `AGENTS_SKILLS_DIR` / `WORKBUDDY_SKILLS_DIR` 覆盖 ⇒ **可以隔离测试它的行为**
+（design §2.4.2 的实测就是这么做的），不必假设。
+
 **测试**（`tests/skill.test.ts`）
 
 - `resolveBundledSkillDir()` 在源码模式下解析到 `<repo>/skills/agent-ex-dispatch`。
@@ -150,7 +154,8 @@ export function skillStatus(opts?: { home?: string; source?: string }): SkillSta
 
 **install 的流程**（design §4.2，逐条实现）
 
-1. 解析 `source`（默认 `resolveBundledSkillDir()`）与 `canonical`（默认 `<shared>/agent-ex-dispatch`）。
+1. 解析 `source`（默认 `resolveBundledSkillDir()`）与 `canonical`（**固定** `~/.agents/skills/agent-ex-dispatch`，
+   不开放覆盖——自动桥接只认 `~/.agents/skills` 这一个源，design §2.4.3 约束 A）。
 2. canonical 已存在时：
    - 软链且指向同一 source → `skip`（幂等）
    - 软链但指向别处 → 问是否重指（`--yes` 直接重指）
@@ -159,13 +164,19 @@ export function skillStatus(opts?: { home?: string; source?: string }): SkillSta
    - `--link`（开发者路线）→ `fs.symlinkSync(source, canonical, "dir")`
    - 默认（用户路线）→ **拷贝**目录内容（递归，`fs.cpSync(source, canonical, { recursive: true })`）
 4. 宿主链：逐个探测到的宿主目录问是否建链；**有 `autoBridge` 的宿主不建链**（design §4.3），
+   **但已有指向别处的链必须重指**（design §2.4.3 约束 B——自动桥接不覆盖已有条目，永远不接管它）。
    提示"它会自动桥接"；`--yes` 则全建；`--target` 的直接建。
 5. 打印结果清单。
 
 **remove 的流程**（design §4.4）
 
 - canonical 是拷贝 → 删目录；是软链 → 只删链接不删 target。
-- 宿主目录下 `agent-ex-dispatch`：软链且指向 canonical → 删；实体目录或指向别处的软链 → **拒绝删**并提示。
+- 宿主目录下 `agent-ex-dispatch`：
+  - **软链 → 一律删**（删链接不丢数据），并打印它原本指向哪。
+    ⚠️ **不要求指向 canonical**：本机 workbuddy / trae 那两条指向仓库的链也必须能删，
+    否则"从开发者路线切回用户路线"之后永远卸不干净（design §2.4.3 约束 B）。
+  - 实体目录 → **拒绝删**并提示手工处理。
+  - 顺序：canonical 是拷贝时，先删宿主链再删 canonical（反过来会留断链）。
 - 删之前先 `lstat` 确认形态，**不碰**没见过的路径。
 
 **返回值**：都返回结构化结果（`{ ok, lines[], errors[] }`），**不直接 `console.log`**——
@@ -177,8 +188,11 @@ export function skillStatus(opts?: { home?: string; source?: string }): SkillSta
 - 实体目录冲突：在 canonical 放一个实体目录 → install **中止**，且该目录内容**一字未改**。
 - 拷贝 vs 软链：默认装完 canonical 是实体目录；`--link` 装完是软链且指向 source。
 - 断链：canonical 是指向不存在路径的软链 → 报 `broken-link` 而不是崩。
-- remove 只删该删的：在宿主目录放一个**指向别处**的同名软链 → remove **拒绝删它**。
+- remove 只删该删的：在宿主目录放一个**指向别处**的同名软链 → remove **删掉它**（软链一律可删），
+  但打印它原本指向哪；放一个**实体目录** → remove **拒绝删**并提示手工处理。
 - 有 `autoBridge` 的宿主：install **不**为它建链。
+- 有 `autoBridge` 的宿主 + 已存在指向别处的链：install **主动重指**到 canonical
+  （自动桥接"从不覆盖已有条目"，不会接管它 ⇒ 不重指就永远用旧的那份）。
 
 ---
 
@@ -343,7 +357,7 @@ TGZ=$(ls -t "$REPO"/agent-ex-mcp-*.tgz | head -1)
 - [ ] D2：三个子命令都能跑；`status` 只读；`remove` 只删该删的
 - [ ] D3：仓库里**没有** `update` 子命令
 - [ ] D4：`install` 默认拷贝、`--link` 软链；**两者都可测**
-- [ ] D5：canonical 在 `~/.agents/skills/agent-ex-dispatch`；宿主链指向 canonical（不是 source）
+- [ ] D5：canonical **固定**在 `~/.agents/skills/agent-ex-dispatch`；宿主链指向 canonical（不是 source）
 - [ ] D6：init 只**打印** `agent-ex skill install`，不执行安装
 - [ ] D7：`nextSteps()` ≤ 16 行；`AGENT_EX_HOME` 在非默认路径时进片段的 `env`
 - [ ] D8：doctor 有 skill 段；**`collectConfigIssues()` 里没有** skill 相关代码
