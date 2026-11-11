@@ -1,197 +1,190 @@
 # agent-ex
 
-**Dispatch and review with *external* agents.** 一个把 AI 编程 Agent（Claude Code / OpenCode）当作「外部执行者」来协作的 **MCP Server**——既能派发后台任务，也能让外部 agent 独立出方案、相互 review。
+**Dispatch and review with *external* agents.**
 
-> 本文标题与命令名是 `agent-ex`，npm 包名是 [`agent-ex-mcp`](https://www.npmjs.com/package/agent-ex-mcp)（原因见「快速开始」下方说明）。
+> English README · [中文版 →](https://github.com/wuruofan/agent-ex/blob/main/docs/README.zh-CN.md)
 
-通过 MCP 工具 `agent_ex_submit` / `agent_ex_status` / `agent_ex_cancel` 提交任务：server 以 detached 子进程拉起**真实** agent CLI，用 SQLite 记录任务状态机，支持 `NEEDS_INPUT` 续跑、瞬时错误重试、超时、取消，并在任务结束时推送飞书通知。
+`agent-ex` is an **MCP server** that treats AI coding agents (Claude Code, OpenCode, …) as
+*external executors*. You dispatch a self-contained ticket; the agent works in a detached
+background process and writes its result back to a SQLite-backed task store — so a long job
+never blocks your own conversation.
 
-> 下文的 `submit` / `status` / `cancel` / `version` / `restart` 均指 `agent_ex_*` 全名；
-> 部分 MCP 宿主会再加一层前缀（如 `mcp__agent-ex__agent_ex_submit`）。
+- The npm package is [`agent-ex-mcp`](https://www.npmjs.com/package/agent-ex-mcp);
+  the command it installs is **`agent-ex`**. (The `-mcp` suffix only avoids the registry's
+  package-name-similarity rejection for `agent-ex`.)
+- The data directory is `~/.agent-ex` (override with `AGENT_EX_HOME`).
 
-三种典型协作形态（都只是 `submit` 的不同 prompt，**不需要任何新工具**）：
+Three collaboration shapes — all of them are just a different `submit` prompt, **no extra tool**:
 
-| 形态 | 怎么用 |
+| Shape | How |
 | :--- | :--- |
-| **派发实现** | `submit(prompt=自包含工单)` → worker 独立完成 → `agent-ex wait` 带回结果 |
-| **独立起草方案** | `submit(prompt="读 docs/ 与代码，产出设计方案写到 docs/plans/xxx.md")` |
-| **相互 review** | `submit(prompt="审阅 docs/plans/xxx.md，按可执行性/遗漏/矛盾列问题")` |
+| **Delegate implementation** | `submit(prompt=<self-contained ticket>)` → the worker does the job → `agent-ex wait` brings back the result |
+| **Draft a plan independently** | `submit(prompt="read docs/ and the code, write a design to docs/plans/x.md")` |
+| **Cross-review** | `submit(prompt="review docs/plans/x.md, list concrete problems by feasibility / gaps / contradictions")` |
 
-## 特性
+## Features
 
-- **外部执行者**：任务在独立 detached 进程里跑，不阻塞你的对话；随时 `status` 查进度、`cancel` 终止。
-- **状态机**：`queued → running → (needs_input → running → …) → completed | failed | cancelled`，最多 5 轮续跑。
-- **多 Agent / 多 Provider**：内置 `claude` 与 `opencode` 两个 executor，可配置不同 profile（如 MiniMax、DeepSeek 网关）。
-- **NEEDS_INPUT 续跑**：agent 反问时任务进入 `needs_input`，用 `submit(continue_of=…)` 把答案喂回去继续跑。
-- **瞬时错误自动重试**：429 / 529 / 5xx / 连接重置等可恢复错误自动重试（共 3 次尝试，退避 30s → 60s），超时与硬失败不重试。
-- **飞书通知**：任务终态（完成 / 失败 / 取消）推送飞书，支持 `dry_run` 调试；配额告警也会实时推送。
-- **密钥零落盘（config）**：`config.json` 只含 `{env:ENV_VAR}` 占位符；真实密钥落在 `$AGENT_EX_HOME/.env`（chmod 600，server 启动自动加载），不进 git、不被同步。
-- **自更新 / 自诊断**：`version` 回报 `gitSha` 确认新代码已生效，`restart` 让 server 自行退出并由宿主 respawn 加载新 `dist`——不必手动重启 MCP 宿主，在跑任务不受影响。
+- **External executors** — tasks run in a detached process tree; poll with `status`, stop with `cancel`.
+- **Task state machine** — `queued → running → (needs_input → running → …) → completed | failed | cancelled`, up to 5 continuation rounds.
+- **Multi-agent, multi-provider** — built-in `claude` and `opencode` executors; each profile carries its own env, model and PATH additions.
+- **`needs_input` continuation** — when the agent asks a question the task parks in `needs_input`; feed the answer back with `submit(continue_of=…)`.
+- **Transient-error retry** — 429 / 529 / 5xx / connection resets are retried (3 attempts, backoff 30s → 60s). Timeouts and hard failures are never retried.
+- **Feishu (Lark) notifications** — a card is pushed when a task reaches a terminal state; `dry_run` lets you debug without sending.
+- **No secrets in `config.json`** — the config only holds `{env:VAR}` placeholders; the real values live in `$AGENT_EX_HOME/.env` (mode 600, never in git).
+- **Self-diagnosis** — `version` reports the build's `gitSha`; `restart` makes the server exit so the host respawns it with the current build. Running workers are unaffected.
 
-## 架构
+## Requirements
 
-```
-MCP Client (TRAE / WorkBuddy / Claude Code / 任何 MCP 宿主)
-   │  stdio: submit / status / cancel
-   ▼
-server.ts (MCP Server)
-   │  submit → 写 SQLite → spawn detached runner
-   ▼
-runner.ts (detached 子进程)
-   │  buildCommand → spawn agent CLI (claude -p / opencode)
-   │  逐行解析 agent 事件 → 落库 + 写日志
-   ▼
-agent CLI (真实 claude / opencode) ── 事件流 ──▶ 终态 + 飞书通知
-```
+- Node.js **>= 22.5** (the server and the runner both use `node:sqlite`)
+- A local agent CLI — `claude` or `opencode`
 
-## 要求
+## Security
 
-- Node.js **>= 22.5**
-- 本地已安装要用的 agent CLI（`claude` 或 `opencode`）
+Workers run with the agent CLI's **permission prompts skipped** (`claude --dangerously-skip-permissions`,
+`opencode --auto`). There is no second confirmation. Use it on your own machine, in directories you trust,
+and think about what permissions you are handing the worker.
 
-## 安全须知
-
-worker 以 agent CLI 的「跳过权限确认」模式运行（claude：`--dangerously-skip-permissions`；opencode：`--auto`），无二次确认。请在**自己的机器、可信的项目目录**上使用；派发任务前想清楚你给了 worker 什么权限。
-
-## 快速开始
+## Install
 
 ```bash
-npm i -g agent-ex-mcp    # 或免安装：npx -y agent-ex-mcp@latest init
-agent-ex init        # 交互式配置：探测 CLI、收集密钥、生成 config + .env
+npm i -g agent-ex-mcp
+# or, without installing:
+npx -y agent-ex-mcp@latest init
 ```
 
-> 包已发布到公共 registry（当前 `agent-ex-mcp@0.3.1`）。
-> **包名带 `-mcp` 后缀、命令名不带**：npm 上 `agent-ex` 与已被他人占用的 `agentex` 过于相似，
-> 触发 registry 的包名相似度保护而无法发布，故加限定词规避；`bin` 仍为 `agent-ex`，
-> 所以安装后命令是 `agent-ex init`（不是 `agent-ex-mcp init`）。数据目录 `~/.agent-ex` 同理保持不变。
+## Quick start
 
-`init` 结束时会**直接打印**可直接粘贴的 MCP 注册片段（用**绝对路径**，理由见下方注意事项），把它拷进你的 MCP 客户端配置即可（Trae：`TRAE SOLO CN/User/mcp.json`；WorkBuddy：`~/.workbuddy/mcp.json`）：
+```bash
+agent-ex init
+```
+
+`init` is interactive: it detects the agent CLIs, asks for the provider and the keys, writes
+`config.json` + `.env`, and then **prints a ready-to-paste MCP registration snippet**.
+Copy it into your MCP client config (Trae: `TRAE SOLO CN/User/mcp.json`; WorkBuddy: `~/.workbuddy/mcp.json`):
 
 ```jsonc
 {
   "mcpServers": {
     "agent-ex": {
-      "command": "/abs/path/to/node",          // init 现场打印，无需自己拼
-      "args": ["/abs/path/to/node_modules/agent-ex/dist/server.js"]
+      "command": "/abs/path/to/node",          // printed by init
+      "args": ["/abs/path/to/node_modules/agent-ex-mcp/dist/server.js"]
     }
   }
 }
 ```
 
-> 注册后需在客户端里信任/启用该 server（首次接入通常要重启或手动连接）。
-> `init` 收尾会打印一条 `agent-ex skill install`（**只提示，不自动装**），见「可选：安装 dispatch skill」。
-
-> ⚠️ **`command` 建议写绝对路径。** MCP 客户端拉起 server 时**不继承你的 shell PATH**，
-> 而 `node_modules/.bin` 只有 `npm run`/`npx` 执行时才会临时注入。已实测（2026-10-11，tarball 全新安装）：
-> `PATH=/usr/bin:/bin` 下裸写 `agent-ex` 直接 `command not found`，写绝对路径则正常返回。
-> nvm / homebrew / GUI 应用托管的环境尤其容易踩。
->
-> 绝对路径怎么拿：
+> **Use absolute paths.** MCP clients spawn the server **without inheriting your shell `PATH`**,
+> and `node_modules/.bin` is only injected for `npm run` / `npx`. With `PATH=/usr/bin:/bin`,
+> a bare `"command": "agent-ex"` fails with `command not found`; an absolute path works.
+> `init` prints the exact absolute paths it used — just copy them.
 >
 > ```bash
-> which node        # Linux/macOS → /Users/<you>/.nvm/versions/node/<v>/bin/node
-> # 找不到 node 时 init 会把它启动时用的那个绝对路径直接打给你，照抄即可
-> ```
->
-> 也可显式补 `env.PATH`，但用绝对路径更省事：
->
-> ```jsonc
-> {
->   "mcpServers": {
->     "agent-ex": {
->       "command": "/Users/<you>/.nvm/versions/node/<v>/bin/node",
->       "args": ["/path/to/agent-ex/dist/server.js"],
->       "env": { "AGENT_EX_HOME": "/Users/<you>/.agent-ex" }
->     }
->   }
-> }
+> which node        # e.g. /Users/<you>/.nvm/versions/node/v24.18.0/bin/node
 > ```
 
-之后在对话里说「把 X 派给后台 worker」即可；任务终态会推飞书通知（`init` 里配置过 webhook 的话）。
+After that, just say "dispatch X to a background worker" in your conversation. When the task
+reaches a terminal state you get a Feishu notification (if you configured a webhook).
 
-### 可选：安装 dispatch skill（推荐）
+`init` re-runs are **full overwrites** of `config.json` — to change a single setting use
+`agent-ex config set` / `agent-ex profile set` instead. Details:
+[init guide](https://github.com/wuruofan/agent-ex/blob/main/docs/user-guide/init.md).
 
-MCP 工具是「底层能力」，dispatch skill 是叠加在上面的**派发规范**：什么时候该派、prompt 怎么写才自包含、
-同一目录的**写**任务为什么禁止并发、`needs_input` 怎么续跑、什么时候干脆别派（返工量小且强依赖当前会话上下文时，
-自己更快更准）。装了它，你只说「把 X 派给 worker」，它会按规范把任务拆好、检查并发、拼好 prompt 再提交。
+## Optional: install the dispatch skill
 
-**skill 随 npm 包一起分发** —— 装完包跑一条命令即可：
+The MCP tools are the low-level capability. The **dispatch skill** is the convention layered on top:
+when to delegate, how to write a self-contained ticket, why two *write* tasks must not run in the
+same directory, how to continue a `needs_input` task — and when not to delegate at all.
+
+The skill ships **inside the npm package**, so installing it is one command:
 
 ```bash
-npm i -g agent-ex-mcp
 agent-ex skill install
 ```
 
-`agent-ex skill install` 做三件事：
+It does three things:
 
-1. 把 `skills/agent-ex-dispatch` **拷贝**到 `~/.agents/skills/agent-ex-dispatch`（Agent Skills 规范的共享目录）；
-2. 在拷贝目录里写一个 `.agent-ex-skill.json`（记下**版本号**与内容指纹）——
-   以后 `agent-ex skill status` / `agent-ex doctor` 靠它判断「装的是哪一版、要不要更新」；
-3. 给**本机存在、且默认该链**的宿主（Claude Code / Trae / WorkBuddy …）各建一条软链。
-   自动桥接的宿主（WorkBuddy，见下）不建链；Codex / OpenCode 默认也不建
-   （未验证这两个宿主会读自己的 skills 目录，Codex 直接读共享目录）⇒ 需要时 `--target` 指定。
+1. copies `skills/agent-ex-dispatch` into `~/.agents/skills/agent-ex-dispatch`
+   (the shared directory of the Agent Skills spec);
+2. writes `.agent-ex-skill.json` next to it, recording the **version** and a content fingerprint —
+   `agent-ex skill status` and `agent-ex doctor` use it to tell "which version is installed";
+3. symlinks it into every host that is present on this machine and should have it
+   (Claude Code, Trae, …).
 
-几个要点：
+Things worth knowing:
 
-- **版本与 CLI 同步**：skill 的版本号 = 打包它的 `agent-ex-mcp` 版本。已发布的包不可变 ⇒ 装出来的 skill
-  永远和你的 CLI 对得上（skill 里写死了 `agent-ex-mcp >= 0.3.1` 这类门槛，版本错配会直接踩坏）。
-  升级 CLI 后再跑一次 `agent-ex skill install`，它会问「是否更新」。
-- **不会覆盖别人的东西**：目标路径已有**实体目录**且不是 agent-ex 装的 ⇒ 直接中止并提示，绝不覆盖。
-- **WorkBuddy**：它只扫 `~/.workbuddy/skills`，不读 `~/.agents/skills`。多数 WorkBuddy 安装自带一个
-  自动桥接脚本（`~/.workbuddy/hooks/sync-agents-skills.sh`），会自己把 `~/.agents/skills` 桥接过去 ⇒
-  `agent-ex skill install` 检测到就会告诉你「不用手工链」。没有该脚本的机器，显式指定：
-  `agent-ex skill install --target ~/.workbuddy/skills`。
-- **Trae**：本机 `TRAE SOLO CN` 的用户级 skills 目录是 `~/.trae-cn/skills`，`agent-ex skill install` 按这个路径处理；
-  别的 Trae 版本路径不同 ⇒ `--target ~/.trae-cn/skills`（或你的实际路径）。
-- **更新**：`agent-ex skill install`（幂等：已是最新就 skip，版本落后会问是否更新；
-  版本一样但**内容被手改过**也会问，不会静默覆盖你的修改）。
-- **看状态**：`agent-ex skill status`（只读）；`agent-ex doctor` 也会顺带报一条。
-- **卸载**：`agent-ex skill remove`。
+- **Version stays in sync with the CLI** — the skill's version *is* the `agent-ex-mcp` version that
+  shipped it. Published packages are immutable, so an installed skill always matches your CLI.
+  Re-run `agent-ex skill install` after upgrading; it asks before replacing anything.
+- **It never overwrites foreign content** — if the target path already holds a real directory that
+  agent-ex did not install, the command aborts and changes nothing.
+- **Hosts that bridge themselves are skipped** — WorkBuddy only scans `~/.workbuddy/skills`, but most
+  WorkBuddy installs ship an auto-bridge script (`~/.workbuddy/hooks/sync-agents-skills.sh`) that
+  mirrors `~/.agents/skills` itself. Without that script, pass the directory explicitly:
+  `agent-ex skill install --target ~/.workbuddy/skills`.
+- **Codex and OpenCode are not linked by default** (it is unverified whether they read their own
+  `skills` directory) — use `--target` if you want them. A pre-existing link pointing elsewhere *is*
+  re-pointed, because a stale link is a broken state.
+- **Non-interactive shells refuse to run it** (exit code 2) unless you pass `--yes`:
+  `install` / `remove` create, re-point and delete things. `--yes` means "answer every question
+  with yes", **not** "link every host".
 
-> ⚠️ 非交互环境（CI / 管道）里 `agent-ex skill install` / `remove` **直接拒绝执行**（退出码 2），
-> 除非显式给 `--yes`：这两个命令会建链、会重指、会删目录，不该在没人盯着的时候发生。
-> `--yes` 会建链、会重指、会覆盖 —— 别在 CI 里随手加。
-> ⚠️ `--yes` 的语义是「所有问题都答 yes」，**不是**「所有宿主都链上」：
-> 默认不链的宿主（Codex / OpenCode）仍需 `--target` 显式指定；
-> 但如果它们目录里**已经有**一条指向别处的旧链，那条链照样会被重指到 canonical
-> （自动桥接机制从不接管已存在的条目，放着不管就是坏状态）。
+Inspect with `agent-ex skill status` (read-only), uninstall with `agent-ex skill remove`.
 
-#### 开发者路线：软链到本地仓库
+## CLI commands
 
-```bash
-./scripts/install-skill.sh                    # 软链到 canonical + ~/.workbuddy/skills
-./scripts/install-skill.sh ~/some/other/skills # 或指定额外目录
-```
+`agent-ex` is both the MCP server and the entry point for a few operational commands:
 
-脚本现在是 `agent-ex skill install --link` 的**薄壳**（实现只有一份，在 `src/skill.ts`）：
-它把仓库里的 `skills/agent-ex-dispatch` **软链**到 canonical，改完立刻生效、不产生副本漂移，适合边写 skill 边验证。
-软链路线**永远实时**，所以没有版本对比、也不需要更新。
+| Command | What it does |
+| :--- | :--- |
+| `agent-ex init` | Interactive onboarding (detects CLIs, writes `config.json` + `.env`). Re-running overwrites `config.json`; it lists the diff and asks first, and backs up the old file. |
+| `agent-ex doctor` | Health check: aggregates the evidence for "does the notification path work" into a verdict + cause + copy-pasteable fix. **Read-only.** |
+| `agent-ex doctor --fix` | Auto-fixes *deterministic* defects (empty keyword, stale brand name, a plaintext webhook left in `config.json`). Never touches `dry_run` (that is your preference) nor a custom keyword (that is your bot's UI). |
+| `agent-ex doctor --send` | Additionally sends a self-test card whose body deliberately contains no product name. |
+| `agent-ex config list` | Shows profiles / executors / notify / defaults. |
+| `agent-ex config set <key> <value>` | Changes one field. Whitelist: `notify.dry_run`, `notify.keyword`, `defaults.timeout_sec`, and `executors.<name>.bin`. |
+| `agent-ex profile list` | Lists all profiles (marks the default one). |
+| `agent-ex profile use <profile>` | Switches the default profile. |
+| `agent-ex profile create <built-in> [--bin <path>]` | Materialises a built-in preset (`opencode-zen-free` — a zero-key opencode free-model profile). Creates only; does not switch. |
+| `agent-ex profile set <profile> <KEY> <value>` | Changes a profile's env, or `executor` (which executor it uses), or `path_dirs` (extra absolute PATH directories for the worker). |
+| `agent-ex wait <task_id>` | Blocks until the task is terminal (or needs input) and prints the worker's final report. |
+| `agent-ex skill install` | Installs the dispatch skill from the package and links it into the hosts that should have it. |
+| `agent-ex skill remove` | Uninstalls: removes the host symlinks and the installed copy. **Only symlinks** — a real directory is never touched; the exit code is non-zero if anything was left behind. |
+| `agent-ex skill status` | Read-only: where it is installed, which version, which hosts are not linked yet. |
 
-> 用户路线（拷贝）与开发者路线（软链）**别混着装同一个目录**：同一个路径只能有一种。
+There is a matching `agent_ex_doctor` MCP tool, so an agent can diagnose itself without you
+copy-pasting commands.
 
-**生效范围是全局的，不是当前仓库**：入口必须落在**宿主自己**的用户级 skills 目录 —— 所以每家宿主一条软链。
-仓库里的 `./skills/` 是普通目录，**不是**项目级 skill 路径（那会是 `./.workbuddy/skills`），
-因此既不会只在本仓库生效，也不会与项目级 skill 冲突。
-
-> **Trae 不会因后台进程完成自动开新 turn**：MCP 主动通知通道也不能替代；loop 只能是「用户每次回话推进一轮」，
-> 靠 SKILL.md 的「[回来先查]」兜底接上（见 [`docs/diagnostics/2026-10-20-trae-no-wake-channel.md`](docs/diagnostics/2026-10-20-trae-no-wake-channel.md) §9）。
-
-> 🛠️ **要从源码装、或者想给这个仓库改代码** → 看 [`AGENTS.md`](https://github.com/wuruofan/agent-ex/blob/main/AGENTS.md)：
-> 里面有构建/测试命令、改代码前必读的硬约束、改动时的连带规则，以及发版流程。
-
-## 配置
-
-### 配置目录
-
-配置放在 `AGENT_EX_HOME` 指向的目录下，文件名 `config.json`：
+### `agent-ex wait`
 
 ```bash
-export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目录
+agent-ex wait task_abc123                    # wait for a terminal state or needs_input
+agent-ex wait task_abc123 --once             # check once and return
+agent-ex wait task_abc123 --max-wait-sec 900 # pick your own window
 ```
 
-### config.json 结构
+stdout is machine-readable `KEY=VALUE`; the **exit code is the contract**:
+`0` terminal, `5` needs_input (not terminal — answer and wait again on the same id),
+`2` timeout, `3` not found, `6` database unreadable (an environment problem, not a task problem),
+`4` bad arguments. Full contract:
+[task lifecycle](https://github.com/wuruofan/agent-ex/blob/main/docs/user-guide/state-machine.md).
 
-参考 `config.example.json`，字段如下：
+## MCP tools
+
+| Tool | Arguments | Returns |
+| :--- | :--- | :--- |
+| `agent_ex_submit` | `prompt` (required), `project_path`, `profile`, `continue_of`, `timeout_sec` | `{ task_id, status, rounds }` |
+| `agent_ex_status` | `task_id`, `include_finished` (0.3.1+), `limit` | task fields; `question` when `needs_input` |
+| `agent_ex_cancel` | `task_id` (required) | current state (idempotent on terminal tasks) |
+| `agent_ex_version` | — | `{ version, gitSha, buildTime }` |
+| `agent_ex_doctor` | `send` (optional) | findings with severity / detail / fix |
+| `agent_ex_restart` | — | the server exits; the host respawns it |
+
+> Tool names are sometimes prefixed by the host (e.g. `mcp__agent-ex__agent_ex_submit`).
+
+The server is stateless — everything lives in `tasks.db`. `restart` does not affect running workers
+(they live in their own process groups) nor other live server instances.
+
+## Configuration
 
 ```jsonc
 {
@@ -206,7 +199,6 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
         "ANTHROPIC_BASE_URL": "https://api.minimaxi.com/anthropic",
         "ANTHROPIC_AUTH_TOKEN": "{env:MINIMAX_API_KEY}",
         "ANTHROPIC_MODEL": "MiniMax-M3[1m]"
-        // …其余 ANTHROPIC_* / CLAUDE_CODE_* 变量
       }
     }
   },
@@ -219,537 +211,68 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `executors.<name>.bin` | agent CLI 的位置：**绝对路径或裸命令名皆可**（见「`executors.<name>.bin`」）。 |
-| `executors.<name>.extra_flags` | 拼到 agent 命令后的额外参数。权限开关按 executor 区分：claude 用 `--dangerously-skip-permissions`，opencode 用 `--auto`（`init` 会自动写对）。 |
-| `profiles.<name>.executor` | 引用 `executors` 里的某个 executor。 |
-| `profiles.<name>.env` | 传给 agent 子进程的环境变量；支持 `{env:VAR}` 占位符（见下）。**opencode 一般留空**（provider 由 opencode 自己的 `auth.json`/`opencode.json` 管理）；要给某个 profile 单独指定模型，写 `OPENCODE_CONFIG_CONTENT: "{\"model\":\"provider/model\"}"`——`extra_flags` 是 executor 级，多 profile 无法用它区分模型。**不要在此写 `PATH`**（会被拒绝）；要给 worker 补 PATH 目录用 `profiles.<name>.path_dirs`（见下）。 |
-| `profiles.<name>.path_dirs` | 插进 worker `PATH` 的额外**绝对路径目录**列表（位于 executor 的 bin 目录之后、系统目录之前）。典型用途：让 worker 用 nvm 的 `node`。 |
-| `notify.feishu_webhook_url` | 飞书机器人 webhook；支持 `{env:FEISHU_WEBHOOK_URL}` 占位符。 |
-| `notify.dry_run` | `true`（缺省）→ 只打印通知内容不真发；`false` → 真发。 |
-| `notify.keyword` | 附加在卡片末尾的「关键词」安全闸门。**缺省 = `agent-ex`（`src/brand.ts` 的 `BRAND`，`loadConfig` 自动填入）**，一般无需手写。同一行还会标出这次用的 profile 与模型。详见「飞书通知配置」。 |
-| `defaults.profile` | `submit` 不指定 profile 时用的默认 profile（必须在 `profiles` 中存在）。 |
-| `defaults.timeout_sec` | 单轮超时（秒），超时 SIGTERM 杀掉 agent。 |
+| Field | What it does |
+| :--- | :--- |
+| `executors.<name>.bin` | Where the agent CLI lives — **a bare command name or an absolute path both work**. |
+| `profiles.<name>.env` | Environment for the agent process. `{env:VAR}` placeholders are resolved at task runtime. **Never put `PATH` / `NODE_OPTIONS` / `LD_*` / `DYLD_*` here** — that is the worker's process-loading surface, i.e. arbitrary code execution. |
+| `profiles.<name>.path_dirs` | Extra **absolute** directories appended to the worker's `PATH`. This is the only supported way to extend the worker's PATH. |
+| `notify.dry_run` | `true` (default) prints the card to stderr instead of sending it. |
+| `notify.keyword` | The keyword appended to every card. Defaults to `agent-ex`; it must match the keyword registered on the bot side. |
+| `defaults.profile` / `defaults.timeout_sec` | Default profile, and the per-round timeout in seconds. |
 
-### 免费模型动态解析：`{model:zen-free}`
+Secrets never live in `config.json`: write `{env:VAR}` placeholders there and the real values into
+`$AGENT_EX_HOME/.env` (mode 600, auto-loaded by the server at startup).
 
-opencode zen 的 free 模型集会**轮换**（`mimo-v2.5-free` → `mimo-v2.6-flash-free` 已发生过，`glm-4.7-free` 曾整体消失、后来又以 `glm-5.3-flash-free` 回来），硬编码模型名很快就会失效。
-把 `{model:zen-free}` 写进 profile 的 env，即可在**每次 spawn 前**动态解析出当前可用的 free 模型：
+Full reference — every field, `{model:zen-free}`, the `[1m]` context-window trick, `path_dirs`,
+the write whitelist:
+[configuration guide](https://github.com/wuruofan/agent-ex/blob/main/docs/user-guide/configuration.md).
 
-```jsonc
-{
-  "profiles": {
-    "opencode-zen-free": {
-      "executor": "opencode",
-      "env": {
-        "OPENCODE_CONFIG_CONTENT": "{\"model\":\"{model:zen-free}\",\"small_model\":\"{model:zen-free}\"}",
-        "ZEN_FREE_PREFER": "deepseek,glm,mimo"   // 可选：家族前缀软偏好，逗号分隔、按序匹配
-      }
-    }
-  }
-}
-```
+## Notifications
 
-- **事实来源 = spawn 时的实时清单**（`https://opencode.ai/zen/v1/models`，免鉴权），因此配置里**零硬引用**模型名。
-- `ZEN_FREE_PREFER` 只是「口味」：前缀过期不会导致失败，只会退化为「不挑食」（按 id 稳定排序取第一个可用的 `-free` 模型）。
-- 清单拉取失败 → 退回内置回退常量，**绝不阻塞任务启动**。
-- free 模型撞限流会 429；配合下面的重试机制，已撞限的模型会被加入排除集，下一次尝试自动路由到另一个 free 模型。
-- 非 zen profile 走零成本旁路（env 原样透传，不发任何请求）。
+Notifications go to a Feishu (Lark) **custom bot** webhook. The tool only supports the
+"keyword" security mode — **do not enable signature verification**, the tool does not send
+`timestamp`/`sign` and every card would be rejected.
 
-> 为何不做「报错后换模」自愈：模型下线时 opencode 报的 `UnknownError: "Unexpected server error..."`（且 exit=0）与真实服务端故障无法区分，
-> 所以坚持 **spawn 前主动解析**，不做错误驱动的猜测。
-
-### 上下文压缩：`[1m]` + `AUTO_COMPACT_WINDOW` + `PCT_OVERRIDE`
-
-worker 的上下文占用到阈值就会触发自动压缩（摘要掉早期对话）。**这三个变量必须成套设置**，否则达不到预期，甚至会适得其反。
-
-claude-code 对**未知模型**（如 MiniMax / DeepSeek 等第三方模型）会回落到 **200k** 窗口兜底，此时 `AUTO_COMPACT_WINDOW` 设多大都会被 `Math.min` 压回 200k，形同虚设。加 `[1m]` 后缀才能拿到 1M 窗口：
-
-| 变量 | 作用 | 缺了会怎样 |
-|---|---|---|
-| `ANTHROPIC_MODEL` 带 `[1m]` | 窗口 200k → **1M** | 窗口恒为 200k，下面的 window 失效 |
-| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | 压缩**工作窗口**（绝对值） | 阈值涨到 967k，逼近服务端上限，易撞顶失败 |
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | 在工作窗口上的**百分比** | 退回内置默认（约 92%），压缩来得太晚 |
-
-阈值的计算方式（claude-code v2.1.x）：
-
-```
-window  = min(模型窗口, max(100k, AUTO_COMPACT_WINDOW))
-阈值    = min(window − 20000 − 13000, (window − 20000) × PCT%)
-```
-
-以 `AUTO_COMPACT_WINDOW=512000` + `PCT=90` 为例：`window=512000` → 阈值 ≈ **442,800 tokens**。
-
-| PCT | 512k 窗口下的阈值 |
-|---|---|
-| 70 | 344,400 |
-| 80 | 393,600 |
-| 90 | 442,800 |
-| 不设 | 479,000 |
-
-> **注意**：`~/.claude/settings.json` 的 `env` 块也会注入这些变量。agent-ex 传了 `HOME` 给子进程，claude 会自行读取该文件——**若那里设了同名 key，agent-ex 的 `profiles.<name>.env` 优先级更高**（仅当该 key 已在 profile 中显式设置）。想完全由 agent-ex 单点控制，就把两个变量都写进 profile env。
-
-**验证是否真的生效**：看任务日志 `result` 事件的 `modelUsage.<model>.contextWindow`——它反映模型窗口（带 `[1m]` 应为 `1000000`）；而**压缩工作窗口**不体现在该字段，要看日志里是否出现 `ran out of context`。
-
-### `executors.<name>.bin`：绝对路径或裸命令名皆可
-
-`runner` 拉起 agent 时，会显式构造子进程环境，其 `PATH` 以 **`dirname(解析后的 bin)` + 系统目录** 组成（`src/agent-env.ts`）。`bin` 支持两种写法：
-
-- **裸命令名** `"claude"`：运行时按 `process.env.PATH` 解析成绝对路径（与启动期 `validate()` 行为一致），`dirname` 取解析结果目录。最省事，推荐。
-- **绝对路径** `/abs/path/claude`：直接用，适合多版本 / 非标准安装。
-
-想确认 claude 会被解析到哪：
-
-```bash
-which claude        # → /Users/you/.nvm/versions/node/v24.18.0/bin/claude
-which opencode      # → /usr/local/bin/opencode
-```
-
-> 早期版本要求必须写绝对路径；现已支持裸名自动解析，无需再硬编码 nvm 路径。
-
-### `profiles.<name>.path_dirs`：给 worker 补 PATH 目录
-
-worker 的 `PATH` 由 `buildAgentEnv` 自建：`dirname(executor bin)` → `path_dirs` → 系统目录（`/usr/bin:/bin:/usr/sbin:/sbin`），**不读** `process.env.PATH`。要让 worker 用 nvm 的 `node` 而不是 homebrew 的，就声明额外目录（绝对路径，逗号分隔）：
-
-```bash
-agent-ex profile set minimax-3 path_dirs /Users/you/.nvm/versions/node/v24.14.0/bin,/Users/you/.bun/bin
-# 清空该字段：
-agent-ex profile set minimax-3 path_dirs ""
-```
-
-- 只在**该 profile** 里生效；executor 自己的 bin 目录恒排第一，不会被挤掉。
-- `agent-ex init` 会自动探测本机的 node/npm/bun/git 所在目录并预填该字段（各人的装法不同，不必手抄路径）；仍可用 `agent-ex profile set` 手工增删。
-- 每项必须是绝对路径、非空、不重复；不合法时加载/`doctor` 会报出，`profile set` 当场拒绝。
-- **不要**改成 profile env 里的 `PATH`：`profile set` 会拒绝（那是 worker 的启动面，等价于任意代码执行）。
-
-### 密钥：config 占位符 + `.env` 真实值
-
-`env` 与 `feishu_webhook_url` 里写成 `"{env:VAR_NAME}"` 形式的值，会在**任务运行时**（runner 进程）从环境变量替换。**config.json 永远不写真实密钥**，真实值放在 `$AGENT_EX_HOME/.env`：
-
-```bash
-# $AGENT_EX_HOME/.env（示例；init 命令会自动生成，chmod 600）
-MINIMAX_API_KEY=sk-xxxx
-FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
-```
-
-- **server 启动时自动加载 `.env`** 灌进 `process.env`（`src/env-file.ts`；只补缺失，不覆盖真实环境变量），runner 是 server 的 detached 子进程，自动继承——所以**密钥不用写进 MCP 注册的 `env` 字段**。
-- 占位符在运行时缺失 → 加载/解析直接报错（避免明文密钥意外落盘）。
-- 想让 `.env` 生效，重启 server 进程即可。
-
-### 飞书通知配置
-
-飞书通知走**群自定义机器人 webhook**。整条链路分四段，每段都能单独验证——出问题先定位到段，再按段排查。
-
-#### 1. 建机器人、拿 webhook
-
-在目标群里：群设置 → 群机器人 → 添加机器人 → **自定义机器人**（不是应用机器人）。创建后复制形如
-
-```
-https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-```
-
-的地址。这串地址**本身就是凭证**（谁拿到都能往群里发消息），不要贴进公开仓库或 issue。放进 `.env`：
-
-```bash
-FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
-```
-
-`config.json` 里只写占位符 `"{env:FEISHU_WEBHOOK_URL}"`，真实值永不进 config。
-
-#### 2. 安全设置：与本工具的匹配关系
-
-自定义机器人有三种安全设置，**本工具只支持「自定义关键词」这一种**：
-
-| 安全设置 | agent-ex 是否支持 | 说明 |
-| :--- | :--- | :--- |
-| **自定义关键词** | ✅ 支持 | 消息里必须包含登记的词，否则被拒收。缺省词 = `agent-ex`。 |
-| **加签**（secret） | ❌ **不支持** | 需要在请求里带 `timestamp` + `sign`，本工具不发送（`src/notifier.ts` 的 `post()` 只发裸 payload）⇒ 勾选后必然收不到。 |
-| **IP 白名单** | ❌ 不支持 | 需要登记调用方出口 IP，且各家 webhook 服务商规则不同，本工具不校验。 |
-
-> ⚠️ **别勾选加签**。它是最常见的误配：卡片一律被拒，但日志里的报错不指向加签，很难自查（见 §4）。需要更严格的保护时，用关键词 + 不把 webhook 外泄即可。
-
-配置关键词时，**填的词必须与卡片正文里出现的词一致**。本工具缺省把 `agent-ex` 追加到卡片末尾的一行小字（`notifier.ts` 的 `buildFeishuCard`，`text_size: "notation"`），因此机器人侧的关键词填 `agent-ex` 即可。若你在 `config.json` 里自定义了 `notify.keyword`，**两边都要跟着改**。
-
-这行小字同时标出这张卡是**哪个 profile、哪个模型**跑出来的，形如
-`agent-ex  ·  opencode-zen-free  ·  opencode/mimo-v2.6-flash-free`（关键词在前，值之间用 `·` 分隔，不加字段名）。
-模型取「真的跑起来的那个」：`{model:zen-free}` 这种动态占位符会显示 spawn 前解析出的真实模型 id；
-profile 里压根没声明模型时（opencode 可以走它自己的全局配置）这一格直接省略，不编一个假模型名。
-一张群里几张同样格式的卡靠这行才能区分，排查「同一份 prompt 为什么这次结果差」时先看它。
-
-#### 3. 打开真实发送
-
-`notify.dry_run` **缺省是 `true`**（只把卡片打到 stderr，不 POST）。链路验证通过后改成 `false` 才会真发。
-
-#### 4. 验证（别拿真实任务报告当探针）
+Verify the path with a self-test card instead of a real task report:
 
 ```bash
 agent-ex doctor --send
 ```
 
-这条命令会发一张**正文刻意不含产品名**的自检卡，并打印飞书返回的 `code` 与含义。
-（想先看配置体检而不真发消息，跑 `agent-ex doctor` —— 它只读，不改任何东西。）
-
-失败时看 stderr 的 `code`：
-
-| `code` | 含义 | 处置 |
-| :--- | :--- | :--- |
-| `0` | 已投递（注意飞书出错也返 HTTP 200，**判定必须看 `code`，不能看 HTTP 状态码**） | — |
-| `19024` | 关键词校验失败 | 机器人侧的关键词与 `notify.keyword` 不一致。⚠️ **闸门是对整张卡片做子串匹配**——worker 的报告正文里只要偶然出现该词，卡也能过。配置错了却可能长期"看起来正常"，所以**只认自检卡**。 |
-| `19021` | **签名校验失败**（或时间戳距今超过 1 小时） | 机器人勾选了「加签」而本工具不发送 `timestamp`/`sign` ⇒ **去机器人安全设置里取消勾选加签**。 |
-| `19022` | IP 校验失败 | 机器人勾选了「IP 白名单」而本机出口 IP 不在其中 ⇒ 取消勾选，或把出口 IP 加进白名单。 |
-| `19001` | **webhook token 无效**（地址本身失效：机器人被删/重建/地址轮换） | ⚠️ 与 `19024` **修法完全不同**：这个要**换 webhook 地址**（去机器人后台重新复制，更新 `.env` 里的 `FEISHU_WEBHOOK_URL`），改关键词没用。 |
-| `9499` | 请求体格式错误 | 卡片 JSON 不合 schema。注意官方限制：**请求体不得超过 20 KB**。 |
-| `11232` | 触发限流 | 单机器人 **100 次/分钟、5 次/秒**；密集派发会撞上，尽量避开整点/半点发送。 |
-| 其他 / 无 `code` | 网络或服务端问题 | 检查出口网络与代理。 |
-
-> 本工具每次失败会重试 3 次（退避 1s / 4s），所以日志里出现 3 行同样的 `code` 是正常的。
->
-> **机器人不在群**没有专属错误码——webhook 地址与群绑定，飞书通常**静默丢弃**。要换群必须重建机器人并换新地址。
-
-> `doctor` 还会扫 `logs/runner-*.log` 里**历史上**的拒收记录并按 `code` 聚合 —— 2026-10-13→10-15 那次连续 23 个任务零通知，证据当时就已经躺在日志里，只是没人看。现在一条命令就能看到。
-
-## 运行
-
-### 命令行工具
-
-`agent-ex` 既是 MCP server，也是几个运维子命令的入口：
-
-| 命令 | 作用 |
+| Feishu `code` | Meaning |
 | :--- | :--- |
-| `agent-ex init` | 首次安装向导（探测 CLI、生成 config.json + .env）。**重跑会重写 config.json**，覆盖前会逐项列出将要变化的设置并要求确认，旧文件自动备份成 `config.json.bak.<时间戳>`。 |
-| `agent-ex doctor` | 体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。**只读**，不改任何东西。 |
-| `agent-ex doctor --fix` | 自动修**确定性缺陷**（显式空串关键词、改名前的旧产品名、明文 webhook 落在 config.json）。**不动 `dry_run`** ——那是你的偏好，不是缺陷；**也不动自定义关键词** ——机器人登记什么词是用户的界面。 |
-| `agent-ex doctor --send` | 额外实发一张**正文不含产品名**的自检卡，验证真实投递。 |
-| `agent-ex config list` | 列出 profiles / executors / notify / defaults 现状。 |
-| `agent-ex config set <key> <value>` | 改单个字段。白名单：`notify.dry_run`、`notify.keyword`、`defaults.timeout_sec`，以及 `executors.<name>.bin`（定点修 bin 路径）。 |
-| `agent-ex profile list` | 列出所有 profile（标出默认的那个；声明了 `path_dirs` 的会一并显示）。 |
-| `agent-ex profile use <profile>` | **切**默认 profile（profile 必须已存在）。 |
-| `agent-ex profile create <built-in> [--bin <path>]` | **物化**一个内置预设（当前：`opencode-zen-free`，零密钥的 opencode 免费模型）。只创建，不切默认；`--bin` 用于 executor 不在 PATH 上时指定绝对路径。 |
-| `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段（如 `ZEN_FREE_PREFER`），或用保留字 `executor` 改它用哪个 executor、用 `path_dirs` 声明 worker PATH 的额外目录（逗号分隔的绝对路径；空值清空）。 |
-| `agent-ex wait <task_id>` | **阻塞等一个任务到终态**（`completed` / `failed` / `cancelled`）或到 `needs_input`，并把 worker 的最终报告提出来。给 agent 派活后用它在后台等结果，见下节。 |
-| `agent-ex skill install` | 把 dispatch skill 装到 `~/.agents/skills`（**随 npm 包分发**，不用 clone），并给本机存在的宿主各建一条软链（自动桥接的宿主与默认不链的宿主除外）。幂等：已是最新就 skip，版本落后或内容被改过会问是否覆盖。 |
-| `agent-ex skill remove` | 卸载：删掉宿主软链与安装的拷贝。**只删软链**，实体目录一律不碰；只要还有东西留在原地，退出码就是非 0。 |
-| `agent-ex skill status` | 只读：装在哪、是哪一版、哪些宿主还没链、有没有新版本。 |
+| `0` | delivered |
+| `19024` | keyword mismatch — the bot's keyword and `notify.keyword` disagree |
+| `19021` | signature verification failed — the bot has "加签" enabled; turn it off |
+| `19001` | the webhook URL itself is invalid — copy a new one |
+| `19022` | IP allow-list rejected the call |
 
-> `doctor` 也有对应的 MCP 工具 `agent_ex_doctor`，让 agent 自己就能排错，不用手抄命令。
+Full walkthrough (bot setup, the security-mode matrix, every error code):
+[notifications guide](https://github.com/wuruofan/agent-ex/blob/main/docs/user-guide/notifications.md).
 
-### `agent-ex wait`：等任务结果
+## Troubleshooting
 
-派完活不必一直轮询——`agent-ex wait` 会自己等到有结论，并把 worker 的最终报告一并带出来：
-
-```bash
-agent-ex wait task_abc123                    # 等到终态或 needs_input
-agent-ex wait task_abc123 --once             # 查一次就返回
-agent-ex wait task_abc123 --max-wait-sec 900 # 自己给等待窗口
-```
-
-stdout 是机器可读的 `KEY=VALUE`（顺序固定，可直接解析）：
-
-```
-TASK_ID=task_abc123
-STATUS=completed
-WAIT=terminal
-MAX_WAIT_SEC=11010
-ELAPSED_SEC=900
-PROJECT_PATH=/path/to/project
-FILES_CHANGED=3
-LOG_PATH=/Users/you/.agent-ex/logs/task_abc123.jsonl
-REPORT_PATH=/tmp/task_abc123.report.md
-REPORT_CHARS=3322
-REPORT_OUTLINE=摘要 | 验收
-REPORT_TEXT=## 摘要 …
-```
-
-**退出码就是判据**：
-
-| `WAIT` | exit | 含义 |
-| :--- | :--- | :--- |
-| `terminal` | 0 | `completed` / `failed` / `cancelled` |
-| `needs_input` | 5 | worker 在等你答复——**不是终态**。答完后对**同一个 task_id** 再起一次 wait |
-| `timeout` | 2 | 等待窗口用尽，任务仍在跑。**不会自动续等** |
-| `not_found` | 3 | 没有这个任务（多半是 id 抄错了） |
-| `db_unreadable` | 6 | 库读不了——**环境问题**（沙箱禁写数据目录），不是任务问题 |
-| — | 4 | 参数用错了 |
-
-> ⚠️ 判据是 stdout 里**有没有 `WAIT=` 行**，不是退出码。老版本 CLI 不认识 `wait` 这个子命令，会走
-> unknown command 分支并返回 **2**，与 `WAIT=timeout` 撞码。想提前探测：`agent-ex wait --help`——
-> 新版本 exit 0，老版本 exit 2。
-
-**常用参数**：
-
-| 参数 | 作用 |
+| Symptom | Likely cause |
 | :--- | :--- |
-| `--once` | 查一次就返回，不进入等待循环 |
-| `--max-wait-sec N` | 自己指定等待窗口（默认按任务的 `timeout_sec` 推导：`3×timeout_sec+90+120`；`0` = 永不放弃） |
-| `--interval-sec N` | 轮询间隔，默认 20 秒 |
-| `--report-out PATH` | 报告落盘位置，默认写到临时目录 |
-| `--copy-dir PATH` | 数据目录只读时的降级副本落点（沙箱场景） |
-| `--verbose` | 每轮心跳写 stderr |
-| `--no-digest` | 不内联报告摘要（`REPORT_OUTLINE` / `REPORT_TEXT` / `REPORT_HEAD`），报告仍会落盘 |
-
-**沙箱里读不到库怎么办**：宿主 shell 沙箱禁止写数据目录时，SQLite 建不了 `-shm` 就读不了。
-`wait` 会自动降级为「复制一份再读」（stdout 里出现 `DB_SOURCE=copy`）；连副本也读不了就是 exit 6
-`db_unreadable`——**这是环境问题，别当成"任务不存在"**。此时可用 `--copy-dir <可写目录>` 指定落点。
-
-
-### 作为 MCP Server（stdio）
-
-生产形态（全局安装后）注册。**推荐用绝对路径**——`init` 会直接打印可粘贴的片段：
-
-```jsonc
-{
-  "mcpServers": {
-    "agent-ex": {
-      "command": "/abs/path/to/node",
-      "args": ["/abs/path/to/node_modules/agent-ex/dist/server.js"],
-      "env": {
-        "AGENT_EX_HOME": "/abs/path/to/your/home"   // 可省，缺省 ~/.agent-ex
-        // 密钥不用放这里：server 启动时会自动读 $AGENT_EX_HOME/.env
-      }
-    }
-  }
-}
-```
-
-> 裸写 `"command": "agent-ex"`（依赖 PATH）虽然更「可搬机」，但 MCP 客户端 spawn 时不继承
-> 你的 shell PATH，在 nvm / GUI 应用环境下很容易 `command not found`——优先用 `init` 打印的绝对路径。
-
-开发模式（直接跑 TS，无需先 build）：
-
-```bash
-npm run server      # = tsx src/server.ts
-```
-
-### 手动跑单条任务（调试用）
-
-`runner` 一般被 server 自动 spawn。需手动验证时，先确保 SQLite 里已有一条任务记录（通常由 `submit` 创建），再：
-
-```bash
-npm run runner <task_id>     # = tsx src/runner.ts <task_id>
-```
-
-### 跑测试
-
-```bash
-npm run build && npm test            # 单元 + 集成，全绿
-npm run test:integration            # 只跑集成（会自动先build）
-npm run typecheck                   # 仅类型检查
-```
-
-集成测试直接跑预编译的 `dist/runner.js`（与生产同款），避免 dev 路径下 tsx 冷启动拖慢 timing 断言。
-
-> `tests/proc-tree.test.ts` 依赖 `ps` 枚举进程树，在拒绝执行 setuid `/bin/ps` 的沙箱里会自动 skip
-> （这是刻意设计：能力不可验证时诚实跳过，而不是报假红）。
-
-## MCP 工具
-
-### `submit`
-
-| 参数 | 必填 | 说明 |
-|---|---|---|
-| `prompt` | ✅ | 任务描述 / 指令。 |
-| `project_path` | | agent 的工作目录，缺省为 server 进程 cwd。 |
-| `profile` | | 用哪个 profile，缺省 `defaults.profile`。 |
-| `continue_of` | | 填已有 `needs_input` 任务 id，把 `prompt` 作为该轮回答续跑。 |
-| `timeout_sec` | | 单轮超时，缺省 `defaults.timeout_sec`。 |
-
-返回 `{ task_id, status, rounds }` 或 `{ error }`。
-
-### `status`
-
-| 参数 | 说明 |
-|---|---|
-| `task_id` | 不填则返回所有活跃任务；填了返回单条。 |
-| `include_finished` | 仅 0.3.1+：置 `true` 时连已结束的任务一起列（按创建时间倒序，默认 20 条）。会话重启 / 上下文压缩后用它认回「上次派的那个」——那通常已经终态。**0.3.0 会静默忽略该参数并返回空列表**，别把空列表当成「没有任务」。 |
-| `limit` | 配合 `include_finished`，返回最近 N 条（默认 20，上限 200，1–200 的整数）。 |
-
-返回字段含 `status / rounds / profile / project_path / started_at / created_at / elapsed_sec / progress / files_changed`，终态时含 `result` / `error`，`needs_input` 时含 `question`，通知失败时含 `notify_failed`。
-
-> ⚠️ 全局单库：`tasks.db` 在 `$AGENT_EX_HOME` 下由所有项目共用，`include_finished` 会跨项目列出（含绝对路径与完整终报），用 `project_path` / `started_at` 认回自己的任务。
-
-### `cancel`
-
-| 参数 | 必填 | 说明 |
-|---|---|---|
-| `task_id` | ✅ | 取消指定任务。 |
-
-对终态任务幂等（返回当前状态，不改写）；对 `running` 任务会 SIGTERM 级联杀掉 agent 进程树。
-若返回带 `warning`，说明进程树快照不可用（沙箱拒绝 setuid `/bin/ps`），组外逃逸的 agent 子进程可能残留。
-
-### `version`
-
-无参数。返回构建元数据 `{ version, gitSha, buildTime }`，用于确认重启后新代码已生效；`dist/build-meta.json` 缺失时返回 `{ unknown: true, note }`。
-
-### `doctor`
-
-| 参数 | 必填 | 说明 |
-|---|---|---|
-| `send` | ❌ | 是否实发自检卡（默认 `false`，只读体检）。 |
-
-把「通知到底通不通」的证据聚合成结论：config 自身（关键词 / dry_run / webhook / 默认 profile）、
-executor 的 bin 是否可执行、以及**历史上**的通知失败（扫 `logs/runner-*.log` 里的飞书拒收记录，按 `code` 聚合）。
-每条 finding 带 `severity` / `detail` / `fix`（可复制的修复命令）。
-
-> `send=true` 发的是**正文不含产品名**的自检卡 —— 飞书关键词闸门匹配整张卡片，
-> 拿真实任务报告当探针会假通过。
-> 被拒收时，**飞书返回的 `code` 与 `msg` 会直接写进结论**（不是只留在 stderr）——
-> agent 据此就能区分"改关键词"（19024）与"换 webhook 地址"（19001），不必去翻日志。
-
-### `restart`
-
-无参数。主动退出当前 MCP server 进程，由宿主自动 respawn 并加载当前 `dist`。
-server 无状态（状态全在 `tasks.db`），在跑 worker 位于独立进程组，**重启不影响在跑任务**，也不影响其他存活的 server 实例。
-
-## 状态机
-
-```
-        submit
-          │
-          ▼
-       queued ──spawn──▶ running ──agent 反问──▶ needs_input
-          │                  │                        │
-          │                  │ answered (submit continue_of)
-          │                  │                        │
-          │                  ▼                        ▼
-          │               running ◀──────────────────┘   (最多 5 轮)
-          │                  │
-          ├──────────────────┤
-          ▼                  ▼
-     completed           failed
-          │
-          ▼
-   cancelled (任意非终态可取消)
-```
-
-`needs_input` 续跑示例：
-
-1. `submit({ prompt: "给项目加登录页", profile: "minimax-3" })` → 拿到 `task_id`。
-2. `status({ task_id })` 看到 `status: "needs_input"`、`question: "用哪种数据库？"`。
-3. `submit({ continue_of: task_id, prompt: "PostgreSQL" })` → 继续跑。
-
-两个上限，别把它们混为一谈：
-
-- **续跑轮数 ≤ 5**（`MAX_ROUNDS`）：第 5 轮仍有 pending question → 终态 `failed`，`error` 为 `rounds limit (5) reached with pending question`。
-- **单轮瞬时重试 ≤ 3 次尝试**（`MAX_ATTEMPTS`）：仅对 429 / 529 / 5xx / 连接重置等**可恢复**错误生效，退避 30s → 60s（可用 `AGENT_EX_RETRY_BACKOFF_MS` 覆盖，逗号分隔毫秒）。真超时、`needs_input`、硬失败**不重试**。重试与续跑轮数是两个独立计数，任务在单轮内即可重试 3 次。
-
-## 排错
-
-- **`executor "claude" bin "…" not found or not executable`**：`bin` 路径不对或没 `+x`。写裸命令名时按 `process.env.PATH` 解析（见「`executors.<name>.bin`」），解析不到就写绝对路径。
-- **任务 `failed`，`error: failed to spawn runner: … ENOENT`**：多因`bin` 指向的位置下没有可执行文件。注意 worker 子进程的 `PATH` 只由 `dirname(bin)` + 系统目录组成（见「`profiles.<name>.env`」），`/opt/homebrew/bin` 等不在其中——裸名建议先 `which` 确认解析结果。
-- **飞书不推送**：检查 `dry_run` 是否还是 `true`；检查 `.env` 里 `FEISHU_WEBHOOK_URL` 是否存在（或 server 进程环境是否已 `export`）。若日志里有 `code=19024`（关键词不匹配）或卡片**一律**收不到，**先确认机器人没有勾选「加签」**——本工具不发送签名，勾选后必然全被拒。完整排查见「飞书通知配置」。
-- **`{env:VAR}` 报错 `not found in process environment`**：对应密钥不在 `.env` 里，也没 `export` 到 server 进程环境。加到 `$AGENT_EX_HOME/.env` 后重启 server。
-- **任务频繁超时，且日志里反复出现 `ran out of context`**：上下文被反复压缩，agent 丢失状态后重复劳动。查压缩阈值配置（见上「上下文压缩」）——若 `ANTHROPIC_MODEL` 没带 `[1m]`，窗口会被锁在 200k；工单过大（工具调用 ≫150 次）也会撞阈值，应先拆单。
-- **改了代码但行为没变**：MCP host 会复用常驻 server 进程。`npm run build` 后调 `restart`，再用 `version` 核对 `gitSha`。
-- **opencode 报 `UnknownError: "Unexpected server error..."`（且 exit=0）**：多半是配置里的模型已被下线。这个报错与真实服务端故障**无法区分**，别靠报错自愈——改用 `{model:zen-free}` 让模型在 spawn 前动态解析（见「免费模型动态解析」）。
-- **skill 装了但宿主里没加载**：先 `agent-ex skill status` 看装到哪、哪些宿主没链。宿主各自的 skills 目录位置不同，找出来：
-  ```bash
-  find ~ -maxdepth 4 -type d -name skills -path '*<host>*' 2>/dev/null
-  ```
-  找到后用 `agent-ex skill install --target <那个目录>` 补一条链。
-
-## 快速初始化（`init` 命令）
-
-不想手拼 JSON？用交互式 `init` 自动探测 CLI 路径、收集密钥，并生成 `config.json` + `.env`：
-
-```bash
-npm run init                 # 开发模式（tsx）
-# 或生产形态：
-node dist/server.js init    # 即 `agent-ex init`
-```
-
-交互流程（claude executor 为例）：
-
-1. 用哪个 agent CLI（`claude` / `opencode`，自动探测并提示检测到的路径）；bin 用检测到的绝对路径（回车即采用）；
-2. profile 名（默认 `default`；**opencode + zen free 时默认 `opencode-zen-free`**，见下方说明）；
-3. provider 预设（`minimax` / `deepseek` / `custom`）：
-   - **预设**：内置 base_url + 默认模型 + 对应密钥变量名（`MINIMAX_API_KEY` / `DEEPSEEK_API_KEY`）。检测到该环境变量时**掩码展示**（`sk-…wXYZ`）并问 `Use this value? [Y/n]`——`Enter`/`Y` 直接采用；`n` 后粘贴新值，或 `Enter` 跳过。
-   - **custom**：只问 `ANTHROPIC_BASE_URL` 与模型名；密钥**只粘贴**（无标准变量名可检测），占位符变量名从 profile 名派生（如 `myprov` → `MYPROV_API_KEY`）。
-4. 飞书 webhook：检测到 `FEISHU_WEBHOOK_URL` 同样 `[Y/n]` 确认，否则粘贴或跳过（仍生成占位符 + `dry_run`）；
-5. 默认超时秒数。
-
-结束后：
-
-- 写 `config.json`（**只含 `{env:VAR}` 占位符**，零明文）并自动用 `loadConfig()` 自校验；
-- 把确认/粘贴到的密钥写进 `$AGENT_EX_HOME/.env`（**chmod 600**，幂等——同值不重写）；
-- 若密钥最终没进 `.env`，会打印 ⚠ 提醒「运行时必须有该变量，否则任务失败」；
-- 打印收尾指引：`AGENT_EX_HOME` 怎么设、**可直接粘贴的 MCP 注册片段（绝对路径）**、
-  dispatch skill 的安装命令（`agent-ex skill install`）、**以及怎么打开真实通知**（`config set notify.dry_run false` + `doctor --send`）。
-
-> 已有 `config.json` 时 `init` 的行为：
->
-> 1. 开头先问一次「要重写吗」（此时还不知道会改成什么样，只是给个廉价退出点）；
-> 2. **问答结束后、写盘前**，把新旧配置的差异逐项列出来（哪些 profile 会消失、哪些字段被改写），
->    并解释后果（例：`notify.dry_run false → true` 意味着终态通知不再投递），让你**知情同意**；
-> 3. 你同意后：先校验新配置（**校验不过就不写盘**，旧 config 原封不动），
->    再把旧 config 备份成 `config.json.bak.<时间戳>`，最后才写入。
->
-> `.env` 是**增量合并**（只补/更新采集到的 key），所以重跑 `init` **不会丢密钥**。
->
-> ⚠️ 但 `init` 是**全量覆盖**的：只想改一个字段（比如开通知）请用 `agent-ex config set`，
-> 别重跑 `init` —— 那会把其它 profile 一起刷掉。
->
-> opencode executor 不询问 provider——它由 opencode 自己的配置管理（`opencode auth login` / `opencode.json`），agent-ex 只负责拉起。
->
-> opencode 分支会多问一句 `Use opencode zen free model (auto-resolving, no key needed)`（默认 Yes）：
-> 选 Yes 时写的是**内置 preset** `{model:zen-free}` 占位符 + `ZEN_FREE_PREFER`，
-> profile 名默认取内置名 **`opencode-zen-free`**。
-> 这样 `init` 产出的 profile 与 `agent-ex profile create opencode-zen-free` **同名同 env**——
-> 之后再跑 `profile create` 会得到「已存在」而不是多出一个同义但名字不同的 profile。
-> 名字仍可自己改（改了名 env 不变：env 描述的是「用哪套模型配置」，不是「叫什么」）。
-
-## 版本历史
-
-### 0.2.0（2026-10-26）
-
-面向「配置改不动、通知不通」这两个高频痛点的版本。
-
-**新增 MCP 工具**
-- `agent_ex_doctor`：把「通知到底通不通」的证据聚合成**结论 + 病因 + 可复制的修复命令**；`send=true` 会实发一张正文不含产品名的自检卡。验证飞书关键词闸门必须用它——拿真实任务报告当探针会假通过。
-
-**新增 CLI 子命令**（0.1.0 的 server 只认 `init`，其余子命令一律被静默吞成 MCP server）
-- `agent-ex doctor [--fix] [--send]`：体检。`--fix` 自动修**确定性缺陷**（显式空串关键词、过期产品名、明文 webhook 落在 config.json），但**不动 `dry_run`**（那是偏好不是缺陷）、**不动自定义关键词**（机器人登记什么词是用户的界面）。
-- `agent-ex config [list|set]`：改全局字段（`notify.dry_run` / `notify.keyword` / `defaults.timeout_sec` / `executors.<name>.bin`）。写入口是**白名单**——只改一个字段不必重跑 `init`。
-- `agent-ex profile [list|use|create|set]`：profile 生命周期。`profile create opencode-zen-free` 物化零密钥的内置免费模型预设。
-- 拼错的子命令现在**明确报错并打印用法**，不再静默变成 MCP server。
-
-**免费模型**
-- zen 免费模型**动态解析** `{model:zen-free}`：每次 spawn 前拉实时清单（免鉴权），配置里零硬引用模型名；撞限流的模型进排除集后自动路由到下一个。
-- 内置偏好默认 `deepseek,glm,mimo`（实时清单快照；清单的 `created` 字段无区分度，家族顺序是口味）。
-
-**修复**
-- init 的 opencode+zen-free 分支与内置 preset 统一：**同名同 env**。原先它叫 `default` 且漏了 `ZEN_FREE_PREFER`，于是「先 init、再 profile create」会得到两个同义但名字与 env 都不同的 profile。
-- CLI 与 MCP 的 `.env` 加载路径统一：此前 CLI 侧解析 `{env:VAR}` **必失败**（同一份配置，agent 查得通、命令行查不通）。
-- `init` / `doctor` / `config` 懒加载 `node:sqlite`：不再有实验性警告插进交互提示符中间。
-- `doctor --fix` 不再在坏 config 上崩溃。
-- 飞书关键词改由单一 brand 常量派生；去掉 SQLite WAL 依赖（只读沙箱也能读 task db）。
-- 零密钥的 opencode 配置不再误报「必须设置 MINIMAX_API_KEY」。
-
-### 0.1.0（2026-10-14）
-
-首个公开版本：`agent_ex_submit` / `agent_ex_status` / `agent_ex_cancel` / `agent_ex_version` / `agent_ex_restart` 五个 MCP 工具，加上 `agent-ex init` 交互式向导（探测 CLI → 生成 config.json + .env）。
-
-## 发布（npm）
-
-包名 `agent-ex-mcp`，MIT。
-
-| 字段 | 值 | 说明 |
-|---|---|---|
-| `name` | `agent-ex-mcp` | 带 `-mcp` 规避 registry 包名相似度保护（`agent-ex` 撞已占用的 `agentex`），见「快速开始」下的说明 |
-| `bin` | `agent-ex` → `dist/server.js` | **命令名不带 `-mcp`**：全局安装后 `agent-ex` 可直接跑 server |
-| `files` | `dist` / `skills/agent-ex-dispatch` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包；**dispatch skill 进包**（`agent-ex skill install` 从包内安装） |
-| `engines.node` | `>=22.5` | 依赖 `node:sqlite`（server 与 runner 都要用） |
-
-> ℹ️ **npm 包内含 dispatch skill**：`skills/agent-ex-dispatch` 在 `files` 白名单里，
-> 装完包跑 `agent-ex skill install` 即可（见「安装 dispatch skill」）。
-> ⚠️ 包体积涨了不少（实测 tarball：0.3.1 的 126 KB → 0.4.0 的 **225 KB，+78%**）：
-> 其中 skill 目录本身 136 KB（gzip 后约 62 KB），
-> 把 skill 从包里去掉再打一次是 152 KB ⇒ **skill 贡献了约 41%**。
-> `scripts/` 仍**不进包**（只有本仓库开发者用得到）。
-
-> 🔧 **发版流程（认证、2FA、打包校验、发布后核验）见 [`AGENTS.md`](https://github.com/wuruofan/agent-ex/blob/main/AGENTS.md#发布npm)**
-> —— 那是维护者文档，不随 npm 包分发。
-
-## 后续（planned）
-
-- v2 daemon（设计文档见 `docs/designs/2026-08-18-session-adapter.md`，代码未启动）。
+| `executor "claude" bin "…" not found or not executable` | Wrong path, or the file is not `+x`. A bare name is resolved against `process.env.PATH`. |
+| Task fails with `failed to spawn runner: … ENOENT` | The directory holding `bin` has no executable. The worker's `PATH` is rebuilt from `dirname(bin)` + `path_dirs` + system dirs — `/opt/homebrew/bin` is not included unless you declare it in `path_dirs`. |
+| `{env:VAR}` fails with `not found in process environment` | The key is neither in `.env` nor exported to the server process. Add it to `$AGENT_EX_HOME/.env` and restart the server. |
+| Feishu sends nothing | `notify.dry_run` is still `true`; or the webhook is missing; or the bot has signature verification enabled (`code=19021`). |
+| Behaviour did not change after editing code | The MCP host reuses a long-lived server process. Rebuild, then `restart`, then check `gitSha` with `version`. |
+| The skill is installed but the host does not load it | Run `agent-ex skill status` to see which hosts are not linked, then `agent-ex skill install --target <dir>`. |
+
+## Documentation
+
+| Document | Contents |
+| :--- | :--- |
+| [中文版 README](https://github.com/wuruofan/agent-ex/blob/main/docs/README.zh-CN.md) | The same guide in Chinese |
+| [配置详解](https://github.com/wuruofan/agent-ex/blob/main/docs/user-guide/configuration.md) | Every `config.json` field, secrets, model resolution, worker PATH |
+| [飞书通知详解](https://github.com/wuruofan/agent-ex/blob/main/docs/user-guide/notifications.md) | Bot setup, security modes, error codes |
+| [任务生命周期与状态机](https://github.com/wuruofan/agent-ex/blob/main/docs/user-guide/state-machine.md) | State machine, continuation, `agent-ex wait` contract |
+| [init 详解](https://github.com/wuruofan/agent-ex/blob/main/docs/user-guide/init.md) | The onboarding wizard step by step |
+| [AGENTS.md](https://github.com/wuruofan/agent-ex/blob/main/AGENTS.md) | Maintainer guide: hard constraints, release process |
+| [CHANGELOG.md](https://github.com/wuruofan/agent-ex/blob/main/CHANGELOG.md) | Version history |
+
+## License
+
+MIT

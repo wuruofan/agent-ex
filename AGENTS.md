@@ -6,11 +6,20 @@
 
 | 文件 | 写什么 | 给谁看 |
 | :--- | :--- | :--- |
-| [`README.md`](README.md) | 怎么**用**：安装、配置、命令、MCP 工具、排错 | npm 用户 / GitHub 访客 |
+| [`README.md`](README.md) | 怎么**用**：安装、配置、命令、MCP 工具、排错。**英文**，GitHub 与 npm 包共用一份 | npm 用户 / GitHub 访客 |
+| [`docs/README.zh-CN.md`](docs/README.zh-CN.md) | README 的**中文版**，与英文版章节一一对应 | 中文用户 |
+| [`docs/user-guide/`](docs/user-guide/) | 用户手册的**深度章节**（config 全字段 / 飞书通知 / 状态机与 wait 契约 / init 流程） | 遇到细节问题的人 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本历史（每个版本号只发布一次） | 追溯「哪版改了什么」 |
 | **AGENTS.md**（本文件） | 怎么**改**：硬约束、连带改动、测试与发布流程 | 改这个仓库的人 / coding agent |
 | `docs/specs/` `docs/reviews/` `docs/plans/` `docs/designs/` | 深层设计、评审记录、实施计划 | 追溯「当初为什么这么定」 |
 
 规则：**同一条事实只写一处**，另一处给链接；改了一处就同步另一处（见「改动时的连带规则」）。
+
+> ⚠️ **npm 包页面上的 README = 仓库根 `README.md`，逐字节相同**（registry packument 的 `readme` 字段实测如此）。
+> ⇒ 想改 npm 包页面，就改仓库根 `README.md`。
+> ⚠️ **npm 选哪个 README 是按项目根的目录顺序 glob `{README,README.*}`**（`@npmcli/package-json` 的
+> `normalize.js`），**不按文件名排序** ⇒ 项目根**只能有一个** README 候选，
+> 放两个会出现「这台机器显示 A、那台显示 B」。中文版因此放 `docs/`，不放项目根。
 
 ## Setup commands
 
@@ -39,7 +48,7 @@
   - `zen-free.ts` — zen 免费模型动态解析
 - `tests/` — Vitest；`integration.test.ts` 真起 runner 跑完整任务生命周期
 - `scripts/` — 构建与冒烟脚本
-- `docs/` — spec / review / plan / design
+- `docs/` — spec / review / plan / design / **user-guide**（用户手册深度章节，中文）
 - `skills/agent-ex-dispatch/` — dispatch skill（**随 npm 包分发**，`agent-ex skill install` 安装；开发者用 `./scripts/install-skill.sh` 软链到本仓库）
 
 ## 硬约束（改代码前必读）
@@ -59,11 +68,12 @@
 
 | 你改了 | 还要同步 |
 | :--- | :--- |
-| MCP 工具（增/删/改名） | `tests/server-tools.test.ts` 的 6 工具断言、`scripts/smoke-stdio.mjs` 的 `PRODUCTION_TOOLS`、README「MCP 工具」表 |
-| CLI 子命令 | `src/server.ts` 的 `USAGE`、`src/cli.ts` 的 usage 文案、README 对应章节 |
+| MCP 工具（增/删/改名） | `tests/server-tools.test.ts` 的 6 工具断言、`scripts/smoke-stdio.mjs` 的 `PRODUCTION_TOOLS`、README「MCP tools」表、`docs/README.zh-CN.md` 同表 |
+| CLI 子命令 | `src/server.ts` 的 `USAGE`、`src/cli.ts` 的 usage 文案、README「CLI commands」表、`docs/README.zh-CN.md` 同表 |
 | 内置 profile / `ZEN_FREE_PREFER` | `src/config-cmd.ts` 的 `BUILTIN_PROFILES`、`config.example.json` |
-| 品牌名（`BRAND`） | `config.example.json`、README（`tests/config.test.ts` 会钉住这两处） |
-| 用户可见文案 | README 对应章节 |
+| 品牌名（`BRAND`） | `config.example.json`、README（`tests/config.test.ts` 会钉住这两处——README 里必须出现 `"keyword": "agent-ex"`） |
+| 用户可见文案 | README 对应章节 + `docs/README.zh-CN.md` 对应章节 + `docs/user-guide/` 相关篇 |
+| README（英文） | `docs/README.zh-CN.md` 保持**章节一一对应**；深度内容只写在 `docs/user-guide/`，README 只给摘要 + 链接 |
 
 ## Testing instructions
 
@@ -105,7 +115,7 @@ npm run init         # 开发模式跑 init（tsx）
 | :--- | :--- | :--- |
 | `name` | `agent-ex-mcp` | 带 `-mcp` 规避 registry 包名相似度保护（`agent-ex` 撞已占用的 `agentex`） |
 | `bin` | `agent-ex` → `dist/server.js` | **命令名不带 `-mcp`**：全局安装后 `agent-ex` 可直接跑 server |
-| `files` | `dist` / `skills/agent-ex-dispatch` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包；**dispatch skill 进包** |
+| `files` | `dist` / `skills/agent-ex-dispatch` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包；**dispatch skill 进包**；**`README.md` 就是 npm 页面显示的那份**（英文） |
 | `publishConfig.registry` | `https://registry.npmjs.org` | 锁定发布目标为官方源（见下） |
 | `prepublishOnly` | `build` + `test` | 发布前自动构建并跑全量测试，测试红则发布中止 |
 | `engines.node` | `>=22.5` | 依赖 `node:sqlite`（server 与 runner 都要用） |
