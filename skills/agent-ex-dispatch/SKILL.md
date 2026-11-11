@@ -130,7 +130,7 @@ agent_created: true
 
 不要把"能查的"丢给 worker 自己去查——调度方事前查清能让 prompt 字数翻 3-5 倍但 worker 跑得更快、token 用得更省。派发前对照下面 9 项自查，每项**写进 Context** 而不是口头交代：
 
-1. **项目路径 + 技术栈 + 构建/测试命令**：从仓库根 `package.json` / `AGENTS.md` / `README.md` 现拿，不要凭印象。
+1. **项目路径 + 技术栈 + 构建/测试命令**：从仓库根 `package.json` / `AGENTS.md` 现拿，不要凭印象。⚠️ `README.md` 是**用户文档**（安装 / 配置 / 排错），**不含构建与测试命令**——别在那儿找。
 2. **必读文档**：项目内 spec/plan/调试文档（如 `docs/superpowers/plans/xxx.md`、`docs/debug/yyy.md`）的**绝对路径**——worker 自己 `find` 可能错过。
 3. **已跑过的命令与结果**：你（或前序 worker）已经做过的"事实"——如"`bun --version` 输出 1.4.0"、"已 grep 确认 render-node-to-output.ts 双改动共存"、"前序 worker 在 5 次采样中测得 CPU 53%"。**标注来源**（"由调度方已确证 / 由前序 task_xxx result 第 §Y 节确认"）。**计数类结论必须连口径一起给**（数的是什么、在哪份语料上数的）——9/15 实测：一次 `grep` 把"自动压缩触发 0 次"数成 8 次并推出成本论证，语料里命中的全是对话引用的源码文本；口径错的数字会让 worker 照着假前提动手（`references/confidence-check.md` 第 10 条）。**任何写进工单的机器标识符（sha / 版本号 / 端口 / 行号）都必须由命令现取，不许手打**——9/30 实测：工单里一个 40 位 sha 的尾部 33 位是编的，`git rev-parse --verify` 直接报 `fatal: Needed a single revision`，worker 第一步就撞空（它自己 `rev-parse HEAD` 纠正了，但这份工单的"钉住 <sha>"本意全废）。要钉版本就写 `$(git rev-parse HEAD)` 让 worker 现取，或写短 sha 并注明"以 `rev-parse` 为准"。
 4. **已 grep / 已 cat 过的嫌疑代码行号**：如"`use-selection.ts:116/136 setter 在 127/143 行`"。worker 不用再排查，直接读这些行号就能动手。
