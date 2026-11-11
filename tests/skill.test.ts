@@ -27,14 +27,19 @@ import {
   canonicalPath,
   collectSkillIssues,
   currentVersion,
+  findHost,
   hashDir,
+  hostConfigRoot,
   hostDir,
+  hostPresent,
   inspectCanonical,
   inspectTarget,
   installSkill,
+  linkableHosts,
   pointsAtCanonical,
   readMarker,
   removeSkill,
+  resolveAgentSelection,
   resolveBundledSkillDir,
   skillStatus,
   workBuddyBridges,
@@ -491,7 +496,7 @@ describe("install —— 软链路线（开发者）", () => {
 });
 
 describe("宿主链接", () => {
-  it("给探测到的宿主建链；指向别处的链被重指", async () => {
+  it("给本机装了的宿主建链；指向别处的链被重指", async () => {
     // claude 目录存在 ⇒ 被探测到
     const claudeDir = hostDir(userHome, SKILL_HOSTS.find((h) => h.id === "claude")!);
     mkdirSync(claudeDir, { recursive: true });
@@ -506,36 +511,84 @@ describe("宿主链接", () => {
     expect(readlinkSync(join(claudeDir, "agent-ex-dispatch"))).toBe(canonicalPath(userHome));
   });
 
-  it("宿主目录不存在 ⇒ 不打扰（不 mkdir）", async () => {
+  it("在场判据是宿主的**配置根目录**，不是它的 skills 目录", async () => {
+    // ~/.claude 存在、~/.claude/skills 还没有 ⇒ 宿主在场 ⇒ 装完顺手把 skills 目录建出来。
+    // （反过来拿 skills 目录当判据 ⇒ 装过一次就永远"在场"，没装过的宿主反而被漏掉。）
+    const claude = SKILL_HOSTS.find((h) => h.id === "claude")!;
+    mkdirSync(join(userHome, ".claude"), { recursive: true });
+
     const { confirm, asked } = recorder();
-    await installSkill({ userHome, source, confirm });
-    expect(asked.every((q) => !/Link the dispatch skill/.test(q))).toBe(true);
+    const r = await installSkill({ userHome, source, confirm });
+    expect(r.ok).toBe(true);
+    expect(asked.some((q) => /Claude Code/.test(q))).toBe(true);
+    expect(readlinkSync(join(hostDir(userHome, claude), "agent-ex-dispatch"))).toBe(
+      canonicalPath(userHome),
+    );
   });
 
-  it("默认不链的宿主（codex / opencode）⇒ 不建链，也不问", async () => {
-    // 这两个宿主的 skills 目录在机器上存在，但**未验证**它们会读自己的目录
-    // （codex 直接读共享目录 ~/.agents/skills）⇒ 不能默认给它们建链。
-    for (const id of ["codex", "opencode"]) {
+  it("本机没装的宿主 ⇒ 不打扰（连目录都不建）", async () => {
+    const { confirm, asked } = recorder();
+    const r = await installSkill({ userHome, source, confirm });
+    expect(r.ok).toBe(true);
+    expect(asked.every((q) => !/Link the dispatch skill/.test(q))).toBe(true);
+    expect(existsSync(join(userHome, ".claude"))).toBe(false);
+    expect(existsSync(join(userHome, ".cursor"))).toBe(false);
+  });
+
+  /**
+   * 回归（2026-11-11 独立复核 P2-2）：给没装的宿主建链会**连带建出它的配置根目录**
+   * （`~/.cursor` ⊃ `~/.cursor/skills`）⇒ 之后它永远"在场" ⇒ 普通 install 也会去链它。
+   * ⇒ 配置根里**只有我们自己建的那点东西**时，判为"不在场"。
+   */
+  it("我们自己建出来的宿主目录不算「在场」（不会把没装的宿主变成装了）", async () => {
+    const cursor = SKILL_HOSTS.find((h) => h.id === "cursor")!;
+    // 装一个没装 Cursor 的机器：显式点名建链
+    const r = await installSkill({ userHome, source, agents: ["cursor"], yes: true });
+    expect(r.ok).toBe(true);
+    expect(existsSync(join(hostDir(userHome, cursor), "agent-ex-dispatch"))).toBe(true);
+    // ⚠️ 但它**不在场**（~/.cursor 里只有我们自己建的那条链）
+    expect(hostPresent(userHome, cursor)).toBe(false);
+
+    // 用户真装了 Cursor（配置根里有别的东西）⇒ 在场
+    writeFileSync(join(userHome, ".cursor", "settings.json"), "{}\n");
+    expect(hostPresent(userHome, cursor)).toBe(true);
+  });
+
+  it("普通 install 不会去链「我们自己建过、但用户没装」的宿主", async () => {
+    const cursor = SKILL_HOSTS.find((h) => h.id === "cursor")!;
+    await installSkill({ userHome, source, agents: ["cursor"], yes: true });
+    // 把 cursor 的链删掉（模拟用户自己清理了），再跑一次普通 install
+    rmSync(join(hostDir(userHome, cursor), "agent-ex-dispatch"), { force: true });
+    const { confirm, asked } = recorder();
+    const r = await installSkill({ userHome, source, confirm });
+    expect(r.ok).toBe(true);
+    expect(asked.some((q) => /Cursor/.test(q))).toBe(false);
+    expect(existsSync(join(hostDir(userHome, cursor), "agent-ex-dispatch"))).toBe(false);
+  });
+
+  it("直读共享目录的宿主（codex / cline / zed）⇒ **永远不建链**", async () => {
+    // 它们读的就是 ~/.agents/skills ⇒ 给它们"建链"等于链到 canonical 自己，
+    // 卸载时还会把 canonical 当成宿主链删掉。
+    for (const id of ["codex", "cline", "zed"]) {
       const host = SKILL_HOSTS.find((h) => h.id === id)!;
-      mkdirSync(hostDir(userHome, host), { recursive: true });
+      mkdirSync(hostConfigRoot(userHome, host), { recursive: true });
     }
     const { confirm, asked } = recorder();
     const r = await installSkill({ userHome, source, confirm });
     expect(r.ok).toBe(true);
-    for (const id of ["codex", "opencode"]) {
-      const host = SKILL_HOSTS.find((h) => h.id === id)!;
-      expect(existsSync(join(hostDir(userHome, host), "agent-ex-dispatch"))).toBe(false);
-    }
-    expect(asked.some((q) => /Codex|OpenCode/.test(q))).toBe(false);
-    expect(r.lines.some((l) => /not linked by default/.test(l))).toBe(true);
+    // 共享目录里只有 canonical 一条
+    expect(
+      readdirSync(join(userHome, ".agents/skills")).filter((n) => n !== "agent-ex-dispatch"),
+    ).toEqual([]);
+    expect(asked.some((q) => /Codex|Cline|Zed/.test(q))).toBe(false);
   });
 
-  it("默认不链的宿主上**已有一条指向别处的旧链** ⇒ 照样重指（spec §4.4）", async () => {
+  it("宿主上**已有一条指向别处的旧链** ⇒ 照样重指（spec §4.4）", async () => {
     // 回归 P1-1（复审轮）：以前「默认不链」的判断在 inspectTarget **之前**就 continue 了，
     // 于是旧链永远不重指 ⇒ status/doctor 永远告警，而告警给的修法还修不了。
-    const host = SKILL_HOSTS.find((h) => h.id === "codex")!;
+    const host = SKILL_HOSTS.find((h) => h.id === "opencode")!;
     mkdirSync(hostDir(userHome, host), { recursive: true });
-    const elsewhere = makeSource(join(root, "stale-codex"));
+    const elsewhere = makeSource(join(root, "stale-opencode"));
     symlinkSync(elsewhere, join(hostDir(userHome, host), "agent-ex-dispatch"), "dir");
 
     const { confirm } = recorder();
@@ -563,6 +616,106 @@ describe("宿主链接", () => {
     // 宿主链没有被建/重指
     expect(readlinkSync(join(claudeDir, "agent-ex-dispatch"))).toBe(elsewhere);
     expect(r.lines.some((l) => /skip     host links/.test(l))).toBe(true);
+  });
+});
+
+describe("--agent：点名宿主", () => {
+  it("只给点名的宿主建链（不问）", async () => {
+    const claude = SKILL_HOSTS.find((h) => h.id === "claude")!;
+    const cursor = SKILL_HOSTS.find((h) => h.id === "cursor")!;
+    mkdirSync(join(userHome, ".claude"), { recursive: true });
+    mkdirSync(join(userHome, ".cursor"), { recursive: true });
+
+    const { confirm, asked } = recorder();
+    const r = await installSkill({ userHome, source, agents: ["claude"], confirm });
+    expect(r.ok).toBe(true);
+    expect(readlinkSync(join(hostDir(userHome, claude), "agent-ex-dispatch"))).toBe(
+      canonicalPath(userHome),
+    );
+    expect(existsSync(join(hostDir(userHome, cursor), "agent-ex-dispatch"))).toBe(false);
+    // 显式点名 ⇒ 不问
+    expect(asked.some((q) => /Link the dispatch skill/.test(q))).toBe(false);
+  });
+
+  it("id、别名、大小写都认（claude / claude-code / CLAUDE-CODE）", () => {
+    expect(findHost("claude")?.id).toBe("claude");
+    expect(findHost("claude-code")?.id).toBe("claude");
+    expect(findHost("CLAUDE-CODE")?.id).toBe("claude");
+    expect(findHost("github-copilot")?.id).toBe("copilot");
+    expect(findHost("nope")).toBeNull();
+  });
+
+  it("认不出来的名字 ⇒ 报错，**磁盘一动不动**", async () => {
+    const r = await installSkill({ userHome, source, agents: ["nope"], yes: true });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(" ")).toMatch(/unknown host/);
+    // ⚠️ 名字认不出来就别装：半份安装比报错更糟。
+    expect(existsSync(canonicalPath(userHome))).toBe(false);
+  });
+
+  it("--agent '*' ⇒ 全部需要建链的宿主", async () => {
+    const r = await installSkill({ userHome, source, agents: ["*"], yes: true });
+    expect(r.ok).toBe(true);
+    for (const host of linkableHosts()) {
+      // ⚠️ 自动桥接的宿主（WorkBuddy）自己会桥接 ⇒ '*' 不给它建多余的链（见下面那条用例）
+      if (host.autoBridge?.(userHome)) continue;
+      expect(existsSync(join(hostDir(userHome, host), "agent-ex-dispatch"))).toBe(true);
+    }
+    // 直读共享目录的那几家不参与（建链等于链到 canonical 自己）⇒ 共享目录里只有 canonical
+    expect(
+      readdirSync(join(userHome, ".agents/skills")).filter((n) => n !== "agent-ex-dispatch"),
+    ).toEqual([]);
+  });
+
+  it("--agent '*' ⇒ 自动桥接的宿主不建多余的链；**点名**时又建", async () => {
+    const workbuddy = SKILL_HOSTS.find((h) => h.id === "workbuddy")!;
+    // 装一个假的桥接 hook
+    mkdirSync(join(userHome, ".workbuddy/hooks"), { recursive: true });
+    writeFileSync(
+      join(userHome, ".workbuddy/hooks/sync-agents-skills.sh"),
+      "#!/bin/sh\nexit 0\n",
+    );
+
+    const r = await installSkill({ userHome, source, agents: ["*"], yes: true });
+    expect(r.ok).toBe(true);
+    expect(existsSync(join(hostDir(userHome, workbuddy), "agent-ex-dispatch"))).toBe(false);
+    expect(r.lines.join(" ")).toMatch(/bridges/);
+
+    // ⚠️ 显式点名 ⇒ 以用户为准：他点名了就是要一条链
+    const r2 = await installSkill({ userHome, source, agents: ["workbuddy"], yes: true });
+    expect(r2.ok).toBe(true);
+    expect(existsSync(join(hostDir(userHome, workbuddy), "agent-ex-dispatch"))).toBe(true);
+  });
+
+  it("--agent 点名直读共享目录的宿主 ⇒ 只提示，不建链", async () => {
+    const r = await installSkill({ userHome, source, agents: ["codex"], yes: true });
+    expect(r.ok).toBe(true);
+    expect(readdirSync(join(userHome, ".agents/skills")).filter((n) => n !== "agent-ex-dispatch")).toEqual(
+      [],
+    );
+  });
+});
+
+describe("remove --agent", () => {
+  it("只删点名的宿主；canonical 与别的宿主留着", async () => {
+    const claude = SKILL_HOSTS.find((h) => h.id === "claude")!;
+    const cursor = SKILL_HOSTS.find((h) => h.id === "cursor")!;
+    await installSkill({ userHome, source, agents: ["claude", "cursor"], yes: true });
+
+    const r = await removeSkill({ userHome, source, agents: ["claude"], yes: true });
+    expect(r.ok).toBe(true);
+    expect(existsSync(join(hostDir(userHome, claude), "agent-ex-dispatch"))).toBe(false);
+    expect(existsSync(join(hostDir(userHome, cursor), "agent-ex-dispatch"))).toBe(true);
+    // ⚠️ --agent 是**宿主过滤器**，不是全量卸载 ⇒ canonical 留着
+    expect(existsSync(canonicalPath(userHome))).toBe(true);
+  });
+
+  it("直读共享目录的宿主 ⇒ 不会被当成宿主链删掉（canonical 不受影响）", async () => {
+    await installSkill({ userHome, source, yes: true });
+    const r = await removeSkill({ userHome, source, agents: ["codex"], yes: true });
+    expect(r.ok).toBe(true);
+    expect(existsSync(canonicalPath(userHome))).toBe(true);
+    expect(r.lines.join(" ")).toMatch(/reads the shared directory/);
   });
 });
 
@@ -893,12 +1046,43 @@ describe("remove", () => {
   });
 });
 
+describe("--agent 的取值解析", () => {
+  it("别名归一到宿主 id；重复的只算一次", () => {
+    expect(resolveAgentSelection(["claude-code", "CLAUDE"]).ids).toEqual(["claude"]);
+    expect(resolveAgentSelection(["github-copilot"]).ids).toEqual(["copilot"]);
+    expect(resolveAgentSelection(["claude", "claude-code"]).ids).toEqual(["claude"]);
+  });
+
+  it("'*' = 全部；认不出来的单独报出来", () => {
+    expect(resolveAgentSelection(["*"]).all).toBe(true);
+    expect(resolveAgentSelection(["nope"]).unknown).toEqual(["nope"]);
+    expect(resolveAgentSelection([]).ids).toEqual([]);
+  });
+});
+
 describe("status / doctor 的 skill 段", () => {
   it("status 只读：调用前后目录内容不变", () => {
     const before = hashDir(source);
     skillStatus({ userHome, source });
     expect(hashDir(source)).toBe(before);
     expect(existsSync(join(userHome, ".agents"))).toBe(false);
+  });
+
+  it("直读共享目录的宿主**不算**「链到别处」（开发者路线下 canonical 是软链）", async () => {
+    // canonical 是软链 ⇒ 直读共享目录的宿主那条"链"就是 canonical 自己，
+    // 它的目标不等于 canonicalAbs ⇒ 不排除的话会被误报成"链到别处"。
+    await installSkill({ userHome, source, mode: "link", yes: true });
+    const issues = collectSkillIssues({ userHome, source });
+    expect(issues.find((i) => i.code === "skill.host-link-elsewhere")).toBeUndefined();
+  });
+
+  it("本机装了的宿主没链接 ⇒ 报「没链进去」；没装的宿主不报", async () => {
+    mkdirSync(join(userHome, ".claude"), { recursive: true });
+    const issues = collectSkillIssues({ userHome, source });
+    const unlinked = issues.find((i) => i.code === "skill.hosts-unlinked");
+    expect(unlinked?.detail).toContain("Claude Code");
+    // 没装的宿主不该出现在告警里
+    expect(unlinked?.detail).not.toContain("Cursor");
   });
 
   it("未安装 ⇒ info（不是 error）", () => {

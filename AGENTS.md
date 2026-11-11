@@ -74,6 +74,7 @@
 | 品牌名（`BRAND`） | `config.example.json`、README（`tests/config.test.ts` 会钉住这两处——README 里必须出现 `"keyword": "agent-ex"`） |
 | 用户可见文案 | README 对应章节 + `docs/README.zh-CN.md` 对应章节 + `docs/user-guide/` 相关篇 |
 | README（英文） | `docs/README.zh-CN.md` 保持**章节一一对应**；深度内容只写在 `docs/user-guide/`，README 只给摘要 + 链接 |
+| 宿主表（`src/skill.ts` 的 `SKILL_HOSTS`） | README「install the dispatch skill」一节列的宿主名 + `docs/README.zh-CN.md` 同节；`src/skill-cmd.ts` 的 `USAGE` 宿主清单（自动生成，别手抄）。**目录与"在场判据"对着 `npx skills`（vercel-labs/skills）的宿主表核**，别凭印象写 |
 
 ## Testing instructions
 

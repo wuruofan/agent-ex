@@ -101,7 +101,8 @@ agent-ex skill install
    （Agent Skills 规范的共享目录）；
 2. 在拷贝目录里写 `.agent-ex-skill.json`，记下**版本号**与内容指纹——
    `agent-ex skill status` / `agent-ex doctor` 靠它判断「装的是哪一版」；
-3. 给**本机存在、且默认该链**的宿主（Claude Code / Trae …）各建一条软链。
+3. 给**本机存在、且该链**的宿主（Claude Code / Cursor / Windsurf / Trae / Trae CN / Copilot /
+   Gemini CLI / OpenCode / Droid / Amp / Qwen Code / MiniMax Code / CodeBuddy / WorkBuddy）各建一条软链。
 
 几个要点：
 
@@ -110,10 +111,22 @@ agent-ex skill install
 - **不会覆盖别人的东西**：目标路径已有**实体目录**且不是 agent-ex 装的 ⇒ 直接中止、内容一字不改。
 - **自动桥接的宿主不建链**：WorkBuddy 只扫 `~/.workbuddy/skills`，但多数 WorkBuddy 安装自带
   `~/.workbuddy/hooks/sync-agents-skills.sh`，会自己把 `~/.agents/skills` 桥接过去 ⇒
-  `agent-ex skill install` 检测到就会告诉你不用手工链。没有该脚本的机器显式指定：
-  `agent-ex skill install --target ~/.workbuddy/skills`。
-- **Codex / OpenCode 默认不链**（未验证这两个宿主是否读自己的 skills 目录）⇒ 需要时 `--target` 指定；
-  但它们目录里**已经有**指向别处的旧链时，那条链照样会被重指（放着不管就是坏状态）。
+  `agent-ex skill install` 检测到就会告诉你不用手工链。没有该脚本的机器显式点名：
+  `agent-ex skill install --agent workbuddy`。
+- **直读共享目录的宿主永远不建链**：Codex / Cline / Zed 读的就是 `~/.agents/skills`，
+  给它们建链等于链到 canonical 自己。`agent-ex skill status` 会把它们标成
+  「reads ~/.agents/skills — no link needed」。
+- **`--agent` 自己挑宿主**：默认给**本机装了**的宿主（判据是它们的配置根目录存在：
+  `~/.claude`、`~/.cursor`、`~/.config/opencode` …）建链。`--agent <名字>` 则**只**装你点名的那些，
+  且不问：
+
+  ```bash
+  agent-ex skill install --agent cursor --agent claude-code   # id 与别名都认
+  agent-ex skill install --agent '*'                          # 全部需要建链的宿主
+  agent-ex skill remove --agent cursor                        # 只删这一家，其余不动
+  ```
+
+  名字认不出来会直接报错，**磁盘上一个字节都不写**。
 - **非交互环境（CI / 管道）直接拒绝执行**（退出码 2），除非显式给 `--yes`：这两个命令会建链、会重指、会删目录。
   `--yes` 的语义是「所有问题都答 yes」，**不是**「所有宿主都链上」。
 
@@ -136,7 +149,7 @@ agent-ex skill install
 | `agent-ex profile create <built-in> [--bin <path>]` | **物化**一个内置预设（当前：`opencode-zen-free`，零密钥的 opencode 免费模型）。只创建，不切默认。 |
 | `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段，或用保留字 `executor` 改它用哪个 executor、用 `path_dirs` 声明 worker PATH 的额外目录。 |
 | `agent-ex wait <task_id>` | **阻塞等一个任务到终态**（或到 `needs_input`），并把 worker 的最终报告提出来。 |
-| `agent-ex skill install` | 把 dispatch skill 装到 `~/.agents/skills`（**随 npm 包分发**），并给本机存在的宿主各建一条软链。 |
+| `agent-ex skill install` | 把 dispatch skill 装到 `~/.agents/skills`（**随 npm 包分发**），并给本机存在的宿主各建一条软链。`--agent <名字>` 限定只装你点名的宿主。 |
 | `agent-ex skill remove` | 卸载：删掉宿主软链与安装的拷贝。**只删软链**，实体目录一律不碰；只要还有东西留在原地，退出码就是非 0。 |
 | `agent-ex skill status` | 只读：装在哪、是哪一版、哪些宿主还没链。 |
 
@@ -242,7 +255,7 @@ agent-ex doctor --send
 | `{env:VAR}` 报 `not found in process environment` | 密钥既不在 `.env` 里也没 export 到 server 进程。加到 `$AGENT_EX_HOME/.env` 后重启 server。 |
 | 飞书不推送 | `notify.dry_run` 还是 `true`；或 webhook 缺失；或机器人勾了加签（`code=19021`）。 |
 | 改了代码但行为没变 | MCP 宿主复用常驻 server 进程。重新 build 后调 `restart`，再用 `version` 核对 `gitSha`。 |
-| skill 装了但宿主没加载 | 跑 `agent-ex skill status` 看哪些宿主没链，再 `agent-ex skill install --target <目录>`。 |
+| skill 装了但宿主没加载 | 跑 `agent-ex skill status` 看哪些宿主没链，再 `agent-ex skill install --agent <宿主>`。 |
 
 ## 文档
 

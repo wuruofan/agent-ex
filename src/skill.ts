@@ -63,37 +63,61 @@ export interface SkillHost {
   label: string;
   /** 用户级 skills 目录，相对用户 home。 */
   relDir: string;
+  /**
+   * "这个宿主在不在本机"的判据目录（相对 home）。缺省 = `dirname(relDir)`。
+   *
+   * ⚠️ 少数宿主的 skills 目录**不是**它的配置根目录：
+   *   - Amp 的 skills 在 `~/.config/agents/skills`，配置却在 `~/.config/amp`；
+   *   - 直读共享目录的宿主（codex / cline / zed）压根没有自己的 skills 目录。
+   * ⇒ 这些要显式写 `configRelDir`。
+   */
+  configRelDir?: string;
+  /** `--agent` 的其它写法（大小写不敏感）。 */
+  aliases?: readonly string[];
   /** 该宿主是否自带"从 ~/.agents/skills 自动桥接"的机制。有就别手工建链。 */
   autoBridge?: (userHome: string) => boolean;
   /**
-   * 是否**默认建链**。默认 true。
+   * 该宿主**直接读共享目录** `~/.agents/skills`（不读自己的目录）。
    *
-   * ⚠️ `codex` / `opencode` 设成 false：**未验证**这两个宿主真的会读自己的 skills 目录
-   * （本机 `~/.codex/skills` 只有 `.system/`、`~/.config/opencode/skills` 是空的；
-   * 且 README 说 codex 直接读共享目录 `~/.agents/skills`，根本不需要链）。
-   * ⇒ 它们仍出现在 `status` 里（能看见），但 `install` 不会自动给它们建链，
-   * 需要时用 `--target ~/.codex/skills` 显式指定。
+   * ⇒ 永远**不建链**（`relDir` 就是共享目录本身，建链就是链到 canonical 自己）。
+   * 事实依据：`npx skills` 的宿主表里这批宿主（cline / codex / zed …）的
+   * global skills 路径就是 `~/.agents/skills`，且没有 `globalReadsCanonical: false`。
    */
-  linkByDefault?: boolean;
+  readsCanonical?: boolean;
 }
 
 /**
  * 已知宿主。
  *
- * ⚠️ `codex` / `opencode` **未验证**该宿主真的会读自己的 skills 目录（本机 `~/.codex/skills`
- * 只有 `.system/`、`~/.config/opencode/skills` 是空的）⇒ 默认**不链**，只允许 `--target` 显式指定。
+ * 目录与"在场判据"对着 `npx skills`（vercel-labs/skills）的宿主表逐条核过：
+ * 那边的 `globalSkillsDir` = 我们的 `relDir`，它的 `detectInstalled` = 我们的 `configRelDir`。
+ * 我们不抄它那 58 家（维护债 + 漂移债），只收一线常用的一批。
  */
 export const SKILL_HOSTS: readonly SkillHost[] = [
-  { id: "claude", label: "Claude Code", relDir: ".claude/skills" },
+  { id: "claude", label: "Claude Code", relDir: ".claude/skills", aliases: ["claude-code"] },
+  { id: "cursor", label: "Cursor", relDir: ".cursor/skills" },
+  { id: "windsurf", label: "Windsurf", relDir: ".codeium/windsurf/skills" },
+  { id: "trae", label: "Trae", relDir: ".trae/skills" },
+  { id: "trae-cn", label: "Trae CN", relDir: ".trae-cn/skills" },
+  { id: "copilot", label: "GitHub Copilot", relDir: ".copilot/skills", aliases: ["github-copilot"] },
+  { id: "gemini", label: "Gemini CLI", relDir: ".gemini/skills", aliases: ["gemini-cli"] },
+  { id: "opencode", label: "OpenCode", relDir: ".config/opencode/skills" },
+  { id: "droid", label: "Droid (Factory)", relDir: ".factory/skills", aliases: ["factory"] },
+  // Amp 的 skills 在 ~/.config/agents/skills（与 Replit / Universal 共用），配置在 ~/.config/amp。
+  { id: "amp", label: "Amp", relDir: ".config/agents/skills", configRelDir: ".config/amp" },
+  { id: "qwen", label: "Qwen Code", relDir: ".qwen/skills", aliases: ["qwen-code"] },
+  { id: "minimax", label: "MiniMax Code", relDir: ".minimax/skills", aliases: ["minimax-code"] },
+  { id: "codebuddy", label: "CodeBuddy", relDir: ".codebuddy/skills" },
   {
     id: "workbuddy",
     label: "WorkBuddy",
     relDir: ".workbuddy/skills",
     autoBridge: (userHome) => workBuddyBridges(userHome),
   },
-  { id: "trae-cn", label: "Trae", relDir: ".trae-cn/skills" },
-  { id: "codex", label: "Codex", relDir: ".codex/skills", linkByDefault: false },
-  { id: "opencode", label: "OpenCode", relDir: ".config/opencode/skills", linkByDefault: false },
+  // ↓ 直读共享目录 ~/.agents/skills 的宿主：不建链（见 SkillHost.readsCanonical）。
+  { id: "codex", label: "Codex", relDir: ".agents/skills", configRelDir: ".codex", readsCanonical: true },
+  { id: "cline", label: "Cline", relDir: ".agents/skills", configRelDir: ".cline", readsCanonical: true },
+  { id: "zed", label: "Zed", relDir: ".agents/skills", configRelDir: ".config/zed", readsCanonical: true },
 ];
 
 /**
@@ -130,6 +154,127 @@ export function workBuddyBridges(userHome: string): boolean {
 /** 宿主 skills 目录的绝对路径。 */
 export function hostDir(userHome: string, host: SkillHost): string {
   return join(userHome, host.relDir);
+}
+
+/**
+ * 宿主的**配置根目录**（绝对路径）——"这个宿主在不在本机"的判据。
+ *
+ * 为什么要判"配置根"而不是"skills 目录"：skills 目录常常是我们自己建出来的，
+ * 拿它当判据 ⇒ 装过一次就永远"在场"，没装过的宿主反而被漏掉。
+ * 判据取宿主自己的家目录（`~/.claude`、`~/.config/opencode` …），跟"装没装过 skill"无关。
+ */
+export function hostConfigRoot(userHome: string, host: SkillHost): string {
+  return join(userHome, host.configRelDir ?? dirname(host.relDir));
+}
+
+/**
+ * 宿主是否在本机（它的配置根目录存在）。
+ *
+ * ⚠️ **"我们自己建出来的目录"不算在场**：
+ * 给一个没装的宿主建链，会连带建出 `<配置根>/skills/`，而配置根往往**就是** skills 目录的父目录
+ * （`~/.claude` ⊃ `~/.claude/skills`）⇒ 建完链它就永远"在场"了。
+ * ⇒ 配置根里**只有我们自己建的那点东西**时，判为"不在场"。
+ *
+ * 例外（amp / codex / cline / zed）：它们的 skills 目录**不在**配置根里面
+ * （amp 的 skills 在 `~/.config/agents/skills`，配置在 `~/.config/amp`）
+ * ⇒ 我们没碰过它们的配置根，不存在自我污染。
+ */
+export function hostPresent(userHome: string, host: SkillHost): boolean {
+  const root = hostConfigRoot(userHome, host);
+  if (!existsSync(root)) return false;
+  return !onlyContainsOurOwnWork(userHome, host, root);
+}
+
+/**
+ * 配置根里是不是**只有我们自己建的东西**（skills 目录 + 我们那条链）？
+ *
+ * 判断不出来时一律返回 false（当作"不只有我们的"）⇒ 宁可多链一个宿主，
+ * 也不要把"我们建过"误判成"用户装了"。
+ */
+function onlyContainsOurOwnWork(userHome: string, host: SkillHost, root: string): boolean {
+  const skills = hostDir(userHome, host);
+  // skills 目录不在配置根里面 ⇒ 我们没往配置根里写东西。
+  if (!isInside(skills, root)) return false;
+  let rootEntries: string[];
+  try {
+    rootEntries = readdirSync(root);
+  } catch {
+    return false;
+  }
+  // 配置根里除了 skills 目录还有别的东西 ⇒ 宿主确实在（配置、缓存、历史……）。
+  if (rootEntries.some((n) => !samePath(join(root, n), skills))) return false;
+  // 配置根里只有 skills 目录 ⇒ 看 skills 目录里有没有别的东西。
+  try {
+    return readdirSync(skills).every((n) => n === SKILL_NAME);
+  } catch {
+    return false;
+  }
+}
+
+/** 需要建链的宿主（直读共享目录的不算——给它们建链就是链到 canonical 自己）。 */
+export function linkableHosts(): SkillHost[] {
+  return SKILL_HOSTS.filter((h) => !h.readsCanonical);
+}
+
+/** 按 id 或别名找宿主（大小写不敏感）。找不到返回 null。 */
+export function findHost(name: string): SkillHost | null {
+  const key = name.trim().toLowerCase();
+  if (!key) return null;
+  for (const h of SKILL_HOSTS) {
+    if (h.id.toLowerCase() === key) return h;
+    if (h.aliases?.some((a) => a.toLowerCase() === key)) return h;
+  }
+  return null;
+}
+
+/** `--agent '*'`：全部需要建链的宿主。 */
+export const ALL_HOSTS = "*";
+
+/** `--agent` 的解析结果。 */
+export interface AgentSelection {
+  /** 命中的宿主 id（去重，按宿主表顺序）。 */
+  ids: string[];
+  /** 认不出来的名字（报给用户）。 */
+  unknown: string[];
+  /** 是否选了 `*`。 */
+  all: boolean;
+}
+
+/**
+ * 解析 `--agent` 的取值 ⇒ 宿主 id 列表。
+ *
+ * 接受：宿主 id、别名（`claude` / `claude-code` 都行）、`*`（全部需要建链的宿主）。
+ */
+export function resolveAgentSelection(names: readonly string[]): AgentSelection {
+  const ids: string[] = [];
+  const unknown: string[] = [];
+  let all = false;
+  for (const raw of names) {
+    const name = raw.trim();
+    if (!name) continue;
+    if (name === ALL_HOSTS) {
+      all = true;
+      continue;
+    }
+    const host = findHost(name);
+    if (!host) {
+      unknown.push(name);
+      continue;
+    }
+    if (!ids.includes(host.id)) ids.push(host.id);
+  }
+  return { ids, unknown, all };
+}
+
+/** 合法取值的清单（报错时列给用户看）。 */
+export function hostSelectorNames(): string[] {
+  const out: string[] = [];
+  for (const h of SKILL_HOSTS) {
+    out.push(h.id);
+    for (const a of h.aliases ?? []) out.push(a);
+  }
+  out.push(ALL_HOSTS);
+  return out;
 }
 
 /** canonical 的绝对路径（**固定**——自动桥接只认 `~/.agents/skills` 这一个源）。 */
@@ -499,7 +644,14 @@ export function inspectTarget(path: string): TargetState {
 export interface SkillStatus {
   bundled: { dir: string; version: string; sha: string | null; exists: boolean };
   canonical: CanonicalInfo;
-  hosts: Array<{ host: SkillHost; dir: string; state: TargetState; autoBridge: boolean }>;
+  hosts: Array<{
+    host: SkillHost;
+    dir: string;
+    state: TargetState;
+    autoBridge: boolean;
+    /** 这个宿主在不在本机（配置根目录存在）。 */
+    present: boolean;
+  }>;
 }
 
 /**
@@ -526,6 +678,7 @@ export function skillStatus(opts: { userHome: string; source?: string }): SkillS
         dir,
         state: inspectTarget(join(dir, SKILL_NAME)),
         autoBridge: host.autoBridge ? host.autoBridge(opts.userHome) : false,
+        present: hostPresent(opts.userHome, host),
       };
     }),
   };
@@ -637,10 +790,13 @@ export function collectSkillIssues(opts: { userHome: string; source?: string }):
   const canonicalAbs = realOrSelf(st.canonical.path);
   // 链到别处的宿主 / 断掉的链：链还在，但它指的不是 canonical ⇒ 宿主看到的可能是一份旧内容，
   // 或者根本读不到。两种都要报 —— 只在 status 里报、doctor 静默，等于体检漏项。
+  // ⚠️ 直读共享目录的宿主（codex / cline / zed）要**排除**：它们那条"链"就是 canonical 自己，
+  // 开发者路线下 canonical 是指向仓库的软链 ⇒ 目标不等于 canonicalAbs ⇒ 会被误报成"链到别处"。
   const mislinked = st.hosts.filter(
     (h) =>
-      h.state.kind === "broken-link" ||
-      (h.state.kind === "link" && h.state.target !== canonicalAbs),
+      !h.host.readsCanonical &&
+      (h.state.kind === "broken-link" ||
+        (h.state.kind === "link" && h.state.target !== canonicalAbs)),
   );
   if (mislinked.length > 0) {
     const broken = mislinked.filter((h) => h.state.kind === "broken-link");
@@ -673,9 +829,10 @@ export function collectSkillIssues(opts: { userHome: string; source?: string }):
     (h) =>
       h.state.kind === "missing" &&
       !h.autoBridge &&
-      // ⚠️ 默认不建链的宿主（codex / opencode）不算"漏链"——它们本来就不该有链。
-      h.host.linkByDefault !== false &&
-      existsSync(h.dir),
+      // ⚠️ 直读共享目录的宿主（codex / cline / zed）不算"漏链"——它们本来就没有自己的条目。
+      !h.host.readsCanonical &&
+      // 只报**本机装了**的宿主：没装的宿主装它没意义（那是 `--agent` 的活）。
+      h.present,
   );
   if (unlinked.length > 0) {
     issues.push({
@@ -719,6 +876,12 @@ export interface InstallOptions {
   /** 额外宿主目录（显式指定 ⇒ 直接建链，不问）。 */
   targets?: string[];
   /**
+   * 显式点名要装的宿主（`--agent`）：宿主 id、别名，或 `*`（全部需要建链的宿主）。
+   *
+   * 点名的宿主 ⇒ 直接建链，不问；**没点名**的宿主按"在本机 + 问一句"的老规矩走。
+   */
+  agents?: string[];
+  /**
    * 跳过所有提问（每个问题都按 yes 答）。
    *
    * ⚠️ 默认 **false**。默认 `confirm` 在**没人能答问题**时会抛错（拒绝执行），
@@ -736,6 +899,8 @@ export interface RemoveOptions {
   source?: string;
   /** 只移除这些目录下的条目；**不给则连 canonical 一起移除**。 */
   targets?: string[];
+  /** 只移除这些宿主下的条目（`--agent`）；**不给则连 canonical 一起移除**。 */
+  agents?: string[];
   /**
    * 跳过确认（一律执行）。
    *
@@ -843,7 +1008,7 @@ function symlinkAt(linkPath: string, target: string): void {
  * - canonical 是**固定**路径，状态分六态，每态有确定动作；
  * - `managed-copy` 且版本落后 ⇒ **问"是否更新"**；
  * - `foreign-dir` ⇒ **中止**，目录内容一字未改；
- * - 宿主链接：**显式 `--target` > 已有指向别处的链（重指）> autoBridge（不建链）> 其余问**。
+ * - 宿主链接：**显式 `--target` / `--agent` > 已有指向别处的链（重指）> autoBridge（不建链）> 其余问**。
  */
 export async function installSkill(opts: InstallOptions): Promise<SkillActionResult> {
   const lines: string[] = [];
@@ -864,6 +1029,16 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
         `cannot ask interactively: "${q}" — pass yes: true (accept every answer) or a confirm callback`,
       );
     });
+
+  // ⚠️ `--agent` 的名字**先校验**：认不出来就别动磁盘（半份安装比报错更糟）。
+  const selected = resolveAgentSelection(opts.agents ?? []);
+  if (selected.unknown.length > 0) {
+    errors.push(
+      `unknown host${selected.unknown.length > 1 ? "s" : ""}: ${selected.unknown.join(", ")}. ` +
+        `Valid names: ${hostSelectorNames().join(", ")}.`,
+    );
+    return { ok: false, lines, errors, skipped: [] };
+  }
 
   // source 必须**像个 skill 目录**：否则装出去的是个空目录，宿主那边根本不会加载。
   if (!existsSync(source)) {
@@ -1089,6 +1264,20 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
 
   // ---- 宿主链接 ----
   const explicit = new Set((opts.targets ?? []).map((t) => resolve(t)));
+  /** 显式点名（`--agent <名字>`）的宿主 ⇒ 直接建链，不问。 */
+  const namedHosts = new Set(selected.ids);
+  /** `--agent '*'`：全部需要建链的宿主（autoBridge 的除外——它自己会桥接）。 */
+  const starSelected = selected.all;
+  /**
+   * 用户点名了宿主（`--agent`）⇒ **只**装点名的那些。
+   *
+   * ⚠️ 为什么不是"点名 = 额外再装一个"：宿主是**自动探测**的，
+   * 加法语义下 `--agent cursor` 会顺手把本机装着的 Claude Code 也链上，
+   * 用户没法说"我只要 Cursor"。--target 才是加法（它点名的是目录，没有自动探测这回事）。
+   */
+  const agentFilter = namedHosts.size > 0 || starSelected;
+  /** 已经被宿主循环处理过的目录（避免下面"额外的 --target 目录"重复处理）。 */
+  const handledDirs = new Set<string>();
   if (!canonicalReady) {
     // canonical 不是一份可用的安装（用户拒绝了重指，或写失败）⇒ 宿主链过去只会链到错的东西。
     lines.push(
@@ -1097,11 +1286,24 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
   }
   for (const host of SKILL_HOSTS) {
     if (!canonicalReady) break;
+    // ⚠️ 直读共享目录的宿主（codex / cline / zed）**永远不建链**：
+    // 它们的 relDir 就是 `~/.agents/skills` ⇒ 建出来的"链"就是 canonical 自己，
+    // 卸载时还会把 canonical 当成宿主链删掉。
+    if (host.readsCanonical) continue;
     const dir = hostDir(opts.userHome, host);
-    const isExplicit = explicit.has(resolve(dir));
-    if (!isExplicit && !existsSync(dir)) continue; // 没这个宿主的目录 ⇒ 不打扰
+    const named = namedHosts.has(host.id);
+    // 点名了宿主 ⇒ 没被点名的**一个都不碰**。
+    if (agentFilter && !named && !starSelected) continue;
+    const isExplicit = explicit.has(resolve(dir)) || named;
+    const picked = isExplicit || starSelected;
     const linkPath = join(dir, SKILL_NAME);
     const st = inspectTarget(linkPath);
+    // ⚠️ 在场判据是**配置根目录**（`~/.claude` 之类），不是 skills 目录：
+    // skills 目录常常是我们自己建出来的，拿它当判据 ⇒ 装过一次就永远"在场"。
+    // 已经有条目的照旧处理（重跑一次要能看到"已经是这条链"）。
+    if (!picked && !hostPresent(opts.userHome, host) && st.kind === "missing") continue;
+    // 这个目录归宿主循环管了 ⇒ 下面"额外的 --target 目录"那一段别再来一遍。
+    handledDirs.add(resolve(dir));
 
     try {
       if (st.kind === "link" && pointsAtCanonical(st.target, canonical)) {
@@ -1142,24 +1344,16 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
         continue;
       }
       // ---- 没有条目 ----
+      // ⚠️ autoBridge 的宿主（WorkBuddy）自己会桥接 ⇒ 不建多余的链。
+      // 但**显式点名**（`--agent workbuddy` / `--target …`）时以用户为准：他要什么给什么。
       if (!isExplicit && host.autoBridge && host.autoBridge(opts.userHome)) {
         lines.push(
           `note     ${host.label} bridges ${join(opts.userHome, ".agents/skills")} automatically — no link needed`,
         );
         continue;
       }
-      // ⚠️ codex / opencode 默认**不**建链：未验证这两个宿主真的会读自己的 skills 目录，
-      // 而 codex 直接读共享目录 `~/.agents/skills`，本来就不需要链。
-      // 需要时用 `--target <dir>` 显式指定（显式指定 ⇒ 直接建，不问）。
-      // ⚠️ 这个判断只管"**没有条目**"的情形；上面已有的链（link / broken-link）
-      // 照样要处理 —— 见上面「指向别处的链必须重指」那条注释。
-      if (!isExplicit && host.linkByDefault === false) {
-        lines.push(
-          `note     ${host.label} is not linked by default (use --target ${dir} if that host reads its own skills dir)`,
-        );
-        continue;
-      }
-      const go = isExplicit
+      // 显式点名（`--agent`）或 `--agent '*'` ⇒ 直接建，不问。
+      const go = isExplicit || starSelected
         ? true
         : await confirm(`Link the dispatch skill into ${host.label} (${dir})?`, true);
       if (go) {
@@ -1177,7 +1371,9 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
   for (const t of opts.targets ?? []) {
     if (!canonicalReady) break;
     const dir = resolve(t);
-    if (SKILL_HOSTS.some((h) => resolve(hostDir(opts.userHome, h)) === dir)) continue;
+    // ⚠️ 宿主循环已经处理过的目录别再来一遍（--agent 过滤时，宿主可能被跳过了，
+    // 但用户仍然用 --target 明确点名了那个目录 ⇒ 该装还得装）。
+    if (handledDirs.has(dir)) continue;
     const linkPath = join(dir, SKILL_NAME);
     const st = inspectTarget(linkPath);
     if (st.kind === "link" && pointsAtCanonical(st.target, canonical)) {
@@ -1229,12 +1425,34 @@ export async function removeSkill(opts: RemoveOptions): Promise<SkillActionResul
     });
 
   const dirs = (opts.targets ?? []).map((t) => resolve(t));
-  const explicitOnly = dirs.length > 0;
+  // ⚠️ `--agent` 的名字**先校验**：认不出来就别动磁盘。
+  const selected = resolveAgentSelection(opts.agents ?? []);
+  if (selected.unknown.length > 0) {
+    errors.push(
+      `unknown host${selected.unknown.length > 1 ? "s" : ""}: ${selected.unknown.join(", ")}. ` +
+        `Valid names: ${hostSelectorNames().join(", ")}.`,
+    );
+    return { ok: false, lines, errors, skipped };
+  }
+  /** 显式点名要清的宿主（`--agent`）。直读共享目录的宿主没有自己的条目 ⇒ 跳过。 */
+  const namedHosts = new Set(selected.ids);
+  const namedDirs = SKILL_HOSTS.filter((h) => namedHosts.has(h.id) && !h.readsCanonical).map((h) =>
+    hostDir(opts.userHome, h),
+  );
+  for (const h of SKILL_HOSTS) {
+    if (namedHosts.has(h.id) && h.readsCanonical) {
+      lines.push(`note     ${h.label} reads the shared directory — nothing to remove there`);
+    }
+  }
+  // 指定了宿主/目录 ⇒ **只**清那些地方，canonical 留着（跟 `--target` 一个规矩）。
+  // `--agent` 是**宿主过滤器**，不是"全量卸载"的另一种写法：`--agent '*'` 也只清宿主链。
+  const explicitOnly = dirs.length > 0 || selected.ids.length > 0 || selected.all;
 
   if (!yes) {
+    const what = selected.all ? "all hosts" : [...dirs, ...namedDirs].join(", ");
     const go = await confirm(
       explicitOnly
-        ? `Remove the dispatch skill from ${dirs.join(", ")}?`
+        ? `Remove the dispatch skill from ${what}?`
         : "Remove the dispatch skill (canonical copy and host links)?",
       true,
     );
@@ -1245,9 +1463,12 @@ export async function removeSkill(opts: RemoveOptions): Promise<SkillActionResul
   }
 
   // ---- 宿主链接（先删）----
+  // ⚠️ 直读共享目录的宿主（codex / cline / zed）**必须排除**：它们的"条目"就是 canonical 自己，
+  // 当成宿主链删掉 ⇒ 卸载把 canonical 删了，却报告成"删了几条宿主链"。
+  const allHostDirs = linkableHosts().map((h) => hostDir(opts.userHome, h));
   const hostDirs = explicitOnly
-    ? dirs
-    : SKILL_HOSTS.map((h) => hostDir(opts.userHome, h));
+    ? [...new Set([...dirs, ...namedDirs, ...(selected.all ? allHostDirs : [])])]
+    : allHostDirs;
   /** 宿主链有没有删失败的？删失败 ⇒ canonical 不能删（见函数注释）。 */
   let hostLinkFailed = false;
   for (const dir of hostDirs) {

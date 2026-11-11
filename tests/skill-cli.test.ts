@@ -137,6 +137,51 @@ describe("agent-ex skill（CLI 路径）", () => {
     }
   });
 
+  it("status 收 --agent ⇒ 同样报用法错误", async () => {
+    const r = await runSkillCli(["skill", "status", "--agent", "claude"]);
+    try {
+      expect(r.code).toBe(2);
+      expect(r.out).toMatch(/status takes no --agent/);
+    } finally {
+      rmSync(r.home, { recursive: true, force: true });
+    }
+  });
+
+  it("--agent 点名宿主 ⇒ 只给那一家建链", async () => {
+    const home = mkdtempSync(join(tmpdir(), "aex-skill-cli-"));
+    try {
+      const r = await runSkillCli(["skill", "install", "--agent", "claude", "--yes"], { home });
+      expect(r.code).toBe(0);
+      expect(existsSync(join(home, ".claude/skills/agent-ex-dispatch"))).toBe(true);
+      // 没点名的宿主一个都没碰
+      expect(existsSync(join(home, ".cursor"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("--agent 认不出来的名字 ⇒ 报错，且**什么都没装**", async () => {
+    const home = mkdtempSync(join(tmpdir(), "aex-skill-cli-"));
+    try {
+      const r = await runSkillCli(["skill", "install", "--agent", "nope", "--yes"], { home });
+      expect(r.code).toBe(1);
+      expect(r.out).toMatch(/unknown host/);
+      expect(existsSync(join(home, ".agents"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("--agent 后面紧跟另一个选项 ⇒ 报用法错误（不把选项当成宿主名）", async () => {
+    const r = await runSkillCli(["skill", "install", "--agent", "--yes"]);
+    try {
+      expect(r.code).toBe(2);
+      expect(r.out).toMatch(/--agent needs a host name/);
+    } finally {
+      rmSync(r.home, { recursive: true, force: true });
+    }
+  });
+
   /** 回归（P2-4）：指向**别处**的宿主链不能标成"正常"（绿勾）。 */
   it("status 里链到别处的宿主要标出来（不是绿勾）", async () => {
     const home = mkdtempSync(join(tmpdir(), "aex-skill-cli-"));

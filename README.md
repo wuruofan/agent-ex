@@ -108,7 +108,8 @@ It does three things:
 2. writes `.agent-ex-skill.json` next to it, recording the **version** and a content fingerprint —
    `agent-ex skill status` and `agent-ex doctor` use it to tell "which version is installed";
 3. symlinks it into every host that is present on this machine and should have it
-   (Claude Code, Trae, …).
+   (Claude Code, Cursor, Windsurf, Trae, Trae CN, GitHub Copilot, Gemini CLI, OpenCode, Droid,
+   Amp, Qwen Code, MiniMax Code, CodeBuddy, WorkBuddy).
 
 Things worth knowing:
 
@@ -119,11 +120,22 @@ Things worth knowing:
   agent-ex did not install, the command aborts and changes nothing.
 - **Hosts that bridge themselves are skipped** — WorkBuddy only scans `~/.workbuddy/skills`, but most
   WorkBuddy installs ship an auto-bridge script (`~/.workbuddy/hooks/sync-agents-skills.sh`) that
-  mirrors `~/.agents/skills` itself. Without that script, pass the directory explicitly:
-  `agent-ex skill install --target ~/.workbuddy/skills`.
-- **Codex and OpenCode are not linked by default** (it is unverified whether they read their own
-  `skills` directory) — use `--target` if you want them. A pre-existing link pointing elsewhere *is*
-  re-pointed, because a stale link is a broken state.
+  mirrors `~/.agents/skills` itself. Without that script, name it explicitly:
+  `agent-ex skill install --agent workbuddy`.
+- **Hosts that read the shared directory are never linked** — Codex, Cline and Zed read
+  `~/.agents/skills` itself, so a link could only point back at the canonical copy.
+  `agent-ex skill status` lists them as "reads ~/.agents/skills — no link needed".
+- **Pick hosts yourself with `--agent`** — by default agent-ex links the hosts it finds on this
+  machine (their config directory exists: `~/.claude`, `~/.cursor`, `~/.config/opencode`, …).
+  `--agent <name>` restricts the install to the hosts you name and links them without asking:
+
+  ```bash
+  agent-ex skill install --agent cursor --agent claude-code   # ids and aliases both work
+  agent-ex skill install --agent '*'                          # every host that needs a link
+  agent-ex skill remove --agent cursor                        # that host only; the rest stays
+  ```
+
+  An unknown name is an error — nothing gets written.
 - **Non-interactive shells refuse to run it** (exit code 2) unless you pass `--yes`:
   `install` / `remove` create, re-point and delete things. `--yes` means "answer every question
   with yes", **not** "link every host".
@@ -147,7 +159,7 @@ Inspect with `agent-ex skill status` (read-only), uninstall with `agent-ex skill
 | `agent-ex profile create <built-in> [--bin <path>]` | Materialises a built-in preset (`opencode-zen-free` — a zero-key opencode free-model profile). Creates only; does not switch. |
 | `agent-ex profile set <profile> <KEY> <value>` | Changes a profile's env, or `executor` (which executor it uses), or `path_dirs` (extra absolute PATH directories for the worker). |
 | `agent-ex wait <task_id>` | Blocks until the task is terminal (or needs input) and prints the worker's final report. |
-| `agent-ex skill install` | Installs the dispatch skill from the package and links it into the hosts that should have it. |
+| `agent-ex skill install` | Installs the dispatch skill from the package and links it into the hosts that should have it. `--agent <name>` restricts it to the hosts you name. |
 | `agent-ex skill remove` | Uninstalls: removes the host symlinks and the installed copy. **Only symlinks** — a real directory is never touched; the exit code is non-zero if anything was left behind. |
 | `agent-ex skill status` | Read-only: where it is installed, which version, which hosts are not linked yet. |
 
@@ -259,7 +271,7 @@ Full walkthrough (bot setup, the security-mode matrix, every error code):
 | `{env:VAR}` fails with `not found in process environment` | The key is neither in `.env` nor exported to the server process. Add it to `$AGENT_EX_HOME/.env` and restart the server. |
 | Feishu sends nothing | `notify.dry_run` is still `true`; or the webhook is missing; or the bot has signature verification enabled (`code=19021`). |
 | Behaviour did not change after editing code | The MCP host reuses a long-lived server process. Rebuild, then `restart`, then check `gitSha` with `version`. |
-| The skill is installed but the host does not load it | Run `agent-ex skill status` to see which hosts are not linked, then `agent-ex skill install --target <dir>`. |
+| The skill is installed but the host does not load it | Run `agent-ex skill status` to see which hosts are not linked, then `agent-ex skill install --agent <host>`. |
 
 ## Documentation
 

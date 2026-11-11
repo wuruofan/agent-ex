@@ -6,6 +6,29 @@
 > ⚠️ **0.3.2 从未发布**：它只存在于 git（`chore(release): 0.3.2`），npm 上最高曾停留在 0.3.1。
 > 0.4.0 包含了 0.3.2 的全部内容，并新增了用户可见子命令 ⇒ 按 semver 走 minor，直接发 0.4.0。
 
+## 未发布（Unreleased）
+
+**dispatch skill 的宿主表扩容 + `--agent` 选宿主。**
+
+- **宿主表从 5 家扩到 17 家**（一线常用）：Claude Code / Cursor / Windsurf / Trae / Trae CN /
+  GitHub Copilot / Gemini CLI / OpenCode / Droid / Amp / Qwen Code / MiniMax Code / CodeBuddy /
+  WorkBuddy，外加直读共享目录的 Codex / Cline / Zed。
+  目录与「在场判据」对着 `npx skills`（vercel-labs/skills）的宿主表逐条核过，不抄它那 58 家。
+- **`--agent <名字>`**：只装 / 只卸你点名的宿主（id 与别名都认，`'*'` = 全部需要建链的宿主）。
+  与 `--target <目录>` 并存但语义不同：`--target` 点名的是**目录**（加法），
+  `--agent` 点名的是**宿主**（选法——给了就只装这些）。
+- **在场判据从「skills 目录存在」改成「宿主配置根目录存在」**：skills 目录常常是我们自己建出来的，
+  拿它当判据 ⇒ 装过一次就永远在场，没装过的宿主反而被漏掉。
+  且**我们自己建出来的配置根不算在场**（给没装的宿主建链会连带建出 `~/.cursor` 这种目录，
+  否则它从此永远"在场"、普通 install 也会去链它）。
+- **`status` 里「已经有条目」的宿主一定列出来**：amp 的链建在 `~/.config/agents/skills`，
+  而它的配置根 `~/.config/amp` 可能压根不存在 ⇒ 按"在场"过滤会让这条链彻底看不见。
+- **Codex / Cline / Zed 永不建链**：它们读的就是 `~/.agents/skills`，建链等于链到 canonical 自己，
+  卸载时还会把 canonical 当成宿主链删掉。
+- **修掉一个误报**：开发者路线下 canonical 是软链 ⇒ 直读共享目录的宿主会被误报成「链到别处」。
+- `status` 按「本机装了 / 已经有条目 / 没装」分组输出，十几家宿主不再刷屏。
+- 认不出来的 `--agent` 名字直接报错，**磁盘上一个字节都不写**。
+
 ## 0.4.0（2026-11-11）
 
 **dispatch skill 随 npm 包分发 + 三个新子命令。**

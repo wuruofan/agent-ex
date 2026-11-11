@@ -188,29 +188,55 @@ WorkBuddy 侧永远没有链。⇒ canonical 路径**固定**为 `~/.agents/skil
 ```
 agent-ex skill install [options]
   --target <dir>   额外宿主目录（可重复）：不经询问直接建链
+  --agent <name>   只装这家宿主（可重复）：宿主 id 或别名，'*' = 全部需要建链的宿主
   --source <dir>   skill 源目录（默认：本模块内置的那份）
   --link           开发者路线：canonical 用软链而不是拷贝
-  --yes            跳过所有询问（默认不链的宿主仍需 --target 显式指定）
+  --yes            跳过所有询问
   -h, --help
 
 agent-ex skill remove [options]
   --target <dir>   只移除指定目标（默认：移除所有我们能认出来的）
+  --agent <name>   只移除这家宿主的链接（canonical 留着）
   --yes            不询问
 
 agent-ex skill status [--source <dir>]
-  只读，无参数（--target 不接受：status 只报本机状态，没有"额外目标"可言）
+  只读，无参数（--target / --agent 不接受：status 只报本机状态，没有"额外目标"可言）
 ```
 
 退出码沿用现有 CLI 约定：**0** 成功 / **1** 有失败 / **2** 用法错误。
 
-补充三条（2026-11-10 代码评审后定）：
+⚠️ 两类"错"要分清（2026-11-11 复核 P3-2）：
+- **参数用法**错（`--agent` 缺值、给 `status` 传 `--agent`）⇒ **2**；
+- **取值**错（宿主名不认识、`--target` 指到 canonical 本身）⇒ **1**（与 `--target` 的老行为一致）。
+
+补充两条（2026-11-10 代码评审后定；2026-11-11 删掉"默认不链的宿主"那条，见下）：
 
 - **非交互环境默认拒绝写操作**：不是 TTY 且没给 `--yes` ⇒ 写操作**在动手之前**就退出（码 2）。
   之前的顺序是"先写 canonical，再在提问那一步抛错"⇒ 已经在用户磁盘上留了半份安装。
-- **`--yes` 也不给默认不链的宿主建链**：`--yes` 的语义是"所有问题都答 yes"，
-  不是"所有宿主都链上"。codex / opencode 这类默认不链的宿主仍需 `--target` 显式指定。
 - **"还有东西留在原地" ⇒ 退出码非 0**：卸载的目的就是让东西消失，
   实体目录 / 外来目录删不掉时不能报 0（会让人以为已经干净了）。
+
+⚠️ **`--yes` 的语义是"所有问题都答 yes"，不是"所有宿主都链上"**（2026-11-10 评审 P2-14）。
+宿主是**探测**出来的：没装在本机的宿主不会被建链。要强行给某一家建链，用 `--agent <name>`。
+
+### 4.1.1 `--agent`（2026-11-11 增补）
+
+| 取值 | 含义 |
+| :--- | :--- |
+| 宿主 id | `claude` / `cursor` / `windsurf` / `trae` / `trae-cn` / `copilot` / `gemini` / `opencode` / `droid` / `amp` / `qwen` / `minimax` / `codebuddy` / `workbuddy` / `codex` / `cline` / `zed` |
+| 别名 | `claude-code` / `github-copilot` / `gemini-cli` / `qwen-code` / `minimax-code` / `factory`（大小写不敏感） |
+| `*` | 全部**需要建链**的宿主（直读共享目录的那几家除外，见 §4.4） |
+
+- **是"选"不是"加"**：给了 `--agent` ⇒ **只**装点名的那些，没点名的宿主一个都不碰。
+  ⚠️ 为什么不是加法语义：宿主是自动探测的，加法下 `--agent cursor` 会顺手把本机装着的
+  Claude Code 也链上，而用户没法说"我只要 Cursor"。
+  `--target` 才是加法（它点名的是目录，没有自动探测这回事）。
+- **点名 = 显式**：直接建链，不问；也不看"这个宿主在不在本机"（探测漏掉的可以点名补上）。
+- **认不出来的名字 ⇒ 报错，一个字节都不写**（名字错了一半份安装比报错更糟）。
+- **`'*'` 不给自动桥接的宿主建链**（WorkBuddy 自己会桥接 ⇒ 多余的链只是噪音）；
+  **点名** `--agent workbuddy` 时才建（以用户为准）。
+- `remove --agent X` = **宿主过滤器**：只删 X 的链接，canonical 与别的宿主留着。
+  `--agent '*'` 也只清宿主链（canonical 是另一回事，`agent-ex skill remove` 才连它一起删）。
 
 ### 4.2 canonical 的状态机
 
@@ -320,7 +346,39 @@ canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖�
 
 ### 4.4 宿主链接的三种情形
 
-对每个探测到的宿主目录：
+**先分两类宿主（2026-11-11 改）**：
+
+| 类 | 判据 | 动作 |
+| :--- | :--- | :--- |
+| **需要建链** | 宿主读自己的 skills 目录 | 在它的目录里建一条指向 canonical 的软链 |
+| **直读共享目录**（`readsCanonical`） | 宿主读的**就是** `~/.agents/skills` | **永远不建链**——建链等于链到 canonical 自己；卸载时还会把 canonical 当宿主链删掉 |
+
+直读共享目录的：codex / cline / zed（上游 `npx skills` 的宿主表里，
+它们的 global skills 路径就是 `~/.agents/skills`，且没有 `globalReadsCanonical: false`）。
+
+⚠️ **与上游的差别（刻意）**：上游 `npx skills` 在「一个 agent 都没探测到」时会**兜底给全部 agent 都装**
+（`nonInteractiveTargetAgents()`：`if (installed.length === 0) return Object.keys(agents)`）。
+我们**不做**这个兜底 —— 那会在一台没装任何 agent 的机器上凭空建 13 个目录。
+要全链请显式 `--agent '*'`。（2026-11-11 决定）
+
+**"这个宿主在不在本机"的判据 = 它的配置根目录存在**（`~/.claude`、`~/.config/opencode` …），
+**不是**它的 skills 目录——skills 目录常常是我们自己建出来的，
+拿它当判据 ⇒ 装过一次就永远"在场"，没装过的宿主反而被漏掉。
+少数宿主的 skills 目录不是它的配置根（amp 的 skills 在 `~/.config/agents/skills`，
+配置在 `~/.config/amp`）⇒ 宿主表里用 `configRelDir` 显式写。
+
+⚠️ **"我们自己建出来的目录"不算在场**（2026-11-11 复核 P2-2）：
+配置根往往**就是** skills 目录的父目录（`~/.claude` ⊃ `~/.claude/skills`），
+给一个没装的宿主建链会连带建出那个配置根 ⇒ 它从此永远"在场"，
+普通 `install` 也会去链它、`status` 也会把它列进"本机装了"。
+⇒ 配置根里**只有我们自己建的那点东西**（skills 目录 + 我们那条链）时，判为"不在场"。
+（amp / codex / cline / zed 的 skills 目录不在配置根里面 ⇒ 我们没碰过它们的配置根，不受影响。）
+
+⚠️ **但"已经有条目"的宿主照旧要列出来**：`status` 只详列「本机装了」**或**「已经有条目」的宿主——
+amp 的链建在 `~/.config/agents/skills`，而它的配置根 `~/.config/amp` 可能压根不存在，
+按"在场"过滤会让这条链**在 status 里彻底看不见**。
+
+**对每个"需要建链"且在本机的宿主**：
 
 - 该宿主**已有指向 canonical 的链** → `already linked`
 - 该宿主**已有一条指向别处的链**（本机的 workbuddy / trae 就是这样）
@@ -330,9 +388,7 @@ canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖�
 - 该宿主**没有链**：
   - 若探测到该宿主有自动桥接机制（当前只发现 WorkBuddy 的 `~/.workbuddy/hooks/sync-agents-skills.sh`）
     → 提示"它会自动桥接，不用手工链"，**不建链**
-  - 若该宿主是**默认不链**的（codex / opencode：未验证这两个宿主会读自己的 skills 目录，
-    且 codex 直接读共享目录 `~/.agents/skills`，本来就不需要链）
-    → 提示"默认不链，需要就 `--target` 指定"，**不建链**
+    （⚠️ 除非用户**显式点名**了它 `--agent workbuddy` ⇒ 以用户为准）
   - 否则 → 问"要不要链到它？"
 
 ⇒ 用户提的"装完提示是否链接到 workbuddy"落在这里：**有 hook 的机器上，若已有链则提示重指、
@@ -341,10 +397,13 @@ canonical = `~/.agents/skills/agent-ex-dispatch`（**固定**，不开放覆盖�
 ⚠️ **canonical 不是"一份可用的安装"时，一个宿主链都不建**：canonical 仍指向别处
 （用户拒绝了重指）或写失败了 ⇒ 宿主链过去只会链到一个不是 bundled skill 的目录上。
 
-⚠️ **"默认不链"只管"没有条目"的情形，不管"已经有一条旧链"**（2026-11-10 复审 P1-1）：
-codex / opencode 目录里若已有一条指向别处的 `agent-ex-dispatch` 链，那条链**照样要重指**到
+⚠️ **"不建链"只管"没有条目"的情形，不管"已经有一条旧链"**（2026-11-10 复审 P1-1）：
+宿主目录里若已有一条指向别处的 `agent-ex-dispatch` 链，那条链**照样要重指**到
 canonical —— 自动桥接机制从不接管已存在的条目，放着不管就是坏状态；
 而且 `doctor` 会把它报成告警，若 `install` 修不了，那个告警就永远修不掉。
+
+⚠️ **直读共享目录的宿主要从"链到别处"的告警里排除**：它们那条"链"就是 canonical 自己，
+开发者路线下 canonical 是指向仓库的软链 ⇒ 目标不等于 canonical ⇒ 会被误报成"链到别处"。
 
 ### 4.5 remove 的规则
 
@@ -357,6 +416,10 @@ canonical —— 自动桥接机制从不接管已存在的条目，放着不管
     否则"从开发者路线切回用户路线"之后永远卸不干净（§2.4.3 约束 B）。
     唯一的例外是它指向 canonical 本身时，删 canonical 与删链接要**按顺序**做，别把 canonical 删成断链。
   - 是**实体目录** → **拒绝删**，提示用户手工处理（分不清是用户自己的还是被改过的）
+- ⚠️ **直读共享目录的宿主（codex / cline / zed）必须排除**（2026-11-11 改）：
+  它们的"条目"就是 canonical 自己，当成宿主链删掉 ⇒ 卸载把 canonical 删了，
+  却报告成"删了几条宿主链"。
+- `--target <dir>` / `--agent <name>` ⇒ **只**清那些地方，canonical 留着（§4.1.1）。
 - `ln` 陷阱（`README.md:150-151`）：`ln -s` 对已存在的目录目标不报错，会把软链塞进目录里。
   ⇒ 一律用 `fs.symlinkSync` + 前置 `lstat`，**绝不**用 shell `ln`。
 
@@ -377,14 +440,19 @@ canonical —— 自动桥接机制从不接管已存在的条目，放着不管
 Skill: agent-ex-dispatch
   bundled   /usr/local/lib/node_modules/agent-ex-mcp/skills/agent-ex-dispatch  (v0.3.2, sha a1b2c3d4e5f6)
   canonical ~/.agents/skills/agent-ex-dispatch  [copy v0.3.1]  UPDATE AVAILABLE (0.3.1 -> 0.3.2)
-  hosts
-    ok   ~/.claude/skills/agent-ex-dispatch      -> ~/.agents/skills/agent-ex-dispatch
-    ok   ~/.workbuddy/skills/agent-ex-dispatch   -> ~/.agents/skills/agent-ex-dispatch
-    --   ~/.trae-cn/skills/agent-ex-dispatch      (not linked)
-    !    ~/.codex/skills/agent-ex-dispatch        -> /somewhere/else  (not the canonical copy)
+Hosts:
+  ok   Claude Code  ~/.claude/skills/agent-ex-dispatch  -> ~/.agents/skills/agent-ex-dispatch
+  ok   WorkBuddy    ~/.workbuddy/skills/agent-ex-dispatch  -> ~/.agents/skills/agent-ex-dispatch
+  ·    Claude...    ~/.trae-cn/skills/agent-ex-dispatch  not linked
+  !    Cursor       ~/.cursor/skills/agent-ex-dispatch  -> /somewhere/else  (not the canonical copy)
+  ·    Codex        reads ~/.agents/skills — no link needed
+  not present on this machine: Amp, CodeBuddy, Droid (Factory), Gemini CLI, …
 ```
 
 ⚠️ **链到别处 / 断掉的链不能标成绿勾**（实现只打印 sha，不打印体积）。
+
+⚠️ **宿主表有十几家，全列出来是噪音**（2026-11-11 改）⇒ 只详列**本机装了**的宿主，
+其余一行带过（"not present on this machine: …"）。
 
 **过期判定**（读 marker，不额外记状态）：
 - canonical 是软链 → 永远不过期（指向源，源变了自动跟随）
@@ -427,15 +495,28 @@ Skill: agent-ex-dispatch
 
 ```ts
 export interface SkillHost {
-  id: string;           // "agents" | "claude" | "workbuddy" | "trae-cn" | ...
+  id: string;           // "claude" | "cursor" | "codex" | "workbuddy" | ...
   label: string;        // 人类可读名
-  dir: string;          // 用户级 skills 目录（绝对路径）
+  relDir: string;       // 用户级 skills 目录，相对用户 home
+  configRelDir?: string;// "在场"判据目录（缺省 = dirname(relDir)）
+  aliases?: readonly string[];   // --agent 的其它写法
   /** 该宿主是否自带"从 ~/.agents/skills 自动桥接"的机制（有就别手工链）。 */
-  autoBridge?: (home: string) => boolean;
+  autoBridge?: (userHome: string) => boolean;
+  /** 该宿主是否直接读共享目录 ~/.agents/skills（是 ⇒ 永远不建链）。 */
+  readsCanonical?: boolean;
 }
 ```
 
 宿主表是**数据**，不是 if-else 分支——加一家宿主只加一行。
+
+**表里的每个值都要有出处**（2026-11-11）：目录与"在场"判据对着
+`npx skills`（vercel-labs/skills）的宿主表逐条核过——它的 `globalSkillsDir` = 我们的 `relDir`，
+它的 `detectInstalled` = 我们的 `configRelDir`。我们**不抄它那 58 家**
+（维护债 + 漂移债 + 违反 AGENTS.md「同一条事实只写一处」），只收一线常用的一批。
+
+⚠️ **只取上游的 home 侧信号**：上游还看 macOS 的 app bundle（`/Applications/MiniMax Code.app`）、
+系统级目录（`/etc/codex`）、项目级目录（`cwd/.codebuddy`）——
+那些不是"用户 home 里的宿主目录"，我们不抄（判定漏掉的用 `--agent <名字>` 补）。
 
 ## 6. init 收尾信息精简（D7）
 
