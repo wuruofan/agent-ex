@@ -13,21 +13,71 @@
 
 | 项 | 状态 |
 | :--- | :--- |
-| 0.4.0 内容 | 🕐 本次发布：① **原 0.3.2 的全部内容**（模型存活预检、`profiles.<name>.path_dirs`、`init` 自动探测 node/npm/bun/git、`wait` 报告原子写、三处 flake 修复）② **dispatch skill 随 npm 包分发**（`skills/agent-ex-dispatch` 进 `files`）③ **新子命令** `agent-ex skill install\|remove\|status` ④ `init` 收尾精简（39 → 24 行）⑤ 四轮独立评审的 P1/P2 全部修完（含原子替换、自链拦截、断链处理） |
+| 0.4.0 内容 | 🕐 本次发布：① **原 0.3.2 的全部内容**（模型存活预检、`profiles.<name>.path_dirs`、`init` 自动探测 node/npm/bun/git、`wait` 报告原子写、三处 flake 修复）② **dispatch skill 随 npm 包分发**（`skills/agent-ex-dispatch` 进 `files`）③ **新子命令** `agent-ex skill install\|remove\|status` ④ `init` 收尾精简（39 → 24 行）⑤ 四轮独立评审的 P1/P2 全部修完（含原子替换、自链拦截、断链处理）⑥ **README 改造**：npm 页面显示的 README 改成精简英文版（755 → 278 行），中文细节下沉 `docs/user-guide/`，版本历史移到 `CHANGELOG.md` |
 | 0.4.0 版本号 | ✅ `package.json` / `package-lock.json` = `0.4.0`（`npm version 0.4.0 --no-git-tag-version`） |
-| 0.4.0 待办 | ⬜ `chore(release): 0.4.0` → `v0.4.0` tag → build+test → pack → 干净目录验证 → publish → 上线核验 → 装回冒烟 |
-| 代码提交 | ✅ 15 个提交已 push 到 `origin/main`（`feat/skill-distribution` 合并进来） |
+| 0.4.0 待办 | ✅ 全部完成（见下方「0.4.0 执行记录」） |
+| 代码提交 | ✅ 已 push 到 `origin/main`（`feat/skill-distribution` 合并进来） |
 | `npm run typecheck` / `npm run build` | ✅ |
-| `npm test` | ⬜ 0.4.0 前重跑 |
-| 打包干跑 | ⬜ 0.4.0 前重跑 |
-| npm 认证 | ✅ `npm whoami` → `demonsimon`；publish 仍需一次网页 2FA（见下方执行记录） |
-| npm publish | ⬜ |
-| 从 registry 装回 | ⬜ |
+| `npm test` | ✅ 0.4.0 前重跑：30 files / 515 passed |
+| 打包干跑 | ✅ `npm pack` = 212,917 B / 80 files（README 精简后比初版 225,620 B 少 12.7 KB） |
+| npm 认证 | ✅ `npm whoami` → `demonsimon`（`npm login` 网页 2FA 通过，token 写入 `~/.npmrc`） |
+| npm publish | ✅ `PUT 202` → `+ agent-ex-mcp@0.4.0`；registry `latest=0.4.0`，`dist.shasum` = `04fb1cd07ddb50bcb4325c0cde7ffe4da5070347` 与本地 tgz 一致 |
+| 从 registry 装回 | ✅ 显式 `--registry https://registry.npmjs.org` 装回：版本 `0.4.0`、`--help` 子命令齐全、MCP 6/6、skill 装→查→卸全通 |
+| `v0.4.0` tag | ✅ `96cb802`（**已从 `b73735e` 移到 `53f0a3f`**，让 tag 与线上包严格对应——README 改造发生在 `b73735e` 之后，不移就会对不上） |
+| 0.4.0 README | ✅ 英文精简版 278 行；`docs/README.zh-CN.md` 中文版 261 行；`docs/user-guide/` 4 篇（configuration / notifications / state-machine / init）；`CHANGELOG.md` 93 行 |
 | commit B（skill 迁移） | ✅ publish 之后完成：删旧脚本 / 去 `vitest.config.ts` 的 exclude / `SKILL.md` 加 `agent-ex >= 0.3.0` 门槛与版本探针 / `npm test` 26 files 359 passed / 已 push（见 ⑨） |
 | 0.3.1 提交 / tag | ✅ `415ff31`（文档 + 测试对齐）、`9e08490 chore(release): 0.3.1` 已 push，`v0.3.1` tag 已推送，`build-meta` = `v0.3.1 9e08490` |
 | 0.3.1 构建 / 装包验证 | ✅ `typecheck` / `build` / `npm test` 26 files 368 passed 4 skipped；干净目录装 `agent-ex-mcp-0.3.1.tgz`：`wait --help` exit 0、MCP 6/6，且 status 契约探针全绿（schema 含 `include_finished`/`limit`、`additionalProperties=false`、未知参数被 `.strict()` 拒、`agent_ex_version` = 0.3.1） |
 | 0.3.1 npm publish | ✅ `PUT 401 → GET 200 /-/v1/done → PUT 202 → verbose exit 0 / info ok`；registry `latest=0.3.1`，`dist.shasum` = `708bcab20ba4baa7b932ba44e60a8146e07eca12` 与本地 tgz 一致 |
 | 0.3.1 上线核验 | ✅ 原始 packument `latest=0.3.1`、`dist.shasum` 与本地一致；线上 tgz（带 `?cb=` 绕 CDN 负缓存）`cmp` 逐字节一致；显式指定官方源装回后 `wait --help` exit 0、MCP 6/6、status 契约探针全绿 |
+
+### 0.4.0 执行记录（2026-11-11：README 改造 + skill 分发）
+
+**这一轮多了一件不寻常的事：发版前改了 npm 页面上的 README。**
+
+原 README 是 755 行 / 47.6 KB 的全中文文档，既太长也读不懂（非中文用户）。
+用户要求改短 + 改英文 ⇒ 重写为 278 行 / 15.6 KB 的精简英文版，中文细节下沉到
+`docs/user-guide/`（4 篇）、版本历史移到 `CHANGELOG.md`、中文版 README 放 `docs/README.zh-CN.md`。
+
+**三个必须实测才能确定的事实**（不能靠推测）：
+
+1. **npm 页面上的 README = 仓库根 `README.md`，逐字节相同。**
+   registry packument 顶层有 `readme`（内容）+ `readmeFilename` 两个字段；
+   0.3.1 的 packument `readme` 与 `git show v0.3.1:README.md` **diff 为 0 行**。
+   ⇒ 「改 npm 包 README」就是「改仓库根 README.md」，不存在两份文件。
+2. **npm 选 README 不是按文件名排序，是按项目根的目录顺序。**
+   代码在 `npm/node_modules/@npmcli/package-json/lib/normalize.js:430-457`：
+   glob `{README,README.*}`（**不递归**）⇒ 取第一个匹配 markdown 后缀的文件。
+   实测：`README.md` + `README.en.md` → 选 `README.md`；
+   `README.md` + `README.npm.md` → 选 `README.npm.md`（顺序随文件系统 readdir 走）。
+   `files` 白名单**管不到它**（白名单只含 `README.md` 时它照样去挑 `README.npm.md`）。
+   ⇒ **项目根只能有一个 README 候选**，否则「这台机器显示 A、那台显示 B」。
+   中文版因此放 `docs/`（子目录不在 glob 范围内），这条已写进 `AGENTS.md`。
+3. **registry 的 `readme` 是「字符数」，本地 `wc -c` 是「字节数」。**
+   本次 15459 vs 15616 的差 = 中文多字节，**不是被剥内容**（diff 0 行）。
+
+**连带改动**（漏了就会红/会坑）：
+
+- `tests/config.test.ts` 钉住 README 必须含 `"keyword": "agent-ex"` ⇒ 新 README 的 config 示例保留该字面量。
+- `skills/agent-ex-dispatch/SKILL.md` 原先让 worker「从 `package.json` / `AGENTS.md` / `README.md` 取构建/测试命令」——
+  新 README 已无构建命令 ⇒ 改为只指 `package.json` / `AGENTS.md`，并注明「README 是用户文档，别在那儿找」。
+- `AGENTS.md` 文档分工表扩到 7 行；连带规则表补「README ↔ 中文版 ↔ user-guide」同步项。
+
+**tag 被移过一次**：`v0.4.0` 原本指向 `b73735e`（README 改造之前），
+而线上包是从 `53f0a3f` 打的 ⇒ 不移就对不上。经用户确认后 force-push 移到 `53f0a3f`。
+
+**已知差异（不影响可用，npm 包不可变所以只能记录）**：包内 `dist/build-meta.json` 的
+`gitSha` = `cf96896`（构建时刻的 HEAD），而 tag 指向 `53f0a3f`——
+两者之间只差两个 docs commit（`adecb7d`、`53f0a3f`），**`src/` 未变** ⇒ 构建产物等价。
+`agent_ex_version` 因此会报 `cf96896`。同 `v0.2.0` tag 当年的情况。
+
+**实际执行**：`npm login`（网页 2FA）→ `npm publish … --ignore-scripts`
+（跳过 `prepublishOnly` 的 build+test，产物就是已验过的那份 tgz）→
+EOTP 再过一次网页认证 → `PUT 202` + `+ agent-ex-mcp@0.4.0`。
+上线核验：原始 packument `versions` 含 `0.4.0` / `latest=0.4.0`、
+`dist.shasum` 与本地一致、线上 tgz（带 `?cb=` 绕 CDN 负缓存）与本地 `cmp` **逐字节一致**、
+线上 readme 与包内 README.md **逐字节一致**。装回冒烟：版本 `0.4.0`、`--help` 子命令齐全、
+MCP 6/6、skill 装→查→卸全通。
 
 ### 0.3.1 执行记录（2026-11-06：补发 `include_finished` 所在版本）
 
