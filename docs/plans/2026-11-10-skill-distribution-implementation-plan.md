@@ -4,6 +4,12 @@
 设计文档：`docs/designs/2026-11-10-skill-distribution.md`（下称 **design**）
 先例参照：`docs/plans/2026-10-30-wait-cli-implementation-plan.md`（同构：「skill 能力 → CLI 子命令」）
 
+> ⚠️ **本文是 2026-11-10 的实施计划快照，保留当时原貌。**
+> 宿主表与安装语义在 **2026-11-11 已改**（宿主表 5 → 17 家、新增 `--agent <名字>`、
+> 「在场」判据改成宿主配置根目录、直读共享目录的 codex / cline / zed 永不建链）：
+> **当前真相看 design §4.1 / §4.1.1 / §4.4 与 `CHANGELOG.md`**，
+> 本文里那张宿主表和"默认不链"的说法**已经过时**，别照着做。
+
 ---
 
 ## 已定死的决策（design 已定，plan 不得再改）

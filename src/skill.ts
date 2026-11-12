@@ -1312,8 +1312,8 @@ export async function installSkill(opts: InstallOptions): Promise<SkillActionRes
       }
       if (st.kind === "link") {
         // 已有一条指向别处的链 —— 自动桥接机制**不会**接管它，必须主动重指。
-        // ⚠️ 这条对"默认不链"的宿主（codex / opencode）同样成立：
-        // 「默认不链」限定的是**没有条目**时要不要新建，不是"放着一条旧链不管"
+        // ⚠️ 这条对"不建链"的宿主（直读共享目录的 codex / cline / zed）同样成立：
+        // "不建链"限定的是**没有条目**时要不要新建，不是"放着一条旧链不管"
         // （spec §4.4）。放着不管 ⇒ status/doctor 永远告警，而告警给的修法还修不了。
         const go = isExplicit
           ? true
