@@ -4,7 +4,7 @@
 > 步骤依据 [`docs/plans/2026-10-30-wait-cli-implementation-plan.md`](2026-10-30-wait-cli-implementation-plan.md) 的 Task 5 / Task 6。
 > **本文只是一份执行清单**，具体命令的权威版本在 `AGENTS.md` 的「发布（npm）」一节。
 
-## 当前状态（2026-11-05 发布 0.3.0；2026-11-06 已发布 0.3.1；**0.4.0 发布中**）
+## 当前状态（2026-11-05 发布 0.3.0；2026-11-06 已发布 0.3.1；2026-11-11 已发布 0.4.0；**2026-11-12 已发布 0.5.0**）
 
 > ⚠️ **0.3.2 这个版本号被 0.4.0 取代了**：0.3.2 的内容已经在 `main` 上，但**从未发布到 npm**
 > （npm 上最高仍是 0.3.1）。而本轮又加了**新的用户可见子命令**
@@ -286,6 +286,35 @@ agent-ex wait --help                         # 应 exit 0
 
 > ⚠️ `ln -s` 对**已存在的目录**目标不报错，会把软链塞进目录里（看着成功、实际没生效）。
 > 链之前先 `ls -la ~/.workbuddy/skills/`。
+
+### 0.5.0 执行记录（2026-11-12：dispatch skill 宿主表扩容 + `--agent`）
+
+**这一轮把 dispatch skill 的宿主表从 5 家扩到 17 家，并加了 `--agent <名字>` 选宿主。**
+
+| 项 | 结果 |
+| :--- | :--- |
+| 版本号 | `0.5.0`（**不是 0.4.1**）。按 semver：新增用户可见功能（新选项 + 12 家新宿主）⇒ minor；与 0.4.0 的先例一致（「新增了用户可见子命令 ⇒ 走 minor」） |
+| 内容 | 宿主表 5 → 17；`--agent`（id/别名/`'*'`）；在场判据改成「宿主配置根目录存在」且**我们自己建的不算**；`status` 分组输出；修掉直读共享目录宿主的误报 |
+| 独立复核 | verifier：17/17 与上游 `npx skills` 宿主表一致、**无 P0/P1**；2 个 P2 + 3 个 P3 已修并补回归测试（+19 用例 → 534 passed） |
+| `npm run typecheck` / `npm test` | ✅ 30 files / 534 passed |
+| 打包 | `npm pack` = 218,446 B / 80 files / sha1 `de0f32e03285f6f5fec3d4d0c5725896ff730364` |
+| 干净目录装包 | ✅ 版本 0.5.0、子命令齐全、MCP 6/6、`skill --agent` 全链路（install → status → remove）跑通 |
+| npm 认证 | ⚠️ **`~/.npmrc` 里 0.4.0 留下的 40 字符 token 已失效**（curl 与 npm 都是 401）⇒ 重跑 `npm login --auth-type=web --registry https://registry.npmjs.org` 重新拿 token |
+| npm publish | ✅ EOTP 网页认证一次 → `PUT 202` → `+ agent-ex-mcp@0.5.0` |
+| 上线核验 | ✅ registry `versions` 含 0.5.0 / `latest=0.5.0`；`dist.shasum` 与本地 tgz 一致；线上 tgz 与本地 `cmp` **逐字节一致**；线上 readme 与仓库根 README.md **逐字符相同**（16,251 字符）；从 registry 装回冒烟全绿 |
+| `v0.5.0` tag | ✅ `dd331e4`（= `chore(release): 0.5.0`，**与包内 build-meta 的 gitSha 严格一致**：提交后再重建再打包） |
+| 全局 CLI | ✅ `agent-ex-mcp@0.5.0`（build-meta gitSha `dd331e4`） |
+
+**这次踩到的两个坑（都记下来）**：
+
+1. **旧 token 会悄悄过期**：0.4.0 发布用的 40 字符 token 到 0.5.0 时已经 401（不是包不存在、也不是权限范围问题）。
+   ⇒ 每次发版先 `npm whoami --registry https://registry.npmjs.org` 探活；401 就重登。
+2. **`npm login` / `npm publish` 的 EOTP 流程需要伪终端 + 保活 stdin**：
+   - 非 TTY 下 npm 会把 authId 打码成 `***`，拿不到链接；
+   - stdin 一断，npm 的 `/-/v1/done` 轮询循环就被掐断 ⇒ **静默失败**（日志里既没有成功标记也没有错误标记）；
+   - `script -q /dev/null npm publish …` + `( sleep N; printf '\n'; sleep 1800 )` 的组合能一次跑通；
+   - ⚠️ **ENTER 要落在「URL 已打印」之后**：npm 先花十几秒取登录页，早了会把 ENTER 消耗在取 URL 那一步，
+     后面就卡在「Press ENTER to open in the browser」不动了 ⇒ 把 `sleep` 设成 60~75 秒。
 
 ## 出错了怎么查
 
