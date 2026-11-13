@@ -346,7 +346,11 @@ export function setProfileValue(
   if (key === "path_dirs") {
     const raw = rawValue.trim();
     if (raw === "") {
-      delete p.path_dirs;
+      // 写 [] 而不是删键——两者是**两种状态**，不能合并：
+      //   []        = 用户明确表态「worker 只要 bin 目录 + 系统目录」，doctor 不再提示补全；
+      //   键不存在  = 从未配过（旧版本升级上来的形状），doctor 会在探测到缺口时提示。
+      // 删键的话这两态在文件里长得一模一样，doctor 只能对清空过的用户反复唠叨。
+      p.path_dirs = [];
       writeConfig(home, c);
       return { profile: profileName, key, value: "" };
     }

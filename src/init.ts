@@ -11,7 +11,6 @@
  *   - custom：只粘贴（无标准变量名可检测）；占位符变量名从 profile 名派生（apiKeyVarFor）。
  *   - 检测到/粘贴到的值写入 .env（幂等）；config.json 始终是 {env:VAR}。
  */
-import { execSync } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { homedir } from "node:os";
@@ -24,19 +23,14 @@ import { BUILTIN_PROFILES, ZEN_FREE_PROFILE_NAME } from "./config-cmd.js";
 import { diffConfigs, renderChangeWarning } from "./init-changes.js";
 import { ansi } from "./ansi.js";
 import { MARK } from "./marks.js";
+// 工具链探测与 worker PATH 是同一件事的两面（agent-env.ts 是唯一真相源），
+// doctor 也消费它 —— 不在本文件里复制第二份。
+import { detectToolchainDirs, which } from "./agent-env.js";
 
 type RL = ReturnType<typeof createInterface>;
 
 /** 本工具支持的 agent CLI（名字 = config 里的 executor 名）。 */
 export const AGENT_CLIS = ["claude", "opencode"] as const;
-
-function which(name: string): string | null {
-  try {
-    return execSync(`command -v ${name}`, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim() || null;
-  } catch {
-    return null;
-  }
-}
 
 export interface DetectedCli {
   name: string;
@@ -56,39 +50,6 @@ export function detectAgentClis(whichFn: (name: string) => string | null = which
     if (bin) out.push({ name, bin });
   }
   return out;
-}
-
-/** 值得补进 worker PATH 的工具链命令（各人装法不同：nvm/fnm/volta/asdf/mise/homebrew/系统包）。 */
-export const TOOLCHAIN_BINS = ["node", "npm", "bun", "git"] as const;
-
-/** worker PATH 里本来就有的系统目录 —— 落在这里没有增量，不该写进 path_dirs。 */
-const BASE_WORKER_PATH_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
-
-/**
- * 探测工具链所在目录，给 worker 的 PATH 补料。
- *
- * 为什么在 init 时探测：init 跑在用户的交互式终端里，它的 PATH 就是用户真正在用的
- * 工具链（nvm/fnm/volta/homebrew …）；而 worker 的 PATH 由 buildAgentEnv 完全自建，
- * 不继承 shell。二者的落差正是 node/npm/bun 在 worker 里 command not found 的根因。
- *
- * `whichFn` 可注入（与 detectAgentClis 同款理由：测试不能依赖开发机装了什么）。
- */
-export function detectToolchainDirs(whichFn: (name: string) => string | null = which): string[] {
-  const dirs: string[] = [];
-  for (const name of TOOLCHAIN_BINS) {
-    const bin = whichFn(name);
-    // 没装 / 没在 PATH：跳过，不报错、不占位
-    if (!bin) continue;
-    // `command -v` 在含相对 PATH 项时可能返回相对路径 —— 不能写进 worker PATH
-    if (!bin.startsWith("/")) continue;
-    const dir = dirname(bin);
-    // 基础 PATH 已覆盖 ⇒ 写进去是冗余
-    if (BASE_WORKER_PATH_DIRS.includes(dir)) continue;
-    // 去重：nvm 下 node 与 npm 通常同目录，只应出现一次
-    if (dirs.includes(dir)) continue;
-    dirs.push(dir);
-  }
-  return dirs;
 }
 
 /**

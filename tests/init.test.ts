@@ -10,7 +10,6 @@ import {
   DEFAULT_CLAUDE_ENV,
   DEFAULT_EXTRA_FLAGS,
   detectAgentClis,
-  detectToolchainDirs,
   mcpServerSnippet,
   missingTokenKey,
   nextSteps,
@@ -21,6 +20,8 @@ import {
   resolveServerEntry,
   runInit,
 } from "../src/init.js";
+// 工具链探测已移到 agent-env.ts（worker PATH 的唯一真相源，init 与 doctor 共用）
+import { detectToolchainDirs } from "../src/agent-env.js";
 import { BUILTIN_PROFILES, createProfile, readConfig } from "../src/config-cmd.js";
 import { BRAND } from "../src/brand.js";
 

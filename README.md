@@ -149,7 +149,7 @@ Inspect with `agent-ex skill status` (read-only), uninstall with `agent-ex skill
 | Command | What it does |
 | :--- | :--- |
 | `agent-ex init` | Interactive onboarding (detects CLIs, writes `config.json` + `.env`). Re-running overwrites `config.json`; it lists the diff and asks first, and backs up the old file. |
-| `agent-ex doctor` | Health check: aggregates the evidence for "does the notification path work" into a verdict + cause + copy-pasteable fix. **Read-only.** |
+| `agent-ex doctor` | Health check: aggregates the evidence for "does the notification path work" into a verdict + cause + copy-pasteable fix. Also flags a **worker PATH gap** (node/npm/bun/git on your shell PATH but not on the worker's) with the exact `profile set ... path_dirs` command to close it. **Read-only.** |
 | `agent-ex doctor --fix` | Auto-fixes *deterministic* defects (empty keyword, stale brand name, a plaintext webhook left in `config.json`). Never touches `dry_run` (that is your preference) nor a custom keyword (that is your bot's UI). |
 | `agent-ex doctor --send` | Additionally sends a self-test card whose body deliberately contains no product name. |
 | `agent-ex config list` | Shows profiles / executors / notify / defaults. |
@@ -227,7 +227,7 @@ The server is stateless — everything lives in `tasks.db`. `restart` does not a
 | :--- | :--- |
 | `executors.<name>.bin` | Where the agent CLI lives — **a bare command name or an absolute path both work**. |
 | `profiles.<name>.env` | Environment for the agent process. `{env:VAR}` placeholders are resolved at task runtime. **Never put `PATH` / `NODE_OPTIONS` / `LD_*` / `DYLD_*` here** — that is the worker's process-loading surface, i.e. arbitrary code execution. |
-| `profiles.<name>.path_dirs` | Extra **absolute** directories appended to the worker's `PATH`. This is the only supported way to extend the worker's PATH. |
+| `profiles.<name>.path_dirs` | Extra **absolute** directories appended to the worker's `PATH`. This is the only supported way to extend the worker's PATH. `"path_dirs": []` means "no extras, deliberately" (doctor stops suggesting dirs); an absent field means "never configured" (doctor suggests them). |
 | `notify.dry_run` | `true` (default) prints the card to stderr instead of sending it. |
 | `notify.keyword` | The keyword appended to every card. Defaults to `agent-ex`; it must match the keyword registered on the bot side. |
 | `defaults.profile` / `defaults.timeout_sec` | Default profile, and the per-round timeout in seconds. |

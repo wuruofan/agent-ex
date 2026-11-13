@@ -6,6 +6,22 @@
 > ⚠️ **0.3.2 从未发布**：它只存在于 git（`chore(release): 0.3.2`），npm 上最高曾停留在 0.3.1。
 > 0.4.0 包含了 0.3.2 的全部内容，并新增了用户可见子命令 ⇒ 按 semver 走 minor，直接发 0.4.0。
 
+## Unreleased
+
+**`doctor` 会指出 worker PATH 的工具链缺口，并给出补全命令。**
+
+- 从旧版本升级上来的 config 没有 `profile.path_dirs`，而 worker 的 PATH 是自建的
+  （`dirname(bin)` → `path_dirs` → 系统目录，不继承 shell）⇒ node/npm/bun/git 要等到
+  任务里第一次调用才以 `command not found` 炸出来。`agent-ex doctor` 现在会探测你 shell 里的
+  这几个命令，把**没被 worker PATH 覆盖**的目录报成 warn，并给出
+  `agent-ex profile set <profile> path_dirs …`（已有目录保留在前）。
+- 判据是**缺口**不是「字段缺失」：目录已被 `dirname(bin)` / `path_dirs` / 系统目录覆盖时不报；
+  `bin` 本身不可用时也不报（病灶在 bin）。doctor 仍然只读，`--fix` 的范围不变。
+- **`profile set <p> path_dirs ""` 由「删掉键」改为「写 `[]`」**。两者从此是两种状态：
+  `[]` = 你明确表态不要额外目录（doctor 不再提示补全），缺席 = 从未配过（doctor 会提示）。
+  删键的话这两种状态在文件里长得一样，doctor 只能对主动清空过的用户反复唠叨。
+- 工具链探测与其依赖的 worker PATH 目录列表移到 `src/agent-env.ts`：`init` 与 `doctor` 共用同一份。
+
 ## 0.5.0（2026-11-12）
 
 **dispatch skill 的宿主表扩容 + `--agent` 选宿主。**

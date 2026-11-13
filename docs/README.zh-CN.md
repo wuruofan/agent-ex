@@ -139,7 +139,7 @@ agent-ex skill install
 | 命令 | 作用 |
 | :--- | :--- |
 | `agent-ex init` | 首次安装向导（探测 CLI、生成 `config.json` + `.env`）。**重跑会重写 `config.json`**；覆盖前逐项列出差异并要求确认，旧文件自动备份。 |
-| `agent-ex doctor` | 体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。**只读**。 |
+| `agent-ex doctor` | 体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。还会指出 **worker PATH 缺口**（node/npm/bun/git 在你的 shell PATH 里、却不在 worker 的 PATH 里）并给出可直接执行的 `profile set ... path_dirs` 补全命令。**只读**。 |
 | `agent-ex doctor --fix` | 自动修**确定性缺陷**（显式空串关键词、改名前的旧产品名、明文 webhook 落在 config.json）。**不动 `dry_run`**（那是你的偏好）；**不动自定义关键词**（机器人登记什么词是用户的界面）。 |
 | `agent-ex doctor --send` | 额外实发一张**正文不含产品名**的自检卡，验证真实投递。 |
 | `agent-ex config list` | 列出 profiles / executors / notify / defaults 现状。 |
@@ -214,7 +214,7 @@ server 是无状态的——状态全在 `tasks.db`。`restart` 不影响在跑�
 | :--- | :--- |
 | `executors.<name>.bin` | agent CLI 的位置——**裸命令名或绝对路径皆可**。 |
 | `profiles.<name>.env` | 传给 agent 子进程的环境变量，`{env:VAR}` 占位符在任务运行时解析。**绝不要在这里写 `PATH` / `NODE_OPTIONS` / `LD_*` / `DYLD_*`**——那是 worker 的进程启动/加载面，等价于任意代码执行。 |
-| `profiles.<name>.path_dirs` | 追加给 worker `PATH` 的**绝对**目录列表。这是扩展 worker PATH 唯一受支持的方式。 |
+| `profiles.<name>.path_dirs` | 追加给 worker `PATH` 的**绝对**目录列表。这是扩展 worker PATH 唯一受支持的方式。`"path_dirs": []` 表示「我明确不要额外目录」（doctor 不再建议）；字段不存在表示「从未配过」（doctor 会建议补全）。 |
 | `notify.dry_run` | `true`（缺省）只把卡片打到 stderr，不真发。 |
 | `notify.keyword` | 追加在卡片末尾的关键词。缺省 `agent-ex`；必须与机器人侧登记的词一致。 |
 | `defaults.profile` / `defaults.timeout_sec` | 默认 profile 与单轮超时秒数。 |

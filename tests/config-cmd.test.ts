@@ -13,6 +13,7 @@ import {
   WRITABLE,
 } from "../src/config-cmd.js";
 import { BRAND } from "../src/brand.js";
+import { validateConfig } from "../src/config.js";
 import { ZEN_FREE_PLACEHOLDER } from "../src/zen-free.js";
 
 let home: string;
@@ -335,10 +336,14 @@ describe("profile set —— 改 profile 的字段（键必须受约束）", () 
     expect(readConfig(home).profiles.default.path_dirs).toEqual(["/a", "/b"]);
   });
 
-  it("path_dirs：空串清空该字段（删掉键，而不是写空数组）", () => {
+  it("path_dirs：空串写成显式 []（不是删键——doctor 靠它区分'已表态'与'从未配过'）", () => {
     seed({ profiles: { default: { executor: "claude", env: {}, path_dirs: ["/a"] } } });
     setProfileValue(home, "default", "path_dirs", "");
-    expect("path_dirs" in readConfig(home).profiles.default).toBe(false);
+    const p = readConfig(home).profiles.default;
+    expect("path_dirs" in p).toBe(true);
+    expect(p.path_dirs).toEqual([]);
+    // [] 必须是合法配置（否则写盘会被 validateConfig 拒绝）
+    expect(() => validateConfig(readConfig(home))).not.toThrow();
   });
 
   it("path_dirs：非绝对路径 / 空片段 / 重复项都拒绝且不写盘", () => {

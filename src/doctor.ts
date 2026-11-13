@@ -29,6 +29,7 @@ import {
 import { buildFeishuCard, sendFeishuCard } from "./notifier.js";
 import { extractModelRef, checkModelLiveness, type RunImpl } from "./model-check.js";
 import { collectSkillIssues } from "./skill.js";
+import { detectToolchainDirs, workerPathDirs } from "./agent-env.js";
 
 export type Severity = "error" | "warn" | "info" | "ok";
 
@@ -301,7 +302,7 @@ export function applyFixes(home: string): FixResult {
   return { applied, skipped, notes };
 }
 
-export async function doctor(opts: { home?: string; userHome?: string; send?: boolean; fetchImpl?: typeof fetch; delays?: number[]; probeImpl?: RunImpl } = {}): Promise<DoctorReport> {
+export async function doctor(opts: { home?: string; userHome?: string; send?: boolean; fetchImpl?: typeof fetch; delays?: number[]; probeImpl?: RunImpl; which?: (name: string) => string | null } = {}): Promise<DoctorReport> {
   /**
    * 体检（只读，不改任何东西）。
    *
@@ -571,6 +572,46 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
         severity: "warn",
         title: `Model liveness for profile "${name}" could not be verified`,
         detail: `Could not list models via "${bin} models ${ref.provider}" (command failed, timed out, or returned nothing). model "${ref.model}" may or may not still exist; dispatch is not blocked.`,
+      });
+    }
+  }
+
+  // ---- 6d. worker PATH 的工具链缺口 ----
+  //
+  // worker 的 PATH 由 buildAgentEnv 自建（dirname(bin) → path_dirs → 系统目录），**不继承 shell**。
+  // 从旧版本升级上来的 config 没有 path_dirs，于是 node/npm/bun/git 全不在 worker 的 PATH 里
+  // —— 任务要到第一次 shell 出去调用它们时才以 "command not found" 的形式炸出来。
+  //
+  // 判据是**缺口**而不是「字段缺失」：缺失但恰好在 dirname(bin) 或系统目录里 ⇒ 没缺口，不报。
+  // 显式 `[]` 是"不要额外目录"的表态，也不报（见循环里的 continue）。只有「键缺失 + 有缺口」
+  // 才提示——那正是旧版本升级上来的形状。
+  //
+  // 探测要起子进程，所以放在这里、不进 collectConfigIssues（那是同步纯函数、零 I/O，所有写盘
+  // 路径都消费它 —— AGENTS.md 硬约束 6）。探测实现与 init 共用 agent-env.ts。
+  const toolchainDirs = detectToolchainDirs(opts.which);
+  if (toolchainDirs.length > 0) {
+    for (const [name, raw] of Object.entries(c.profiles ?? {})) {
+      const p = (raw ?? {}) as { executor?: unknown; path_dirs?: unknown };
+      const executor = typeof p.executor === "string" ? p.executor : "";
+      const bin = c.executors?.[executor]?.bin;
+      // bin 缺失 / 不可执行已经由上面两段报过：再报一次 PATH 缺口只会稀释真正的病灶
+      if (typeof bin !== "string" || bin === "" || resolveBinPath(bin) === null) continue;
+      // 显式 [] = 用户已经表态「这个 profile 的 worker 只要 bin 目录 + 系统目录」，
+      // 是 `profile set path_dirs ""` 写出来的形状。键缺失才是「从未配过」，仍要提示。
+      // 这是唯一可用的信号：手动删键与从未配置在文件里无法区分，所以只能靠"显式空"表态。
+      if (Array.isArray(p.path_dirs) && p.path_dirs.length === 0) continue;
+      const declared = Array.isArray(p.path_dirs)
+        ? p.path_dirs.filter((x): x is string => typeof x === "string")
+        : [];
+      const covered = new Set(workerPathDirs(bin, declared));
+      const missing = toolchainDirs.filter((d) => !covered.has(d));
+      if (missing.length === 0) continue;
+      findings.push({
+        severity: "warn",
+        title: `Profile "${name}" worker PATH is missing the local toolchain`,
+        detail: `Found ${missing.join(", ")} on your shell PATH, but a worker's PATH is dirname(bin) + path_dirs + system dirs only (it does not inherit the shell). Tasks that shell out to node/npm/bun/git fail with "command not found".`,
+        // 命令必须能直接复制执行：已有 path_dirs 保留在前，缺的追加在后（顺序即优先级）
+        fix: `agent-ex profile set ${name} path_dirs ${[...declared, ...missing].join(",")}`,
       });
     }
   }

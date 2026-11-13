@@ -113,11 +113,20 @@ worker 的 `PATH` 由 `buildAgentEnv` 自建：
 
 ```bash
 agent-ex profile set minimax-3 path_dirs /Users/you/.nvm/versions/node/v24.14.0/bin,/Users/you/.bun/bin
-# 清空该字段：
+# 声明「不要额外目录」：写成空数组 []（不是删掉字段）
 agent-ex profile set minimax-3 path_dirs ""
 ```
 
 - 只在**该 profile** 里生效；executor 自己的 bin 目录恒排第一，不会被挤掉。
+- `[]` 与「字段不存在」是**两种状态**，对应的文件形状也不同：
+  - `"path_dirs": []` —— 你明确表态过：worker 只要 bin 目录 + 系统目录。`doctor` 不再提示补全。
+  - 没有 `path_dirs` —— 从未配过（从旧版本升级上来的 config 就是这个形状）。`doctor` 探测到
+    工具链目录没被覆盖时会提示补全。
+  - 两者不能靠删键合并：字段一旦被删掉，文件里再没有任何痕迹能区分「你主动清空」与「从没配过」。
+- **从旧版本升级上来的 config 没有这个字段**：`agent-ex doctor` 会探测你 shell 里的
+  node/npm/bun/git，凡是没被 worker PATH 覆盖的目录都会报成一条 warn，并给出可直接执行的
+  `agent-ex profile set <profile> path_dirs …` 补全命令（已有目录保留在前，缺的追加在后）。
+  doctor 只报不写——写盘会覆盖你手写的配置，而它无法判断那份配置是不是你有意为之。
 - `agent-ex init` 会自动探测本机的 node/npm/bun/git 所在目录并预填该字段（各人的装法不同，不必手抄路径）；
   仍可用 `agent-ex profile set` 手工增删。
 - 每项必须是绝对路径、非空、不重复；不合法时加载/`doctor` 会报出，`profile set` 当场拒绝。
