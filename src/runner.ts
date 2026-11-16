@@ -386,10 +386,18 @@ function finalize(
   if (!ok) { console.error(`terminal transition to ${to} lost race; task state changed elsewhere`); return; }
   const detail = to === "needs_input" ? String(patch.question ?? "") : to === "completed" ? trunc(String(patch.result ?? "")) : String(patch.error ?? "");
   // feishu_webhook_url 支持 {env:VAR} 占位符；dry_run 时不解析（打日志即可），真实发送才解析，
-  // 缺变量时抛错 → notify_failed（任务状态不受影响）。
+  // 缺变量时 resolveEnvPlaceholders 会抛错 ⇒ 这里接住并标 notify_failed（**不能**让它穿出 finalize：
+  // 任务此刻已落终态，异常冒到 main 就是 exit(1) ⇒ notify_failed 标不上、也没有卡发出）。
   const dryRun = cfg.notify.dry_run ?? true;
-  const webhook = dryRun ? cfg.notify.feishu_webhook_url
-    : resolveEnvPlaceholders({ url: cfg.notify.feishu_webhook_url }).url;
+  let webhook: string;
+  try {
+    webhook = dryRun ? cfg.notify.feishu_webhook_url
+      : resolveEnvPlaceholders({ url: cfg.notify.feishu_webhook_url }).url;
+  } catch (e) {
+    console.error("[notifier] webhook resolution failed:", e);
+    try { store.patch(task.id, { notify_failed: true }); } catch { /* best effort */ }
+    return;
+  }
   // 登记进在飞集合：SIGTERM handler / 超时兜底会 process.exit(0)，
   // 不登记 ⇒ 这张终态卡会被退出掐断（回执丢失 ⇒ notify_failed 永远标不上）。
   // isTerminal=true ⇒ 只有它的落地状态决定 notify_failed。
@@ -436,8 +444,17 @@ function pushQuotaWarning(
   q: { status?: number; message: string; attempt?: number },
 ): void {
   const dryRun = cfg.notify.dry_run ?? true;
-  const webhook = dryRun ? cfg.notify.feishu_webhook_url
-    : resolveEnvPlaceholders({ url: cfg.notify.feishu_webhook_url }).url;
+  let webhook: string;
+  try {
+    webhook = dryRun ? cfg.notify.feishu_webhook_url
+      : resolveEnvPlaceholders({ url: cfg.notify.feishu_webhook_url }).url;
+  } catch (e) {
+    // 解析失败只是「这张提示卡发不出去」——**绝不能抛**：它跑在 rl.on("line") 里，
+    // 抛出去就是 uncaughtException ⇒ runner 当场死 ⇒ 任务永远停在 running
+    // （2026-11-15 那类「卡在 running」的另一个成因）。
+    console.error("[quota-warn] webhook resolution failed:", e);
+    return;
+  }
   const parts: string[] = [];
   if (typeof q.status === "number") parts.push(`**状态码**：\`${q.status}\``);
   if (typeof q.attempt === "number") parts.push(`**重试次数**：${q.attempt}`);

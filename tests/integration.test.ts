@@ -370,25 +370,27 @@ suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
   // 2026-11-16 回归：配额告警卡是 fire-and-forget，**不进 pendingNotify**
   // ⇒ SIGTERM（cancel / 宿主拆进程树）时 runner 直接 process.exit(0)，
   // 在飞的飞书请求被掐断 ⇒「这个任务正在配额上要挂了」的早期告警**静默丢失**。
-  // 本地 webhook 收下请求后延迟 1.2s 才响应 ⇒ 卡确定在飞；此时给 runner 发 SIGTERM。
+  // 本地 webhook 收下请求后延迟 2.5s 才响应 ⇒ 卡确定在飞；此时给 runner 发 SIGTERM。
   it("配额告警卡在飞时收到 SIGTERM ⇒ runner 得等它落地再退出，卡不能被掐断", async () => {
     const received: string[] = [];
-    let clientGone = false;   // 客户端提前断开 ⇒ 卡被进程退出掐断
-    let writeError = false;   // 写响应失败 ⇒ 客户端已经不在了
-    let responded = false;    // 响应完整写回
+    let truncated = false;   // 响应写完前连接就断了 ⇒ 进程退出把请求掐了
+    let responded = false;   // 响应完整写回
     const server = createServer((req, res) => {
       let body = "";
       req.on("data", (c) => { body += c; });
       req.on("end", () => {
         received.push(body);
-        req.on("aborted", () => { clientGone = true; });
+        // ⚠️ close/finish 必须在**收到请求时就挂上**：客户端提前断开时，
+        // 'close' 早于响应定时器触发，那时再挂就收不到了。
+        let finished = false;
+        res.on("finish", () => { finished = true; responded = true; });
+        res.on("close", () => { if (!finished) truncated = true; });
+        res.on("error", () => { /* 客户端已断开：写响应失败属预期 */ });
         // 延迟响应 ⇒ 此刻这张卡还在飞
         setTimeout(() => {
-          res.on("error", () => { writeError = true; });
-          res.on("finish", () => { responded = true; });
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ code: 0, msg: "ok" }));
-        }, 1200);
+        }, 2500);
       });
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -422,17 +424,17 @@ suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
 
       // 模拟宿主拆进程树：给 runner 发 SIGTERM
       process.kill(pid, "SIGTERM");
-      // 卡还没落地（webhook 要 1.2s 才回）⇒ runner 不能此刻就退出
+      // 卡还没落地（webhook 要 2.5s 才回）⇒ runner 不能此刻就退出
       await new Promise((res) => setTimeout(res, 700));
       expect(alive()).toBe(true);
 
       // 最终它得退出（SIGTERM 被处理了），而且退出前卡已送达
-      const exited = Date.now() + 10_000;
+      const exited = Date.now() + 15_000;
       while (Date.now() < exited && alive()) {
         await new Promise((res) => setTimeout(res, 50));
       }
       expect(alive()).toBe(false);
-      expect({ clientGone, writeError, responded }).toEqual({ clientGone: false, writeError: false, responded: true });
+      expect({ truncated, responded }).toEqual({ truncated: false, responded: true });
     } finally {
       // agent 还在跑（runner 退出不等于 agent 被杀）——按 pidfile 收尾
       try {
@@ -442,6 +444,103 @@ suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
       server.close();
     }
   }, 40_000);
+
+  // 不变式：**只有终态卡**决定 notify_failed。配额告警卡被掐断（黑洞 webhook 永远不回）
+  // ⇒ runner 宽限耗尽后退出 ⇒ 但 notify_failed 必须仍是 false（那是终态卡的账）。
+  it("配额卡被掐断也不许标 notify_failed（那是终态卡的账）", async () => {
+    const server = createServer(() => { /* 黑洞：收下请求永不响应 */ });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    const pidfile = join(home, "agent.pid");
+    // 宽限走短路径（生产默认 40s 是为了盖住 notifier 最坏耗时 ~35s）
+    process.env.AGENT_EX_NOTIFY_GRACE_MS = "800";
+    try {
+      setupHome({ FAKE_MODE: "quota", FAKE_PIDFILE: pidfile }, 30);
+      writeFileSync(join(home, "config.json"), JSON.stringify({
+        executors: { fake: { bin: fakeAgent, extra_flags: [] } },
+        profiles: {
+          fake: {
+            executor: "fake",
+            env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota", FAKE_PIDFILE: pidfile },
+          },
+        },
+        notify: { feishu_webhook_url: `http://127.0.0.1:${port}/hook`, dry_run: false },
+        defaults: { profile: "fake", timeout_sec: 30 },
+      }));
+      const r = await submit({ prompt: "quota warning black hole", project_path: home });
+      const id = (r as { task_id: string }).task_id;
+      const db = join(home, "tasks.db");
+      const readTask = () => openStore(db).getTask(id) as { pid: number; notify_failed: boolean };
+      // 等配额卡真的发出去（runner 日志里有 notifier 的痕迹）
+      const sent = Date.now() + 10_000;
+      while (Date.now() < sent) {
+        const log = join(home, "logs", `runner-${id}.log`);
+        if (existsSync(log) && readFileSync(log, "utf8").includes("[notifier]")) break;
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      const pid = readTask().pid;
+      expect(pid).toBeGreaterThan(0);
+      process.kill(pid, "SIGTERM");
+      // 宽限耗尽 ⇒ runner 自己退出
+      const exited = Date.now() + 15_000;
+      while (Date.now() < exited) {
+        try { process.kill(pid, 0); } catch { break; }
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      expect(readTask().notify_failed).toBe(false);
+      // 宽限耗尽这件事要留下痕迹（否则「没人等」和「等了但没到」分不清）
+      expect(readFileSync(join(home, "logs", `runner-${id}.log`), "utf8")).toContain("notify grace exhausted");
+    } finally {
+      delete process.env.AGENT_EX_NOTIFY_GRACE_MS;
+      try {
+        const apid = Number(readFileSync(pidfile, "utf8"));
+        if (apid > 0) { try { process.kill(apid, "SIGKILL"); } catch { /* 已死 */ } }
+      } catch { /* 无 pidfile */ }
+      server.close();
+    }
+  }, 40_000);
+});
+
+suite("integration: 通知的 webhook 解析失败", () => {
+  // 2026-11-16 回归：webhook 写成 {env:VAR} 而变量缺失时 resolveEnvPlaceholders **抛错**。
+  // 旧代码两处都没接：
+  // - finalize：异常穿出 main ⇒ exit(1)，而 DB 早已落终态 ⇒ notify_failed=0、没有卡
+  //   （注释写着「缺变量时抛错 → notify_failed」，承诺没兑现）；
+  // - pushQuotaWarning：异常抛在 rl.on("line") 里 ⇒ uncaughtException ⇒ runner 当场死
+  //   ⇒ 任务永远停在 running（2026-11-15 那类「卡在 running」的另一个成因）。
+  it("终态卡的 webhook 解析失败 ⇒ 标 notify_failed，不能让 runner 崩掉", async () => {
+    setupHome({}, 30);
+    writeFileSync(join(home, "config.json"), JSON.stringify({
+      executors: { fake: { bin: fakeAgent, extra_flags: [] } },
+      profiles: { fake: { executor: "fake", env: { PATH: process.env.PATH ?? "" } } },
+      notify: { feishu_webhook_url: "{env:AFEX_MISSING_WEBHOOK}", dry_run: false },
+      defaults: { profile: "fake", timeout_sec: 30 },
+    }));
+    const r = await submit({ prompt: "broken webhook", project_path: home });
+    const id = (r as { task_id: string }).task_id;
+    expect(await waitForTerminal(id, 15_000)).toBe("completed");
+    const t = openStore(join(home, "tasks.db")).getTask(id) as { notify_failed: boolean };
+    expect(t.notify_failed).toBe(true);
+  }, 30_000);
+
+  it("配额告警的 webhook 解析失败 ⇒ runner 不能崩，任务要走到终态", async () => {
+    setupHome({ FAKE_MODE: "quota" }, 6);
+    writeFileSync(join(home, "config.json"), JSON.stringify({
+      executors: { fake: { bin: fakeAgent, extra_flags: [] } },
+      profiles: {
+        fake: {
+          executor: "fake",
+          env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota" },
+        },
+      },
+      notify: { feishu_webhook_url: "{env:AFEX_MISSING_WEBHOOK}", dry_run: false },
+      defaults: { profile: "fake", timeout_sec: 6 },
+    }));
+    const r = await submit({ prompt: "quota + broken webhook", project_path: home });
+    const id = (r as { task_id: string }).task_id;
+    // runner 若死在 rl.on("line") 的异常里 ⇒ 任务永远停在 running ⇒ 这里超时失败
+    expect(await waitForTerminal(id, 20_000)).toBe("failed");
+  }, 30_000);
 });
 
 suite("integration: needs_input → continue → completed", () => {
