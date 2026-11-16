@@ -2,7 +2,7 @@
  * detached runner 入口：node runner.ts <task_id>
  * 生命周期：认领任务 → 组装命令 → spawn agent(detached) → 逐行解析事件/落库/写日志 → 终态 + 通知。
  */
-import { appendFileSync, createWriteStream, readFileSync } from "node:fs";
+import { appendFileSync, createWriteStream, readFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { openStore, type Task, type TaskPatch } from "./store.js";
@@ -14,7 +14,7 @@ import { wrapInitialPrompt, wrapContinuePrompt, extractNeedsInput } from "./prom
 import { resolveZenFreeEnv } from "./zen-free.js";
 import { profileModelLabel } from "./model-check.js";
 import { sendFeishuCard, buildFeishuCard } from "./notifier.js";
-import { dbPath } from "./paths.js";
+import { dbPath, drainDir, drainMarkerPath } from "./paths.js";
 import { killTree } from "./proc-tree.js";
 
 const MAX_ROUNDS = 5;
@@ -132,19 +132,42 @@ async function exitAfterNotify(
 ): Promise<void> {
   const pending = [...pendingNotifies];
   if (pending.length) {
-    const settled = await Promise.race([
-      // 成功或失败都算「落地了」：失败时各自的 .then 已经把该标的都标上了。
-      Promise.all(pending.map((p) => p.then(() => true, () => true))),
-      sleep(NOTIFY_GRACE_MS).then(() => false),
-    ]);
-    if (!settled) {
-      console.error(`[runner] notify grace exhausted (${NOTIFY_GRACE_MS}ms); ${pending.length} notification(s) still in flight`);
-      if (terminalNotify && !terminalNotify.settled) {
-        try { store.patch(task.id, { notify_failed: true }); } catch { /* best effort */ }
+    // 标记「正在排空」：宿主的 killTree 在 SIGKILL 前会看它（见 proc-tree 的 spareRoot）。
+    // 不标的话，cancel 的 3s 宽限一到就把本进程硬杀 ⇒ 通知的回执随进程一起消失。
+    markDraining(task.id);
+    try {
+      const settled = await Promise.race([
+        // 成功或失败都算「落地了」：失败时各自的 .then 已经把该标的都标上了。
+        Promise.all(pending.map((p) => p.then(() => true, () => true))),
+        sleep(NOTIFY_GRACE_MS).then(() => false),
+      ]);
+      if (!settled) {
+        console.error(`[runner] notify grace exhausted (${NOTIFY_GRACE_MS}ms); ${pending.length} notification(s) still in flight`);
+        if (terminalNotify && !terminalNotify.settled) {
+          try { store.patch(task.id, { notify_failed: true }); } catch { /* best effort */ }
+        }
       }
+    } finally {
+      clearDraining(task.id);
     }
   }
   process.exit(0);
+}
+
+/**
+ * 写/删「正在排空通知」标记（见 paths.ts 的 drainMarkerPath）。
+ *
+ * 存在的唯一理由：宿主的 killTree 默认 3s 后补 SIGKILL，而 runner 排空通知最多要 40s ⇒
+ * 不打招呼就被硬杀，回执丢失（静默失败）。标记失败只是退化成旧行为，不影响正确性。
+ */
+function markDraining(taskId: string): void {
+  try {
+    mkdirSync(drainDir(), { recursive: true });
+    writeFileSync(drainMarkerPath(taskId), String(process.pid));
+  } catch { /* 标记失败 ⇒ 退化成「可能被 SIGKILL 掐断回执」 */ }
+}
+function clearDraining(taskId: string): void {
+  try { rmSync(drainMarkerPath(taskId), { force: true }); } catch { /* 已消失 */ }
 }
 
 /**

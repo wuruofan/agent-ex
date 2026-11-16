@@ -1,6 +1,7 @@
 import { openStore, TERMINAL_STATUSES } from "../store.js";
-import { dbPath } from "../paths.js";
+import { dbPath, drainMarkerPath } from "../paths.js";
 import { killTree } from "../proc-tree.js";
+import { existsSync } from "node:fs";
 
 export interface CancelArgs { task_id: string }
 
@@ -22,7 +23,9 @@ export function cancel(args: CancelArgs): CancelResult {
     if (t.status === "running" && t.pid) {
       // killTree: 杀 runner 进程组（runner + 同组 agent）+ 后代进程树快照逐点杀（覆盖逃出进程组的
       // agent Bash 子进程）。快照在 kill 前完成——runner 死后逃逸进程 ppid→1 即断链，无法再追踪。
-      const r = killTree(t.pid);
+      // spareRoot: runner 若正在排空在飞的飞书通知（它写了 drain 标记），就别在 3s 后硬杀它——
+      // 硬杀会把通知的**回执**带走（飞书拒收就没人知道了 ⇒ 静默失败）。它排空后自己退出。
+      const r = killTree(t.pid, { spareRoot: () => existsSync(drainMarkerPath(t.id)) });
       if (!r.treeComplete) {
         warning = "process tree snapshot unavailable (ps not permitted); escaped agent subprocesses may survive. " +
           "The runner and its process group were signalled.";

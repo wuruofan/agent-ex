@@ -82,6 +82,18 @@ export function collectDescendants(rootPid: number): number[] {
 export interface KillTreeOptions {
   /** SIGTERM 后等待多少毫秒补 SIGKILL；默认 3000（对齐 runner 的 KILL_GRACE_MS）。 */
   graceMs?: number;
+  /**
+   * SIGKILL 阶段是否放过 rootPid。
+   *
+   * **在那一刻求值**（不是调用时）——「正在自己收尾」的进程不能被硬杀：
+   * runner 收到 SIGTERM 后要等在飞的飞书通知落地（最多 40s），而宿主默认 3s 后就补 SIGKILL
+   * ⇒ 硬杀会把通知的**回执**带走（卡已经 flush 给飞书了，丢的是「飞书收没收」）
+   * ⇒ 飞书拒收时 notify_failed 标不上、doctor 扫不到 ⇒ 静默失败。
+   *
+   * 为 true 时：只 SIGKILL 后代（agent 及其子孙），跳过组播（组里有 rootPid）与 rootPid 本体——
+   * 它会在排空后自己退出（notifier 自带超时，最坏 ~35s ⇒ runner 一定会退）。
+   */
+  spareRoot?: () => boolean;
 }
 
 export interface KillResult {
@@ -117,8 +129,14 @@ export function killTree(rootPid: number, opts: KillTreeOptions = {}): KillResul
 
   // SIGKILL 兜底阶段（异步 unref）：SIGTERM 未驯服的顽固进程
   const timer = setTimeout(() => {
-    try { process.kill(-rootPid, "SIGKILL"); } catch { /* 组已空 */ }
+    // rootPid 是否「正在自己收尾」——**此刻**才求值（标记是 SIGTERM 之后才写的）。
+    const spare = opts.spareRoot?.() === true;
+    if (!spare) {
+      try { process.kill(-rootPid, "SIGKILL"); } catch { /* 组已空 */ }
+    }
     for (const pid of targets) {
+      // spare 时放过 rootPid：它自己在排空通知，硬杀会丢回执（见 KillTreeOptions.spareRoot）。
+      if (spare && pid === rootPid) continue;
       try { process.kill(pid, 0); } catch { continue; } // ESRCH → 已死
       try { process.kill(pid, "SIGKILL"); } catch { /* 竞态死亡 */ }
     }

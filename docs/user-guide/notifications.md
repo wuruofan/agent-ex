@@ -114,3 +114,12 @@ agent-ex doctor --send
 > 「这个任务正在配额上要挂了」的早期告警**静默丢失**。现在它在飞也会被等。
 > 但它被掐断**不**标 `notify_failed`——那笔账只记「任务终态那张卡」：
 > 提示信号丢了不等于任务通知失败（终态卡可能早就送到了）。
+>
+> 同日修（cancel 路径）：`agent-ex cancel` 走 `killTree`，默认 **3s 后对整个进程组补 SIGKILL**
+> ⇒ 正在排空通知的 runner 会被硬杀，回执随之丢失（卡本身早就 flush 给飞书了，丢的是「飞书收没收」）。
+> 现在 runner 排空期间会写一个 drain 标记，宿主据此**放过它**——它排空后自己退出。
+> ⇒ 取消一个正在发卡的任务，回执照样拿得到。
+
+**webhook 写成 `{env:VAR}` 但变量没设时**：不是崩溃，是「通知发不出去」。
+终态卡会把 `notify_failed` 标上（任务状态不受影响，照样是 completed/failed），配额告警卡只记一行日志；
+两种情况 runner 日志里都有一行 `webhook resolution failed`，可据此查 `$AGENT_EX_HOME/.env`。

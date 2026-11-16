@@ -501,6 +501,73 @@ suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
   }, 40_000);
 });
 
+suite("integration: cancel 撞上在飞的配额卡", () => {
+  // 2026-11-16 评审发现：cancel 走 killTree，**3s 后对整个进程组补 SIGKILL**
+  // （src/proc-tree.ts 的 graceMs 默认 3000）⇒ 正在排空通知的 runner 会被硬杀，
+  // 排在飞通知的回执随之丢失（卡本身早 flush 给飞书了，丢的是「飞书收没收」）。
+  // 这里让 webhook 延迟 6s 才响应（> 3s 的 SIGKILL 宽限）⇒ runner 必须活过那一刀。
+  it("宿主的 SIGKILL 不能掐断 runner 的排空 ⇒ 卡必须等到回执", async () => {
+    const received: string[] = [];
+    let truncated = false;
+    let responded = false;
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        received.push(body);
+        let finished = false;
+        res.on("finish", () => { finished = true; responded = true; });
+        res.on("close", () => { if (!finished) truncated = true; });
+        res.on("error", () => { /* 客户端已断开 */ });
+        // 6s > killTree 的 3s SIGKILL 宽限 ⇒ 旧实现必被砍在这之前
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ code: 0, msg: "ok" }));
+        }, 6000);
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    const pidfile = join(home, "agent.pid");
+    try {
+      setupHome({ FAKE_MODE: "quota", FAKE_PIDFILE: pidfile }, 60);
+      writeFileSync(join(home, "config.json"), JSON.stringify({
+        executors: { fake: { bin: fakeAgent, extra_flags: [] } },
+        profiles: {
+          fake: {
+            executor: "fake",
+            env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota", FAKE_PIDFILE: pidfile },
+          },
+        },
+        notify: { feishu_webhook_url: `http://127.0.0.1:${port}/hook`, dry_run: false },
+        defaults: { profile: "fake", timeout_sec: 60 },
+      }));
+      const r = await submit({ prompt: "cancel during quota card", project_path: home });
+      const id = (r as { task_id: string }).task_id;
+      // 等配额卡到达 webhook ⇒ 它此刻正在飞
+      const arrived = Date.now() + 10_000;
+      while (Date.now() < arrived && received.length === 0) {
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      expect(received.length).toBe(1);
+      // 走真实 cancel：killTree → SIGTERM 组播 → 3s 后 SIGKILL 组播
+      cancel({ task_id: id });
+      // 等回执落地（webhook 6s 才回）⇒ 卡必须送达、不能被 SIGKILL 砍掉
+      const settled = Date.now() + 20_000;
+      while (Date.now() < settled && !responded && !truncated) {
+        await new Promise((res) => setTimeout(res, 100));
+      }
+      expect({ truncated, responded }).toEqual({ truncated: false, responded: true });
+    } finally {
+      try {
+        const apid = Number(readFileSync(pidfile, "utf8"));
+        if (apid > 0) { try { process.kill(apid, "SIGKILL"); } catch { /* 已死 */ } }
+      } catch { /* 无 pidfile */ }
+      server.close();
+    }
+  }, 45_000);
+});
+
 suite("integration: 通知的 webhook 解析失败", () => {
   // 2026-11-16 回归：webhook 写成 {env:VAR} 而变量缺失时 resolveEnvPlaceholders **抛错**。
   // 旧代码两处都没接：
@@ -524,22 +591,31 @@ suite("integration: 通知的 webhook 解析失败", () => {
   }, 30_000);
 
   it("配额告警的 webhook 解析失败 ⇒ runner 不能崩，任务要走到终态", async () => {
-    setupHome({ FAKE_MODE: "quota" }, 6);
+    const pidfile = join(home, "agent.pid");
+    setupHome({ FAKE_MODE: "quota", FAKE_PIDFILE: pidfile }, 6);
     writeFileSync(join(home, "config.json"), JSON.stringify({
       executors: { fake: { bin: fakeAgent, extra_flags: [] } },
       profiles: {
         fake: {
           executor: "fake",
-          env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota" },
+          env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota", FAKE_PIDFILE: pidfile },
         },
       },
       notify: { feishu_webhook_url: "{env:AFEX_MISSING_WEBHOOK}", dry_run: false },
       defaults: { profile: "fake", timeout_sec: 6 },
     }));
-    const r = await submit({ prompt: "quota + broken webhook", project_path: home });
-    const id = (r as { task_id: string }).task_id;
-    // runner 若死在 rl.on("line") 的异常里 ⇒ 任务永远停在 running ⇒ 这里超时失败
-    expect(await waitForTerminal(id, 20_000)).toBe("failed");
+    try {
+      const r = await submit({ prompt: "quota + broken webhook", project_path: home });
+      const id = (r as { task_id: string }).task_id;
+      // runner 若死在 rl.on("line") 的异常里 ⇒ 任务永远停在 running ⇒ 这里超时失败
+      expect(await waitForTerminal(id, 20_000)).toBe("failed");
+    } finally {
+      // runner 崩掉时 agent 会变孤儿（没人杀它）——按 pidfile 收尾，别把进程漏到机器上
+      try {
+        const apid = Number(readFileSync(pidfile, "utf8"));
+        if (apid > 0) { try { process.kill(apid, "SIGKILL"); } catch { /* 已死 */ } }
+      } catch { /* 无 pidfile */ }
+    }
   }, 30_000);
 });
 
