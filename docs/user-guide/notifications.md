@@ -109,3 +109,8 @@ agent-ex doctor --send
 > 2026-11-16 修：旧 SIGTERM handler 只是**启动**了等待就 `process.exit(0)`，回执随进程一起丢 ⇒
 > 飞书拒收时 `notify_failed` 不标、runner 日志里也不会有 `[notifier] feishu rejected` ⇒ doctor 扫不到，
 > 正是它本该抓的那类静默失败。
+>
+> 同日修：配额告警卡原先是 fire-and-forget（不进等待集合）⇒ SIGTERM / 超时兜底退出时它会被掐断，
+> 「这个任务正在配额上要挂了」的早期告警**静默丢失**。现在它在飞也会被等。
+> 但它被掐断**不**标 `notify_failed`——那笔账只记「任务终态那张卡」：
+> 提示信号丢了不等于任务通知失败（终态卡可能早就送到了）。

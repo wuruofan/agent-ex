@@ -90,6 +90,15 @@ if (mode === "hang") {
   holder.unref();
   try { require("node:fs").writeFileSync(process.env.FAKE_HOLDER_PIDFILE, String(holder.pid)); } catch {}
   process.exit(0);
+} else if (mode === "quota") {
+  // 配额告警场景：吐一个 429 的 api_retry 事件（claude executor 转成 quotaWarning ⇒ runner 推配额卡），
+  // 然后**保持进程活着**——这样 runner 不会落终态、不会推终态卡，
+  // 测试才有「只有配额卡在飞」的干净窗口（终态卡会把通知槽占掉，测不出提示通知的处境）。
+  emit({ type: "system", subtype: "init", session_id: "sid-qw-" + process.pid });
+  emit({ type: "system", subtype: "api_retry", error_status: 429, error: "rate limit exceeded", attempt: 1 });
+  process.on("SIGTERM", () => process.exit(0));
+  process.on("SIGINT", () => process.exit(0));
+  setInterval(() => {}, 1000);
 } else if (mode === "needs_input") {
   emit({ type: "system", subtype: "init", session_id: "sid-ni-" + process.pid });
   emit({ type: "assistant", message: { content: [{ type: "text", text: "❓NEEDS_INPUT: which database engine?" }] } });
@@ -352,6 +361,84 @@ suite("integration: 通知在飞时收到 SIGTERM", () => {
       expect(readTask().notify_failed).toBe(true);
     } finally {
       delete process.env.AGENT_EX_NOTIFY_GRACE_MS;
+      server.close();
+    }
+  }, 40_000);
+});
+
+suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
+  // 2026-11-16 回归：配额告警卡是 fire-and-forget，**不进 pendingNotify**
+  // ⇒ SIGTERM（cancel / 宿主拆进程树）时 runner 直接 process.exit(0)，
+  // 在飞的飞书请求被掐断 ⇒「这个任务正在配额上要挂了」的早期告警**静默丢失**。
+  // 本地 webhook 收下请求后延迟 1.2s 才响应 ⇒ 卡确定在飞；此时给 runner 发 SIGTERM。
+  it("配额告警卡在飞时收到 SIGTERM ⇒ runner 得等它落地再退出，卡不能被掐断", async () => {
+    const received: string[] = [];
+    let clientGone = false;   // 客户端提前断开 ⇒ 卡被进程退出掐断
+    let writeError = false;   // 写响应失败 ⇒ 客户端已经不在了
+    let responded = false;    // 响应完整写回
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        received.push(body);
+        req.on("aborted", () => { clientGone = true; });
+        // 延迟响应 ⇒ 此刻这张卡还在飞
+        setTimeout(() => {
+          res.on("error", () => { writeError = true; });
+          res.on("finish", () => { responded = true; });
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ code: 0, msg: "ok" }));
+        }, 1200);
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    const pidfile = join(home, "agent.pid");
+    try {
+      setupHome({ FAKE_MODE: "quota", FAKE_PIDFILE: pidfile }, 30);
+      writeFileSync(join(home, "config.json"), JSON.stringify({
+        executors: { fake: { bin: fakeAgent, extra_flags: [] } },
+        profiles: {
+          fake: {
+            executor: "fake",
+            env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota", FAKE_PIDFILE: pidfile },
+          },
+        },
+        notify: { feishu_webhook_url: `http://127.0.0.1:${port}/hook`, dry_run: false },
+        defaults: { profile: "fake", timeout_sec: 30 },
+      }));
+      const r = await submit({ prompt: "quota warning", project_path: home });
+      const id = (r as { task_id: string }).task_id;
+      // 等配额卡到达本地 webhook ⇒ 它此刻正在飞
+      const arrived = Date.now() + 10_000;
+      while (Date.now() < arrived && received.length === 0) {
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      expect(received.length).toBe(1);
+      expect(received[0]).toContain("配额告警");
+      const pid = (openStore(join(home, "tasks.db")).getTask(id) as { pid: number }).pid;
+      expect(pid).toBeGreaterThan(0);
+      const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+      // 模拟宿主拆进程树：给 runner 发 SIGTERM
+      process.kill(pid, "SIGTERM");
+      // 卡还没落地（webhook 要 1.2s 才回）⇒ runner 不能此刻就退出
+      await new Promise((res) => setTimeout(res, 700));
+      expect(alive()).toBe(true);
+
+      // 最终它得退出（SIGTERM 被处理了），而且退出前卡已送达
+      const exited = Date.now() + 10_000;
+      while (Date.now() < exited && alive()) {
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      expect(alive()).toBe(false);
+      expect({ clientGone, writeError, responded }).toEqual({ clientGone: false, writeError: false, responded: true });
+    } finally {
+      // agent 还在跑（runner 退出不等于 agent 被杀）——按 pidfile 收尾
+      try {
+        const apid = Number(readFileSync(pidfile, "utf8"));
+        if (apid > 0) { try { process.kill(apid, "SIGKILL"); } catch { /* 已死 */ } }
+      } catch { /* 无 pidfile */ }
       server.close();
     }
   }, 40_000);

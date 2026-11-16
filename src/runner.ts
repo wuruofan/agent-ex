@@ -83,11 +83,37 @@ interface RunOutcome {
   code: number | null;
 }
 
-/** 当前轮 finalize 启动的通知 promise；SIGTERM handler 等待它完成（防止被截断导致 notify_failed 未落库）。 */
-let pendingNotify: Promise<void> | null = null;
+/**
+ * 在飞的飞书请求（终态卡 + 配额告警卡）。
+ *
+ * 为什么是**集合**而不是单个 promise：
+ * - 配额告警卡与终态卡可能同时在飞。单槽会被后写的那次覆盖 ⇒ 前一张失去追踪，
+ *   进程退出时被掐断，而且没人知道它曾经飞过。
+ * - 提示卡（配额告警）被掐断 ≠ 任务终态通知失败 ⇒ 只有**终态卡**决定 notify_failed。
+ */
+const pendingNotifies = new Set<Promise<void>>();
+/** 终态通知的落地状态：只有它决定 notify_failed。 */
+let terminalNotify: { settled: boolean } | null = null;
 
 /**
- * 等当前通知落地后退出进程；宽限耗尽仍未落地 ⇒ 先把「通知没送达」标进 DB 再走。
+ * 登记一个在飞的飞书请求；settle 后自动移出集合。
+ *
+ * `isTerminal=true` 的那一个额外被记住「有没有落地」——退出前宽限耗尽时，
+ * 只有它没落地才标 notify_failed（终态卡才是「任务已终态」的对外信号）。
+ */
+function trackNotify(p: Promise<void>, isTerminal: boolean): void {
+  const rec = { settled: false };
+  const tracked: Promise<void> = p.then(
+    () => { rec.settled = true; },
+    () => { rec.settled = true; },
+  );
+  pendingNotifies.add(tracked);
+  void tracked.finally(() => { pendingNotifies.delete(tracked); });
+  if (isTerminal) terminalNotify = rec;
+}
+
+/**
+ * 等在飞的通知落地后退出进程；宽限耗尽仍未落地 ⇒ 先把「通知没送达」标进 DB 再走。
  *
  * 为什么不能直接 exit：飞书卡片是「任务已终态」唯一的对外信号，进程先走会把在飞的请求掐断，
  * **回执**（成功 / 被拒收 code=19024 等）随之一并丢失 ⇒ DB 显示 notify_failed=0（通知正常）、
@@ -96,19 +122,26 @@ let pendingNotify: Promise<void> | null = null;
  *
  * 宽限耗尽时标 notify_failed 是保守但诚实的：这次退出会掐断请求，卡片多半真没送达；
  * 反过来若不标，DB 就会替一张没送到的卡背书。
+ *
+ * 等的是**所有**在飞通知（终态卡 + 配额告警卡），但只有终态卡没落地才标 notify_failed：
+ * 配额告警卡是「早期提示信号」，它被掐断不代表任务通知失败（终态卡可能早就送到了）。
  */
 async function exitAfterNotify(
   store: ReturnType<typeof openStore>,
   task: Task,
 ): Promise<void> {
-  if (pendingNotify) {
+  const pending = [...pendingNotifies];
+  if (pending.length) {
     const settled = await Promise.race([
-      // 成功或失败都算「落地了」：失败时 finalize 的 .then 已经把 notify_failed 标上了。
-      pendingNotify.then(() => true, () => true),
+      // 成功或失败都算「落地了」：失败时各自的 .then 已经把该标的都标上了。
+      Promise.all(pending.map((p) => p.then(() => true, () => true))),
       sleep(NOTIFY_GRACE_MS).then(() => false),
     ]);
     if (!settled) {
-      try { store.patch(task.id, { notify_failed: true }); } catch { /* best effort */ }
+      console.error(`[runner] notify grace exhausted (${NOTIFY_GRACE_MS}ms); ${pending.length} notification(s) still in flight`);
+      if (terminalNotify && !terminalNotify.settled) {
+        try { store.patch(task.id, { notify_failed: true }); } catch { /* best effort */ }
+      }
     }
   }
   process.exit(0);
@@ -352,16 +385,20 @@ function finalize(
   const ok = store.transition(task.id, ["running"], to, { ...patch, ended_at: Math.floor(Date.now() / 1000) });
   if (!ok) { console.error(`terminal transition to ${to} lost race; task state changed elsewhere`); return; }
   const detail = to === "needs_input" ? String(patch.question ?? "") : to === "completed" ? trunc(String(patch.result ?? "")) : String(patch.error ?? "");
-  // 注册 pending 给 SIGTERM handler 等待；正常完成后清空，避免内存里挂旧 promise。
   // feishu_webhook_url 支持 {env:VAR} 占位符；dry_run 时不解析（打日志即可），真实发送才解析，
   // 缺变量时抛错 → notify_failed（任务状态不受影响）。
   const dryRun = cfg.notify.dry_run ?? true;
   const webhook = dryRun ? cfg.notify.feishu_webhook_url
     : resolveEnvPlaceholders({ url: cfg.notify.feishu_webhook_url }).url;
-  pendingNotify = sendFeishuCard(webhook, buildFeishuCard(to, task.id, detail, cfg.notify.keyword, cardFooter(task, cfg)), { dryRun })
-    .then((r) => { if (!r.ok) store.patch(task.id, { notify_failed: true }); })
-    .catch((e) => { console.error("[notifier] unexpected:", e); store.patch(task.id, { notify_failed: true }); })
-    .finally(() => { pendingNotify = null; });
+  // 登记进在飞集合：SIGTERM handler / 超时兜底会 process.exit(0)，
+  // 不登记 ⇒ 这张终态卡会被退出掐断（回执丢失 ⇒ notify_failed 永远标不上）。
+  // isTerminal=true ⇒ 只有它的落地状态决定 notify_failed。
+  trackNotify(
+    sendFeishuCard(webhook, buildFeishuCard(to, task.id, detail, cfg.notify.keyword, cardFooter(task, cfg)), { dryRun })
+      .then((r) => { if (!r.ok) store.patch(task.id, { notify_failed: true }); })
+      .catch((e) => { console.error("[notifier] unexpected:", e); store.patch(task.id, { notify_failed: true }); }),
+    true,
+  );
 }
 
 function readRoundInput(logPath: string, round: number): string | null {
@@ -380,8 +417,17 @@ function trunc(s: string, max = MAX_RESULT_LEN): string {
 }
 
 /**
- * 中途配额/限流告警推送：复用 finalize 的 webhook/env 解析路径，独立 fire-and-forget。
- * 不阻塞事件循环；不修改任务状态（任务还在跑）；不进入 pendingNotify（避免被 SIGTERM 截断）。
+ * 中途配额/限流告警推送：复用 finalize 的 webhook/env 解析路径。
+ * 不阻塞事件循环；不修改任务状态（任务还在跑）。
+ *
+ * 它**也登记进在飞通知集合**：SIGTERM handler 与超时兜底都会 process.exit(0)，
+ * 不登记 ⇒ 进程先走会把在飞的请求掐断 ⇒「这个任务正在配额上要挂了」的早期告警静默丢失。
+ * （旧注释写的是「不进入 pendingNotify（避免被 SIGTERM 截断）」——因果正好写反了：
+ * 登记才会被等、不登记才会被截断。）
+ *
+ * isTerminal=false ⇒ 这张卡被掐断**不**标 notify_failed：
+ * 配额告警是提示信号，「任务已终态」那张卡才是任务通知的账；两者不能混。
+ *
  * 唯一去重由 runner 主循环的 quotaWarned 局部标志保证（同任务只触发一次）。
  */
 function pushQuotaWarning(
@@ -398,8 +444,15 @@ function pushQuotaWarning(
   parts.push(`worker 触发配额/限流信号，正在重试；持续下去任务大概率失败，会自动推送终态卡片。`);
   if (q.message) parts.push(`\n> ${q.message}`);
   const detail = parts.join("\n\n");
-  sendFeishuCard(webhook, buildFeishuCard("quota_warning", task.id, detail, cfg.notify.keyword, cardFooter(task, cfg)), { dryRun })
-    .catch((e) => { console.error("[quota-warn] unexpected:", e); });
+  trackNotify(
+    sendFeishuCard(webhook, buildFeishuCard("quota_warning", task.id, detail, cfg.notify.keyword, cardFooter(task, cfg)), { dryRun })
+      // 飞书拒收是 **resolve {ok:false}**（不是 throw）⇒ 用 then 接，catch 只兜网络异常。
+      .then((r) => {
+        if (!r.ok) console.error(`[quota-warn] feishu rejected: code=${r.code} msg=${r.msg}`);
+      })
+      .catch((e) => { console.error("[quota-warn] unexpected:", e); }),
+    false,
+  );
 }
 
 main().catch((e) => { console.error("[runner] fatal:", e); process.exit(1); });
