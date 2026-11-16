@@ -21,6 +21,20 @@ const MAX_ROUNDS = 5;
 const NOTIFY_GRACE_MS = 1500; // SIGTERM 后给通知 promise 的最长等待时间
 const MAX_RESULT_LEN = 4000;
 
+/**
+ * 超时后「强制收尾」的宽限：超时定时器触发后，再等这么久让 agent 自己走 close 路径。
+ *
+ * 为什么需要它（2026-11-16 定位的真实故障 task_mwhlwihp_29b736）：
+ * 旧实现把「落终态」挂在 child 的 'close' 事件上（进程退出 **且** stdio 全关）。
+ * 只要有**逃逸孙进程持有 stdout**（agent 自己退出、孙进程被 init 收养、killTree 的
+ * ppid 快照扫不到它），管道写端就一直开着 ⇒ 'close' 永不触发 ⇒ 任务永远停在 running。
+ * 实测那次挂了 16.5 小时，最后靠人工 cancel 收场。
+ *
+ * 宽限取 8s：killTree 内部在 SIGTERM 后 3s 补 SIGKILL，留 5s 余量给「能被杀掉的 agent」
+ * 走正常 close 路径；超过宽限仍无 close ⇒ agent 侧已卡死，不能再等，直接落终态。
+ */
+const TIMEOUT_FINALIZE_GRACE_MS = 8000;
+
 // 瞬态重试：agent 自身内部重试耗尽后仍把 429/529 当作终态报错时，runner 再兜底重试。
 // 仅对「瞬时/可恢复」错误重试；timeout（真超时）、needs_input（等人工）、硬失败不重试。
 const MAX_ATTEMPTS = 3;
@@ -61,6 +75,22 @@ interface RunOutcome {
 
 /** 当前轮 finalize 启动的通知 promise；SIGTERM handler 等待它完成（防止被截断导致 notify_failed 未落库）。 */
 let pendingNotify: Promise<void> | null = null;
+
+/**
+ * 等当前通知 promise 落地后退出进程。
+ *
+ * 用在「超时强制收尾」路径：飞书卡片是「任务已失败」唯一的对外信号，进程先走会把
+ * 请求截断——人收不到卡片、DB 里的 notify_failed 也不会被标上（看起来像通知过了，其实没发出去）。
+ */
+async function exitAfterNotify(): Promise<void> {
+  if (pendingNotify) {
+    await Promise.race([
+      pendingNotify,
+      sleep(NOTIFY_GRACE_MS),
+    ]).catch(() => { /* finalize 已记日志 */ });
+  }
+  process.exit(0);
+}
 
 /**
  * 本次运行**实际用到的**模型（zen-free 占位符解析后才非空），只用于卡片底部小字。
@@ -137,12 +167,18 @@ async function main(): Promise<void> {
   // runner 崩了 SIGTERM 整体收尾不再触发告警，故无需持久化。
   let quotaWarned = false;
 
+  // 超时的错误文案：超时定时器与「强制收尾」两处共用，保证 DB 里与卡片上的说法一致。
+  const timeoutError = `timeout after ${task.timeout_sec}s (round ${task.rounds})`;
+  // 本次运行是否已经由「强制收尾」路径落过终态（避免 close 到达后再 finalize 一次）。
+  let timeoutFinalized = false;
+
   // 单次 agent 运行：spawn → 逐行解析事件/落库/写日志 → 终态时 resolve 出本次运行结果。
   // 不设 detached：agent 继承 runner 的进程组（runner 自己是 leader），便于 cancel 时组杀级联到 agent。
   // 注意：agent 的 Bash 工具可能派生出逃出该组的子进程（见 proc-tree.ts），cancel/timeout 用 killTree 兜底。
   // agentEnv 由调用方（重试循环）在每次 attempt 前构建：zen-free 占位符的动态解析结果随 attempt 变化（撞限换模）。
   function runAgent(attempt: number, agentEnv: NodeJS.ProcessEnv): Promise<RunOutcome> {
     return new Promise((resolve) => {
+      timeoutFinalized = false;
       const files = new Set<string>(task.files_changed ?? []);
       const log = createWriteStream(task.log_path, { flags: "a" });
       // buildCommand 返回的完整 argv 含 bin 作为 [0]；spawn 的第一个参数**也**是 bin。
@@ -168,6 +204,13 @@ async function main(): Promise<void> {
       child.stdin!.end();
 
       let timedOut = false;
+      // 超时后的「强制收尾」定时器：见 TIMEOUT_FINALIZE_GRACE_MS 的说明。
+      // **不 unref**：它必须能把 runner 的事件循环钉住，宽限期内进程不能静默退出。
+      let forceFinalizeTimer: NodeJS.Timeout | null = null;
+      let lastAssistantText = "";
+      let resultText: string | null = null;
+      let resultIsError = false;
+      let stderrTail = "";
       // 每轮超时：killTree(child.pid) 给 agent 发 SIGTERM（含其后代树，覆盖 agent Bash 工具逃出进程组的
       // 长命令子进程），3s 后未驯服者自动补 SIGKILL（killTree 内部兜底）。agent 退出后 child.close 触发，
       // 本次运行标记为 timedOut。
@@ -176,13 +219,19 @@ async function main(): Promise<void> {
       const timeoutTimer = setTimeout(() => {
         timedOut = true;
         if (child.pid !== undefined) killTree(child.pid);
+        // 兜底：agent 若在宽限期内不退出（逃逸孙进程持有 stdout / 进程卡在不可中断 IO），
+        // 'close' 永不触发 ⇒ 靠 close 落终态会永远落不了 ⇒ 宽限一过就自己落终态，不等 close。
+        forceFinalizeTimer = setTimeout(() => {
+          timeoutFinalized = true;
+          const text = (resultText ?? lastAssistantText ?? "").trim();
+          finalize(store, task, "failed", { error: timeoutError, result: trunc(text) }, cfg);
+          resolve({ timedOut: true, question: null, resultText, resultIsError, stderrTail, lastAssistantText, code: null });
+          // 通知是「任务已失败」唯一的对外信号 ⇒ 等它发完再退出，别让进程先走把卡片截断。
+          void exitAfterNotify();
+        }, TIMEOUT_FINALIZE_GRACE_MS);
       }, task.timeout_sec * 1000);
       timeoutTimer.unref();
 
-      let lastAssistantText = "";
-      let resultText: string | null = null;
-      let resultIsError = false;
-      let stderrTail = "";
       const rl = createInterface({ input: child.stdout! });
       rl.on("line", (line) => {
         log.write(line + "\n");
@@ -214,6 +263,8 @@ async function main(): Promise<void> {
 
       child.on("close", (code) => {
         clearTimeout(timeoutTimer);
+        // agent 正常退出了 ⇒ 宽限内的强制收尾不再需要（否则会把已完成的活判成超时失败）
+        if (forceFinalizeTimer) { clearTimeout(forceFinalizeTimer); forceFinalizeTimer = null; }
         log.end();
         const finalText = (resultText ?? lastAssistantText ?? "").trim();
         const question = extractNeedsInput(finalText);
@@ -257,7 +308,11 @@ async function main(): Promise<void> {
   const finalText = (o.resultText ?? o.lastAssistantText ?? "").trim();
   const question = o.question;
   if (o.timedOut) {
-    finalize(store, task, "failed", { error: `timeout after ${task.timeout_sec}s (round ${task.rounds})`, result: trunc(finalText) }, cfg);
+    // 已被「强制收尾」路径落过终态就别再落一次（transition 只认 running，重复调用会打出
+    // "lost race" 噪音，且对人对日志都是误导——任务本来就是超时失败，不是别处改的）。
+    if (!timeoutFinalized) {
+      finalize(store, task, "failed", { error: timeoutError, result: trunc(finalText) }, cfg);
+    }
   } else if (question) {
     if (task.rounds >= MAX_ROUNDS) {
       finalize(store, task, "failed", { error: `rounds limit (${MAX_ROUNDS}) reached with pending question`, question: trunc(question) }, cfg);

@@ -73,6 +73,21 @@ if (mode === "hang") {
   process.on("SIGTERM", () => process.exit(0));
   process.on("SIGINT", () => process.exit(0));
   setInterval(() => {}, 1000);
+} else if (mode === "hold-pipe") {
+  // 2026-11-16 复现：agent 自己退出，但一个 detached 孙进程**继承了 stdout** ⇒ 管道写端一直开着
+  // ⇒ Node 的 child 'close' 事件（进程退出 + stdio 全关）永不触发。
+  // 孙进程在 agent 退出后被 init 收养（ppid=1）⇒ killTree 的后代快照扫不到它 ⇒ 杀不掉、管道不关。
+  // 旧实现把「落终态」挂在 close 上 ⇒ 任务永远停在 running（2026-11-15 真实任务 task_mwhlwihp_29b736
+  // 挂了 16.5 小时，最后靠人工 cancel 收场）。
+  emit({ type: "system", subtype: "init", session_id: "sid-hp-" + process.pid });
+  const { spawn } = require("node:child_process");
+  const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: true,
+    stdio: ["ignore", "inherit", "inherit"],   // 继承 stdout/stderr ⇒ 管道不会 EOF
+  });
+  holder.unref();
+  try { require("node:fs").writeFileSync(process.env.FAKE_HOLDER_PIDFILE, String(holder.pid)); } catch {}
+  process.exit(0);
 } else if (mode === "needs_input") {
   emit({ type: "system", subtype: "init", session_id: "sid-ni-" + process.pid });
   emit({ type: "assistant", message: { content: [{ type: "text", text: "❓NEEDS_INPUT: which database engine?" }] } });
@@ -132,6 +147,14 @@ afterEach(() => {
     if (existsSync(hbPidfile)) {
       const pid = Number(readFileSync(hbPidfile, "utf8"));
       if (pid > 0) killTree(pid);
+    }
+  } catch { /* 清理失败不阻断 */ }
+  // hold-pipe 用例的管道持有者：它刻意逃出 killTree 的快照范围，只能按 pidfile 单独杀
+  const holderPidfile = join(home, "holder.pid");
+  try {
+    if (existsSync(holderPidfile)) {
+      const pid = Number(readFileSync(holderPidfile, "utf8"));
+      if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch { /* 已死 */ } }
     }
   } catch { /* 清理失败不阻断 */ }
   if (existsSync(home)) rmSync(home, { recursive: true, force: true });
@@ -264,6 +287,29 @@ suite("integration: timeout kills long-running agent", () => {
     const t = openStore(join(home, "tasks.db")).getTask(id) as { error?: string };
     expect(t.error).toMatch(/timeout/i);
   }, 12_000);
+});
+
+suite("integration: timeout still reaches a terminal state when the agent never closes", () => {
+  // 2026-11-16 回归：2026-11-15 的真实任务 task_mwhlwihp_29b736 在 running 挂了 16.5 小时。
+  // 机制：agent 进程退出，但逃逸孙进程持有 stdout ⇒ Node 的 child 'close' 永不触发 ⇒
+  // 旧实现把「落终态」挂在 close 上 ⇒ 任务永远 running，只能靠人工 cancel 收场。
+  it("agent 已退出且 stdout 被逃逸孙进程持有 → 超时后任务仍落 failed(timeout)", async () => {
+    const holderPidfile = join(home, "holder.pid");
+    setupHome({ FAKE_MODE: "hold-pipe", FAKE_HOLDER_PIDFILE: holderPidfile }, 2); // timeout_sec=2
+    const r = await submit({ prompt: "hold pipe", project_path: home });
+    const id = (r as { task_id: string }).task_id;
+    try {
+      await waitForPidfile(holderPidfile);
+      // 关键断言：超时后任务必须自己走到终态，而不是永远 running
+      expect(await waitForTerminal(id, 25_000)).toBe("failed");
+      const t = openStore(join(home, "tasks.db")).getTask(id) as { error?: string; ended_at?: number };
+      expect(t.error).toMatch(/timeout after 2s \(round 1\)/);
+      expect(t.ended_at).toBeGreaterThan(0);
+    } finally {
+      // 清理：RED 阶段任务不会自己终态，runner 会一直挂着 ⇒ 手动 cancel 收掉
+      try { cancel({ task_id: id }); } catch { /* 已终态 */ }
+    }
+  }, 45_000);
 });
 
 suite("integration: needs_input → continue → completed", () => {

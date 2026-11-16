@@ -45,6 +45,24 @@
   退避 30s → 60s（可用 `AGENT_EX_RETRY_BACKOFF_MS` 覆盖，逗号分隔毫秒）。真超时、`needs_input`、
   硬失败**不重试**。重试与续跑轮数是两个独立计数，任务在单轮内即可重试 3 次。
 
+### 超时：任务一定会走到终态
+
+单轮超时按任务的 `timeout_sec` 计。到点后 runner 给 agent 进程树发 SIGTERM（3s 后补 SIGKILL），
+**落终态不依赖 agent 是否退出**：
+
+- agent 正常退出 → 立刻落 `failed`，`error` 为 `timeout after <N>s (round R)`；
+- agent 卡死不退（逃逸孙进程持有 stdout、进程卡在不可中断 IO）→ 宽限 **8s** 后由 runner 自己落
+  同样的 `failed`，并照发终态卡片。
+
+⇒ 任务最迟在 `timeout_sec + 8s` 进入终态，**不会永远停在 `running`**。
+
+> 2026-11-16 修：旧实现把「落终态」挂在 agent 的 `close` 事件上（进程退出**且** stdio 全关），
+> 管道被逃逸孙进程占住时该事件永不触发 —— 真实任务 `task_mwhlwihp_29b736` 因此在 `running`
+> 挂了 16.5 小时，最后靠人工 `cancel` 收场。
+
+> 例外：runner 进程**自身**被强杀（掉电 / 外部 `SIGKILL`）时来不及落终态，任务会停在 `running`。
+> 这时靠 `agent-ex wait` 的预算兜底（`WAIT=timeout`，exit 2）叫醒主 agent，由它决定 cancel 还是重派。
+
 ### 取消
 
 `cancel` 对终态任务**幂等**（返回当前状态，不改写）；对 `running` 任务会 SIGTERM 级联杀掉 agent 进程树。
