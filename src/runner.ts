@@ -18,7 +18,17 @@ import { dbPath } from "./paths.js";
 import { killTree } from "./proc-tree.js";
 
 const MAX_ROUNDS = 5;
-const NOTIFY_GRACE_MS = 1500; // SIGTERM 后给通知 promise 的最长等待时间
+/**
+ * 通知等待的宽限：进程退出前最多等通知落地多久。
+ *
+ * 默认 40s —— 必须盖过 notifier 自己的最坏耗时（`notifier.ts` 的 post()：3 次尝试 × 10s
+ * 超时 + 1s/4s 退避 ≈ 35s），否则「通知其实失败了、回执却被进程退出带走」会重演。
+ * 可用 AGENT_EX_NOTIFY_GRACE_MS 覆盖（毫秒）—— 集成测试走短宽限。
+ */
+const NOTIFY_GRACE_MS = (() => {
+  const v = Number(process.env.AGENT_EX_NOTIFY_GRACE_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 40_000;
+})();
 const MAX_RESULT_LEN = 4000;
 
 /**
@@ -77,17 +87,29 @@ interface RunOutcome {
 let pendingNotify: Promise<void> | null = null;
 
 /**
- * 等当前通知 promise 落地后退出进程。
+ * 等当前通知落地后退出进程；宽限耗尽仍未落地 ⇒ 先把「通知没送达」标进 DB 再走。
  *
- * 用在「超时强制收尾」路径：飞书卡片是「任务已失败」唯一的对外信号，进程先走会把
- * 请求截断——人收不到卡片、DB 里的 notify_failed 也不会被标上（看起来像通知过了，其实没发出去）。
+ * 为什么不能直接 exit：飞书卡片是「任务已终态」唯一的对外信号，进程先走会把在飞的请求掐断，
+ * **回执**（成功 / 被拒收 code=19024 等）随之一并丢失 ⇒ DB 显示 notify_failed=0（通知正常）、
+ * runner 日志里也不会有 `[notifier] feishu rejected` ⇒ doctor 扫日志也扫不到 ⇒ 静默失败。
+ * （2026-11-16 实测：旧 SIGTERM handler 只是**启动**了 Promise.race 就 process.exit(0)，等于没等。）
+ *
+ * 宽限耗尽时标 notify_failed 是保守但诚实的：这次退出会掐断请求，卡片多半真没送达；
+ * 反过来若不标，DB 就会替一张没送到的卡背书。
  */
-async function exitAfterNotify(): Promise<void> {
+async function exitAfterNotify(
+  store: ReturnType<typeof openStore>,
+  task: Task,
+): Promise<void> {
   if (pendingNotify) {
-    await Promise.race([
-      pendingNotify,
-      sleep(NOTIFY_GRACE_MS),
-    ]).catch(() => { /* finalize 已记日志 */ });
+    const settled = await Promise.race([
+      // 成功或失败都算「落地了」：失败时 finalize 的 .then 已经把 notify_failed 标上了。
+      pendingNotify.then(() => true, () => true),
+      sleep(NOTIFY_GRACE_MS).then(() => false),
+    ]);
+    if (!settled) {
+      try { store.patch(task.id, { notify_failed: true }); } catch { /* best effort */ }
+    }
   }
   process.exit(0);
 }
@@ -152,15 +174,9 @@ async function main(): Promise<void> {
   const prompt = task.rounds === 1 ? wrapInitialPrompt(rawInput, task.timeout_sec) : wrapContinuePrompt(rawInput, task.timeout_sec);
   appendFileSync(task.log_path, JSON.stringify({ type: "user_prompt", round: task.rounds, text: rawInput }) + "\n");
   // cancel 场景：server 端 killTree(runnerPid)（组杀 runner + agent；逃逸子进程靠 ppid 快照补杀）。
-  // 先等 final 通知最多 NOTIFY_GRACE_MS 完成再退出，避免截断导致 notify_failed 未标。
+  // 真正**等**通知落地再退出（不是只启动 race 就走）——回执丢了就是静默失败，见 exitAfterNotify。
   process.on("SIGTERM", () => {
-    if (pendingNotify) {
-      Promise.race([
-        pendingNotify,
-        new Promise<void>((r) => setTimeout(r, NOTIFY_GRACE_MS)),
-      ]).catch(() => { /* finalize 已记日志 */ });
-    }
-    process.exit(0);
+    void exitAfterNotify(store, task);
   });
 
   // 配额/限流告警单任务只推一次（任务级去重，不依赖 DB 字段）。
@@ -226,8 +242,8 @@ async function main(): Promise<void> {
           const text = (resultText ?? lastAssistantText ?? "").trim();
           finalize(store, task, "failed", { error: timeoutError, result: trunc(text) }, cfg);
           resolve({ timedOut: true, question: null, resultText, resultIsError, stderrTail, lastAssistantText, code: null });
-          // 通知是「任务已失败」唯一的对外信号 ⇒ 等它发完再退出，别让进程先走把卡片截断。
-          void exitAfterNotify();
+          // 通知是「任务已失败」唯一的对外信号 ⇒ 等它落地再退出，别让进程先走把回执带跑。
+          void exitAfterNotify(store, task);
         }, TIMEOUT_FINALIZE_GRACE_MS);
       }, task.timeout_sec * 1000);
       timeoutTimer.unref();

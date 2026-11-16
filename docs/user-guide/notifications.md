@@ -96,3 +96,16 @@ agent-ex doctor --send
 | `doctor --send` 自检卡 | ✅ 发（正文不含产品名，避免关键词闸门假通过） |
 
 卡片正文包含 worker 的最终报告摘要与「哪个 profile / 哪个模型跑出来的」那行小字。
+
+## 6. 通知的回执：runner 退出前会等它落地
+
+任务终态时 runner 发卡片，**发完才知道飞书收没收**（成功 / 被拒收 `code=19024` 等）。runner 退出前
+会等这个回执落地，最多等 `AGENT_EX_NOTIFY_GRACE_MS`（默认 40s，盖过 notifier 自己的最坏耗时
+3×10s + 退避 ≈ 35s）；等不到就把 `notify_failed` 标上再走。
+
+⇒ **`notify_failed=1` ⇒ 卡片没送达或被拒收**，跑 `agent-ex doctor` 看病因（它按 `code` 聚合）。
+反过来 `notify_failed=0` 只说明「没收到失败回执」，**不等于人一定看到了卡**——人是否已读要自己去群里看。
+
+> 2026-11-16 修：旧 SIGTERM handler 只是**启动**了等待就 `process.exit(0)`，回执随进程一起丢 ⇒
+> 飞书拒收时 `notify_failed` 不标、runner 日志里也不会有 `[notifier] feishu rejected` ⇒ doctor 扫不到，
+> 正是它本该抓的那类静默失败。

@@ -15,6 +15,8 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, readFileSync 
 import { join, dirname } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 
 // 集成测试直接跑预编译的 dist/runner.js（生产同款路径），避开 tsx 冷启动给每个 runner 进程加的延迟——
 // 否则本机 spawn 延迟会把测试内部 timing 阈值（waitForTerminal 8s / pidfile 4s / 并发 8s）拖爆而误报失败。
@@ -310,6 +312,49 @@ suite("integration: timeout still reaches a terminal state when the agent never 
       try { cancel({ task_id: id }); } catch { /* 已终态 */ }
     }
   }, 45_000);
+});
+
+suite("integration: 通知在飞时收到 SIGTERM", () => {
+  // 2026-11-16 回归：runner 的 SIGTERM handler 只是**启动**了 Promise.race 就 process.exit(0)
+  // ⇒ 通知的「回执」随进程一起消失：飞书若拒收（关键词不匹配等），notify_failed 不会被标上、
+  // runner 日志里也不会有 [notifier] feishu rejected ⇒ DB 说「通知正常」、doctor 也扫不到。
+  // 这里用「黑洞 webhook」（收下请求但永不响应）把通知卡在飞行中，再给 runner 发 SIGTERM。
+  it("通知还没落地就退出 ⇒ notify_failed 必须被标上（回执不随进程一起丢）", async () => {
+    const server = createServer(() => { /* 故意不 respond：让通知一直 in-flight */ });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    // 让 runner 的通知宽限走短路径（生产默认要覆盖 notifier 最坏耗时 ~35s）
+    process.env.AGENT_EX_NOTIFY_GRACE_MS = "800";
+    try {
+      setupHome({ FAKE_MODE: "ok" }, 30);
+      // 真发（dry_run=false）到本地黑洞 webhook
+      writeFileSync(join(home, "config.json"), JSON.stringify({
+        executors: { fake: { bin: fakeAgent, extra_flags: [] } },
+        profiles: { fake: { executor: "fake", env: { PATH: process.env.PATH ?? "" } } },
+        notify: { feishu_webhook_url: `http://127.0.0.1:${port}/hook`, dry_run: false },
+        defaults: { profile: "fake", timeout_sec: 30 },
+      }));
+      const r = await submit({ prompt: "notify in flight", project_path: home });
+      const id = (r as { task_id: string }).task_id;
+      const readTask = () => openStore(join(home, "tasks.db")).getTask(id) as
+        { pid: number; notify_failed: boolean; status: string };
+      // 任务已终态 ⇒ 卡片此刻正在飞
+      expect(await waitForTerminal(id, 15_000)).toBe("completed");
+      const pid = readTask().pid;
+      expect(pid).toBeGreaterThan(0);
+      // 模拟宿主拆进程树：给 runner 发 SIGTERM
+      process.kill(pid, "SIGTERM");
+      // runner 不该「静默退出」：等它把「通知没落地」标进 DB
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && !readTask().notify_failed) {
+        await new Promise((res) => setTimeout(res, 100));
+      }
+      expect(readTask().notify_failed).toBe(true);
+    } finally {
+      delete process.env.AGENT_EX_NOTIFY_GRACE_MS;
+      server.close();
+    }
+  }, 40_000);
 });
 
 suite("integration: needs_input → continue → completed", () => {
