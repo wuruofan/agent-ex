@@ -107,8 +107,13 @@ export interface Executor {
    *
    * 不实现 = 该 executor 不参与归因 ⇒ cause 留 NULL，行为与今天完全一致。
    * 返回 null = 参与归因但拿不到证据（log 不存在/读不了）⇒ 同样留 NULL。
+   *
+   * `now` = 终态时刻（毫秒）。**判据里的「静默时长」必须相对它算**，
+   * 不是相对 log 的最后一个事件——后者恰恰是 agent 停下的地方，相对它算永远得 0。
+   * runner 在 finalize 时调用 ⇒ 默认 `Date.now()` 即终态时刻。
+   * 显式传参是为了让单测能确定性地构造「静默多久」这个量。
    */
-  classifyLog?(logPath: string): CauseVerdict | null;
+  classifyLog?(logPath: string, now?: number): CauseVerdict | null;
 }
 ```
 
@@ -141,22 +146,63 @@ opencode 的相关事件形状：
 {"type":"step_finish","timestamp":…,"part":{"reason":"tool-calls|stop|unknown","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}
 ```
 
+**两类「模型没产出」的信号，必须分开看**：
+
+| 信号 | 形态 | 含义 | 处置方向 |
+| :--- | :--- | :--- | :--- |
+| **空转步** | 有 `step_finish`，但 tokens 全 0 | 请求**返回了**，只是没带回来任何东西 | 工单可能太大 ⇒ 缩工单 |
+| **悬空步** | 有 `step_start`，**没有**对应的 `step_finish` | 请求**没返回** | 上游挂死 ⇒ 换模型/换 provider |
+
 **「空转步」定义**：`step_finish` 且 `tokens.output === 0 && tokens.input === 0 && tokens.reasoning === 0 && (tokens.cache?.read ?? 0) === 0`——请求既没拿到上下文，也没产出任何东西。
+
+**「悬空步」定义**：最后一个 `step_start` 的 timestamp **大于**最后一个 `step_finish` 的 timestamp（最后一轮请求开了没关）。
+
+> **静默时长一律相对「终态时刻」算，不是相对 log 的最后一个事件。**
+> log 的最后一个事件恰恰就是 agent 停下的地方——相对它算永远得 0。
+> 终态时刻 = `classifyLog` 的调用时刻（runner 在 finalize 时调用）。
 
 判定（**自上而下，命中即返回**）：
 
-1. **`api_hang`**：空转步 **≥ 2 个**，且**按 timestamp 排序后相邻两个空转步的间隔最大值 ≥ 60s**（中间是否夹着别的步不影响，只要两个空转步挨得近就不算挂死）。
+1. **`api_hang`（悬空步）**：存在悬空步，且**该步的静默时长 ≥ 600s**。
+   证据：`unclosed step, silent 718s (last event +182s, timeout 900s)`。
+   **阈值依据**：全库 87 份任务 log 里，**返回了的**请求最长耗时 **365s**（`task_mv6tw03g_04d1a8`）⇒ 600s 是「比观测到的任何一次成功返回都长得多」的量级。
+2. **`api_hang`（空转步）**：空转步 **≥ 2 个**，且**按 timestamp 排序后相邻两个空转步的间隔最大值 ≥ 60s**（中间是否夹着别的步不影响，只要两个空转步挨得近就不算挂死）。
    证据：`5 zero-token steps; gaps 305s/307s/310s`（gaps 取上述相邻间隔中最大的 3 个，超出用 `…`）。
-2. **`no_text`**：全 log 的 text 事件数 **= 0** 且 tool 调用 **≥ 3** 次。
+3. **`no_text`**：全 log 的 text 事件数 **= 0** 且 tool 调用 **≥ 3** 次。
    证据：`0 text parts; 43 tool calls; last out 162 tok`。
-3. **`slow_progress`**：text 事件数 **≥ 1**（模型在写，只是没在时限内收敛）。
+4. **`slow_progress`**：text 事件数 **≥ 1**（模型在写，只是没在时限内收敛）。
    证据：`1 text part; 71 tool calls; last step 210s ago`。
-4. **`unknown`**：以上都不匹配。
+5. **`unknown`**：以上都不匹配。
    证据：`log has 2 events, no usable signal`。
 
-**为什么 `api_hang` 排在 `no_text` 前面**：`task_mwd8wcv4_e1009f` 同时满足「0 text」和「零 token 空转」两条。两条都成立时，「换 provider / 换模型」比「缩工单」更可操作（工单已经收窄过了，再缩是过度反应）。
+**为什么「悬空步」排在「空转步」前面**：两者指向相反的处置——悬空是**上游没应答**（重试同一请求大概率同样挂 ⇒ 换模型/换 provider），空转是**上游答了但没内容**（⇒ 工单可能太大，缩工单）。悬空是更强的证据：它直接说明请求从未回来。
 
-**已知局限（写进文档，不藏）**：只有**一个**空转步时不足以判定 `api_hang`，会落到 `no_text`。此时证据串里的 `last out 0 tok` 会暴露异常，主 agent 可据此改判。
+**实测校准（4 个失败/取消任务，全部判对）**：
+
+| task | 悬空步静默时长 | 命中规则 | 归因 |
+| :--- | :--- | :--- | :--- |
+| `task_mwhlwihp_29b736`（11-15 挂死 16.5h，上游 `deepseek-v4.1-flash-free` 不返回） | **718s** | 规则 1 | `api_hang` ✅ |
+| `task_mwacatue_add1eb` | 452s | 否 | `no_text` ✅ |
+| `task_mwd8wcv4_e1009f` | 121s | 否 | 规则 2 → `api_hang` ✅ |
+| `task_mwd8blbh_30d0a9` | 5s | 否 | `no_text` ✅ |
+
+> `718s` 是**按 `19c05ec` 的超时兜底推算**的值（900s 预算 − 182s 已用）；修复前该任务直到 16.4h 后被人工 cancel，静默时长实测 59141s。
+
+**「悬空步」的存在性本身毫无区分度**（实测 87 份 log）：
+
+- **5 个**任务有悬空步：4 个失败/取消的 + 1 个**正在跑**的（`task_mwizf25g_68b5b0`，最后一步就是当前在飞的那一步）；
+- **80 个**任务没有（`step_start` 数 == `step_finish` 数）——它们**正常跑完了**；
+- 4 个失败任务**全都有**悬空步（都是被杀在步中间）。
+
+⇒ 「有没有悬空步」≈「是不是被杀过」；**判据必须看步龄，不能看存在性**。
+
+**这条判据修掉了一个具体的误判**：`task_mwhlwihp_29b736` 每个**闭合**的步都有真实 token（101–246），零 token 步 = 0，text = 1 ⇒ 按旧判据会落进 `slow_progress`（建议「加时限」）。而真因是上游挂死，正确处置是**换模型/换 provider**——加时限只会让它再挂一次。
+
+**已知局限（写进文档，不藏）**：
+
+- 阈值 600s 是**标定值**，不是拟合出来的：真实挂死样本只有 1 个（`task_mwhlwihp_29b736`）。阈值偏大 ⇒ 晚挂的任务漏判；偏小 ⇒ 把「被杀在步中间」误判成挂死。
+- **`timeout_sec ≲ 600s` 时本判据不会触发**：步龄的上限就是预算本身（超时即杀）。这种预算下挂死只能靠规则 2 或落到 `unknown`。
+- 「静默时长」依赖终态时刻可取：`classifyLog` 在 finalize 时调用是成立的。若将来改成事后异步归因，参考时刻要改取 DB 的 `ended_at`。
 
 ### 4.2 claude
 
@@ -164,12 +210,16 @@ claude 的 CLI 事件形状（`{"type":"assistant",…}` / `{"type":"result",…
 
 | 归因 | 判据 | 证据示例 |
 | :--- | :--- | :--- |
-| `api_hang` | 存在 `system` 事件且 `subtype ∈ {api_retry, api_error}`；或**最后一个 assistant 事件的 timestamp 与 log 中最后一个事件的 timestamp 之差 ≥ 120s**，且全程没有 `result` 事件 | `3 api_retry/api_error events` / `last assistant 210s before end, no result event` |
+| `api_hang` | 存在 `system` 事件且 `subtype ∈ {api_retry, api_error}`；或**最后一个 assistant 事件的 timestamp 与终态时刻之差 ≥ 600s**（静默时长，同 §4.1 的标定值），且全程没有 `result` 事件 | `3 api_retry/api_error events` / `silent 718s before end, no result event` |
 | `no_text` | assistant 事件的 `message.content[]` 里**没有任何 text block**（只有 tool_use），且 assistant 事件数 ≥3 | `0 text blocks in 5 assistant events` |
 | `slow_progress` | 至少一个 assistant 事件含 text block | `2 text blocks in 5 assistant events` |
 | `unknown` | 其余（含 assistant 事件数 <3 且无 api 错误信号） | `no usable signal in 4 events` |
 
 「什么算 text block」复用 `src/report.ts` 的 `assistantTexts`（claude 分支），与报告提取同源。
+
+> ⚠️ **claude 侧判据没有任何实测样本**：本机 87 份任务 log **全是** opencode executor（`opencode-minimax-cn` 52 + `opencode-zen-free` 35）。上表按 claude 的事件形状**推导**（未校准），首次 claude 侧超时应人工复核一次再定阈值。
+>
+> 特别地，原先写的「与 **log 中最后一个事件**的 timestamp 之差 ≥ 120s」是**错的参照点**：agent 挂死时 log 的最后一个事件就是它自己 ⇒ 差值恒为 0 ⇒ 该判据在挂死场景下**永不触发**。参照点必须换成终态时刻。
 
 ### 4.3 措辞纪律
 
@@ -218,17 +268,17 @@ runner 判定超时
 新增两行，紧跟 `ERROR=` 之后：
 
 ```
-TASK_ID=task_mwd8blbh_30d0a9
+TASK_ID=task_mwd8wcv4_e1009f
 STATUS=failed
 WAIT=terminal
-MAX_WAIT_SEC=2910
-ELAPSED_SEC=905
+MAX_WAIT_SEC=5610
+ELAPSED_SEC=1805
 FILES_CHANGED=0
-ERROR=timeout after 900s (round 1)
+ERROR=timeout after 1800s (round 1)
 CAUSE=api_hang
 CAUSE_EVIDENCE=5 zero-token steps; gaps 305s/307s/310s
-LOG_PATH=/Users/…/task_mwd8blbh_30d0a9.jsonl
-REPORT_PATH=/tmp/task_mwd8blbh_30d0a9.report.md
+LOG_PATH=/Users/…/task_mwd8wcv4_e1009f.jsonl
+REPORT_PATH=/tmp/task_mwd8wcv4_e1009f.report.md
 REPORT_CHARS=0
 ```
 
@@ -318,8 +368,9 @@ timeout after 900s (round 1)
 
 | 文件 | 覆盖 |
 | :--- | :--- |
-| `tests/executors-opencode.test.ts` | `classifyLog` 的 4 条判据各一例（用真实事件形状构造）；未匹配 ⇒ `unknown`；日志不存在 ⇒ `null` |
-| `tests/executors-claude.test.ts` | 同上，claude 事件形状 |
+| `tests/executors-opencode.test.ts` | `classifyLog` 的 5 条判据各一例（用真实事件形状构造）；未匹配 ⇒ `unknown`；日志不存在 ⇒ `null` |
+| ↳ 悬空步用例 | ① 静默 **718s** ⇒ `api_hang`（规则 1）；② 静默 **452s** ⇒ **不**命中规则 1、落 `no_text`；③ `step_start`/`step_finish` 数量相等 ⇒ 无悬空步；④ 静默时长相对**传入的 `now`**算（构造确定性，不依赖真实时钟） |
+| `tests/executors-claude.test.ts` | 同上，claude 事件形状（含「静默时长相对终态时刻」一例——旧写法的参照点会让该判据恒不触发） |
 | `tests/store.test.ts` | 新列在旧库上自动迁移；`patch`/`transition` 写入 `cause`/`cause_evidence` 后能读回 |
 | `tests/wait.test.ts` | `CAUSE=` / `CAUSE_EVIDENCE=` 有值时输出、无值时不输出；顺序在 `ERROR=` 之后 `LOG_PATH=` 之前；`ERROR=` 内容不变 |
 | `tests/tools.test.ts` | `agent_ex_status` 返回 `cause` / `cause_evidence`；无归因时字段不出现 |
@@ -364,6 +415,9 @@ timeout after 900s (round 1)
 | :--- | :--- | :--- |
 | 归因误判 | 启发式规则，不是因果证明 | 措辞统一为「疑似」；必带证据串；skill 里写明「以 `ERROR=` 为准」 |
 | 单次空转步无法判 `api_hang` | 落到 `no_text` | 证据串里 `last out 0 tok` 暴露异常；文档明写此局限 |
+| 悬空步阈值是标定值（600s），真实挂死样本只有 1 个 | 偏大 ⇒ 晚挂的任务漏判；偏小 ⇒ 把「被杀在步中间」误判成挂死 | 阈值写明依据（观测到的最长成功返回 = 365s）；首次命中新判据时人工复核 |
+| `timeout_sec ≲ 600s` 时悬空步判据无法触发 | 步龄上限 = 预算本身 | 文档明写；该预算下依赖空转步判据或落 `unknown` |
+| claude 侧判据**零实测样本** | 本机 87 份 log 全是 opencode | 文档明写「推导未校准」；首次 claude 侧超时请人工复核一次再定阈值 |
 | claude 侧精度低一档 | 无 `step_finish.tokens` | claude 判据只用它有的信号（api_error / text block），证据串注明依据 |
 | 日志体积 | `classifyLog` 全量读 log | 实测 192KB 量级；只在终态扫一次，不是热路径 |
 | 归因漂移 | executor 升级改了日志形状 | 判据全部基于已实测的事件形状；`unknown` 兜底，不会误报成具体原因 |
@@ -372,7 +426,7 @@ timeout after 900s (round 1)
 
 ## 15. 附：实测原始数据（本设计的校准依据）
 
-来自 `~/.agent-ex/logs/`，2026-11-11 ~ 11-13 的 10 个真实任务：
+来自 `~/.agent-ex/logs/`，2026-11-11 ~ 11-13 批次；下表列出其中用于校准的 6 个真实任务：
 
 ```
 task_id                   text  tool  steps  reasons(tools/unknown)  lastTok_out  lastGap_s  zeroTokSteps
@@ -387,3 +441,29 @@ task_mwacatue_add1eb      0     26    15     15/0                    130        
 - 健康任务：`text ≥ 1`、每步 output token 1378–2500、步间隔 41–94s。
 - `no_text` 型失败：`text = 0`、output token 130–162（低但非零）、步间隔 <210s。
 - `api_hang` 型失败：`reason=unknown` 且 tokens 全 0 的步 **5 个**、间隔 305/307/310s、opencode 自身日志对应 `stream providerID=opencode modelID=mimo-v2.6-flash-free` 之后 5 分钟零事件。
+
+### 15.1 悬空步判据的校准数据（2026-11-16 复测）
+
+复测范围：`~/.agent-ex/logs/` 里 **87 份**有 log 的任务（2026-10-08 ~ 11-16）。
+
+**「返回了的请求」耗时**（`step_start` → 自己的 `step_finish`）：
+
+| 任务 | 最大闭合步耗时 |
+| :--- | :--- |
+| `task_mv6tw03g_04d1a8`（completed，**全库最大**） | **365s** |
+| `task_mwhlwihp_29b736` | 19s |
+| `task_mwacatue_add1eb` | 37s |
+| `task_mwd8blbh_30d0a9` | 166s |
+| `task_mwd8wcv4_e1009f` | 302s |
+
+⇒ 悬空步阈值取 **600s**：比观测到的任何一次成功返回（365s）都长得多。
+
+**悬空步存在性统计（87 份 log）**：
+
+| 类别 | 数量 | 说明 |
+| :--- | :--- | :--- |
+| 有悬空步 | 5 | 4 个失败/取消 + 1 个**正在跑**的（`task_mwizf25g_68b5b0`） |
+| 无悬空步 | 80 | `step_start` 数 == `step_finish` 数 ⇒ 正常跑完 |
+| 失败任务中有悬空步 | **4 / 4** | 全是被杀在步中间 ⇒ 存在性不区分原因，只能看步龄 |
+
+**executor 分布**：`opencode/opencode-minimax-cn` 52 + `opencode/opencode-zen-free` 35 ⇒ **claude 侧零样本**，§4.2 的判据未经任何校准。
