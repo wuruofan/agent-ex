@@ -71,8 +71,12 @@
 - 每个 executor 的 bin 用 `resolveBinPath()` 校验（与启动期校验同一套逻辑，避免"校验期通过、运行时 ENOENT"）
 
 **(c) 历史通知失败**
-- 扫 `logs/runner-*.log`，正则 `/feishu rejected: HTTP (\d+) code=(-?\d+) msg=(.*?)\s*\(attempt/`
-- 聚合成：受影响任务数、按 `code` 的次数、每任务最近一次失败
+- 扫 `logs/runner-*.log`，正则 `/feishu rejected: HTTP (\d+) code=(-?\d+) msg=(.*?)\s*\(attempt[^)]*\)(?:[ \t]+card=(\S+))?/`
+- **分两桶**（2026-11-17 修）：`card=quota_warning` ⇒ **提示级**（配额告警卡，它不写 `notify_failed`）；
+  其余（含**无标签的老日志**）⇒ **任务级**（终态卡，与 DB 的 `notify_failed` 同一口径）。
+  不分桶的话，doctor 会把配额卡的拒收算成「任务通知失败」，而 DB 里那些任务 `notify_failed` 仍是 0
+  ⇒ 两处口径矛盾。
+- 聚合成：受影响任务数、按 `code` 的次数、每任务最近一次失败（两个桶各聚一份）
 - severity = **warn**（D4）
 
 **输出契约**（CLI 与 MCP 一致）：
@@ -83,7 +87,10 @@
   "findings": [
     { "severity": "error", "title": "…", "detail": "…", "fix": "agent-ex config set …", "fixable": true }
   ],
-  "notify_failures": { "logs_with_rejects": 24, "by_code": { "19024": 69, "19001": 3 }, "recent": [ … ] }
+  "notify_failures": {
+    "logs_with_rejects": 24, "by_code": { "19024": 69, "19001": 3 }, "recent": [ … ],   // 任务级（终态卡）
+    "advisory_logs": 2, "advisory_by_code": { "19024": 6 }                              // 提示级（配额告警卡）
+  }
 }
 ```
 

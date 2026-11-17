@@ -106,6 +106,12 @@ agent-ex doctor --send
 ⇒ **`notify_failed=1` ⇒ 卡片没送达或被拒收**，跑 `agent-ex doctor` 看病因（它按 `code` 聚合）。
 反过来 `notify_failed=0` 只说明「没收到失败回执」，**不等于人一定看到了卡**——人是否已读要自己去群里看。
 
+**doctor 读历史日志时分两桶**（2026-11-17 修）：runner 日志的拒收行末尾带 `card=<标签>`——
+`card=completed|failed|needs_input` 是**终态卡**（被拒收 ⇒ 该任务的 `notify_failed` 会被标上，
+与 DB 同一口径）；`card=quota_warning` 是**配额告警卡**（被拒收只是早期提示丢了，
+`notify_failed` **不受影响**）。两者混在一起报，doctor 就会和 DB 对不上。
+没带标签的旧日志一律按**终态卡**算（保守：宁可多报，也不把没标过的证据悄悄降级成提示）。
+
 > 2026-11-16 修：旧 SIGTERM handler 只是**启动**了等待就 `process.exit(0)`，回执随进程一起丢 ⇒
 > 飞书拒收时 `notify_failed` 不标、runner 日志里也不会有 `[notifier] feishu rejected` ⇒ doctor 扫不到，
 > 正是它本该抓的那类静默失败。

@@ -459,7 +459,7 @@ function finalize(
   // 不登记 ⇒ 这张终态卡会被退出掐断（回执丢失 ⇒ notify_failed 永远标不上）。
   // isTerminal=true ⇒ 只有它的落地状态决定 notify_failed。
   trackNotify(
-    sendFeishuCard(webhook, buildFeishuCard(to, task.id, detail, cfg.notify.keyword, cardFooter(task, cfg)), { dryRun })
+    sendFeishuCard(webhook, buildFeishuCard(to, task.id, detail, cfg.notify.keyword, cardFooter(task, cfg)), { dryRun, label: to })
       .then((r) => { if (!r.ok) store.patch(task.id, { notify_failed: true }); })
       .catch((e) => { console.error("[notifier] unexpected:", e); store.patch(task.id, { notify_failed: true }); }),
     true,
@@ -519,7 +519,7 @@ function pushQuotaWarning(
   if (q.message) parts.push(`\n> ${q.message}`);
   const detail = parts.join("\n\n");
   trackNotify(
-    sendFeishuCard(webhook, buildFeishuCard("quota_warning", task.id, detail, cfg.notify.keyword, cardFooter(task, cfg)), { dryRun })
+    sendFeishuCard(webhook, buildFeishuCard("quota_warning", task.id, detail, cfg.notify.keyword, cardFooter(task, cfg)), { dryRun, label: "quota_warning" })
       // 飞书拒收是 **resolve {ok:false}**（不是 throw）⇒ 用 then 接，catch 只兜网络异常。
       .then((r) => {
         if (!r.ok) console.error(`[quota-warn] feishu rejected: code=${r.code} msg=${r.msg}`);

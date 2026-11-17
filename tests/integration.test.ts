@@ -35,6 +35,7 @@ import { status } from "../src/tools/status.js";
 import { cancel } from "../src/tools/cancel.js";
 import { openStore } from "../src/store.js";
 import { killTree, isPsAvailable } from "../src/proc-tree.js";
+import { scanNotifyFailures } from "../src/doctor.js";
 
 // 依赖 `ps` 才能发现「逃逸孙进程」的用例：ps 不可用时（如 WorkBuddy Bash 工具的 Seatbelt 沙箱
 // 拒绝执行 setuid 的 /bin/ps）显式跳过，而不是以「假红」形式报错。详见 src/proc-tree.ts。
@@ -532,6 +533,74 @@ suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
       server.close();
     }
   }, 40_000);
+});
+
+suite("integration: 通知日志的卡片标签", () => {
+  // 2026-11-17：doctor 要把「配额告警卡被拒收」与「终态卡被拒收」分桶——
+  // 前者在 DB 里不写 notify_failed，后者写 ⇒ 两件事混在一起就是「口径矛盾」。
+  // 桶靠日志里的 card= 标签区分 ⇒ runner 必须真的给每张卡打标签。
+  it("配额卡与终态卡各带各的标签 ⇒ doctor 分桶后与 notify_failed 同一口径", async () => {
+    let seen = 0;
+    const server = createServer((req, res) => {
+      seen++;
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        // 一律拒收（HTTP 200 + code=19024）⇒ 两张卡都会留下 [notifier] feishu rejected
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ code: 19024, msg: "Key Words Not Found" }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    const pidfile = join(home, "agent.pid");
+    try {
+      setupHome({ FAKE_MODE: "quota", FAKE_PIDFILE: pidfile }, 30);
+      writeFileSync(join(home, "config.json"), JSON.stringify({
+        executors: { fake: { bin: fakeAgent, extra_flags: [] } },
+        profiles: {
+          fake: {
+            executor: "fake",
+            env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota", FAKE_PIDFILE: pidfile },
+          },
+        },
+        notify: { feishu_webhook_url: `http://127.0.0.1:${port}/hook`, dry_run: false },
+        defaults: { profile: "fake", timeout_sec: 30 },
+      }));
+      const r = await submit({ prompt: "card labels", project_path: home });
+      const id = (r as { task_id: string }).task_id;
+      // 等配额卡发出去（webhook 收到请求）
+      const arrived = Date.now() + 10_000;
+      while (Date.now() < arrived && seen < 1) {
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      expect(seen).toBeGreaterThanOrEqual(1);
+      const pid = (openStore(join(home, "tasks.db")).getTask(id) as { pid: number }).pid;
+      expect(pid).toBeGreaterThan(0);
+      // 收尾 ⇒ runner 落一张终态卡（failed）⇒ 日志里两张卡的标签必须能区分
+      process.kill(pid, "SIGTERM");
+      const exited = Date.now() + 30_000;
+      while (Date.now() < exited) {
+        try { process.kill(pid, 0); } catch { break; }
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      const log = readFileSync(join(home, "logs", `runner-${id}.log`), "utf8");
+      expect(log).toContain("card=quota_warning");
+      expect(log).toContain("card=failed");
+      // doctor 分桶：配额卡是提示级、终态卡是任务级（任务级与 DB 的 notify_failed 同一口径）
+      const s = scanNotifyFailures(home);
+      expect(s.advisory_logs).toBe(1);
+      expect(s.logs_with_rejects).toBe(1);
+      expect(s.advisory_by_code["19024"]).toBeGreaterThan(0);
+      expect(s.by_code["19024"]).toBeGreaterThan(0);
+    } finally {
+      try {
+        const apid = Number(readFileSync(pidfile, "utf8"));
+        if (apid > 0) { try { process.kill(apid, "SIGKILL"); } catch { /* 已死 */ } }
+      } catch { /* 无 pidfile */ }
+      server.close();
+    }
+  }, 60_000);
 });
 
 suite("integration: cancel 撞上在飞的配额卡", () => {

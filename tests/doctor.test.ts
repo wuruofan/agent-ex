@@ -404,6 +404,41 @@ describe("scanNotifyFailures —— 从 runner 日志里挖证据", () => {
     expect(s.logs_with_rejects).toBe(0);
     expect(s.by_code).toEqual({});
   });
+
+  // 2026-11-17：配额告警卡被拒收**不算**任务通知失败（那张卡不写 notify_failed），
+  // 但它同样会留下 `[notifier] feishu rejected` ⇒ doctor 把它算进「过去被拒收的任务数」
+  // ⇒ 与 DB 的 notify_failed 口径不一致。两条证据必须分桶。
+  it("配额告警卡的拒收单独一桶：不算进「任务通知被拒收」", async () => {
+    mkdirSync(join(home, "logs"), { recursive: true });
+    // 终态卡被拒收 ⇒ 任务级（DB 里 notify_failed 会被标上）
+    writeFileSync(join(home, "logs", "runner-task_a.log"),
+      "[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found (attempt 1/3) card=failed\n");
+    // 配额告警卡被拒收 ⇒ 提示级（DB 里 notify_failed 仍是 0）
+    writeFileSync(join(home, "logs", "runner-task_b.log"),
+      "[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found (attempt 1/3) card=quota_warning\n");
+    const s = scanNotifyFailures(home);
+    expect(s.logs_with_rejects).toBe(1);          // 只有终态卡算「受影响任务」
+    expect(s.by_code["19024"]).toBe(1);
+    expect(s.advisory_logs).toBe(1);
+    expect(s.advisory_by_code["19024"]).toBe(1);
+  });
+
+  it("报告里两条证据分开说：任务级 vs 提示级（提示级明说不影响任务状态）", async () => {
+    writeHealthy();
+    mkdirSync(join(home, "logs"), { recursive: true });
+    writeFileSync(join(home, "logs", "runner-task_a.log"),
+      "[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found (attempt 1/3) card=failed\n");
+    writeFileSync(join(home, "logs", "runner-task_b.log"),
+      "[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found (attempt 1/3) card=quota_warning\n");
+    const r = await doctor({ home, userHome, which: NO_TOOLCHAIN });
+    const taskLevel = r.findings.find((x) => x.title.includes("in the past"));
+    expect(taskLevel?.title).toContain("1 task(s)");
+    const advisory = r.findings.find((x) => x.title.includes("quota warning"));
+    expect(advisory).toBeDefined();
+    expect(advisory?.title).toContain("1 task(s)");
+    // 提示级那条必须说清「不影响任务状态」，否则人会以为 DB 里 notify_failed 也是 1
+    expect(advisory?.detail).toContain("notify_failed");
+  });
 });
 
 describe("FEISHU_ERRORS —— 错误码含义与修法", () => {

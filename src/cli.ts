@@ -41,6 +41,12 @@ function renderDoctor(report: Awaited<ReturnType<typeof doctor>>): void {
     console.log(`\n${ansi.yellow(`${s.logs_with_rejects} task log(s) contain rejected notifications`)}`);
     for (const [code, n] of Object.entries(s.by_code)) console.log(`  code=${code} × ${n}`);
   }
+  // 提示级（配额告警卡）单列：它不写 notify_failed ⇒ 不能与上面那条混着说。
+  if (report.notify_failures && report.notify_failures.advisory_logs > 0) {
+    const s = report.notify_failures;
+    console.log(`\n${ansi.yellow(`${s.advisory_logs} task log(s) contain rejected quota warning cards (advisory — notify_failed is unaffected)`)}`);
+    for (const [code, n] of Object.entries(s.advisory_by_code)) console.log(`  code=${code} × ${n}`);
+  }
   console.log("");
 }
 

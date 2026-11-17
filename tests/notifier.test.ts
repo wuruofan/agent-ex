@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildFeishuCard, sendFeishuText } from "../src/notifier.js";
+import { buildFeishuCard, sendFeishuCard, sendFeishuText } from "../src/notifier.js";
 import { BRAND } from "../src/brand.js";
 
 function mockFetch(sequence: Array<{ ok: boolean; status?: number; code?: number }>) {
@@ -89,6 +89,43 @@ describe("sendFeishuText", () => {
     });
     expect(r.ok).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("通知日志的卡片标签（doctor 靠它分桶）", () => {
+  /**
+   * 2026-11-17：doctor 要把「配额告警卡被拒收」与「终态卡被拒收」分开算
+   * （前者不写 notify_failed，后者写）⇒ 拒收日志行必须带上 card= 标签，
+   * 否则两件事在日志里长得一模一样，只能靠猜。
+   */
+  async function captureRejects(opts: { label?: string }): Promise<string> {
+    const errs: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => {
+      errs.push(a.map((x) => String(x)).join(" "));
+    });
+    try {
+      const fetchMock = vi.fn(async () => ({
+        ok: true, status: 200, json: async () => ({ code: 19024, msg: "Key Words Not Found" }),
+      }) as Response);
+      await sendFeishuCard("https://hook/x", buildFeishuCard("quota_warning", "t", "d"), {
+        fetchImpl: fetchMock as unknown as typeof fetch,
+        delays: [0, 0],
+        ...opts,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    return errs.join("\n");
+  }
+
+  it("拒收日志带上 card= 标签", async () => {
+    expect(await captureRejects({ label: "quota_warning" })).toContain("card=quota_warning");
+  });
+
+  it("没传 label 时日志行保持原样（老日志格式仍然可解析）", async () => {
+    const out = await captureRejects({});
+    expect(out).toContain("[notifier] feishu rejected: HTTP 200 code=19024");
+    expect(out).not.toContain("card=");
   });
 });
 

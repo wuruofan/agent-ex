@@ -54,13 +54,30 @@ export interface DoctorReport {
   notify_failures?: NotifyFailureStats;
 }
 
+/**
+ * 从 runner 日志里聚合通知失败证据。
+ *
+ * ⚠️ **两个桶，两种口径**（2026-11-17 修）：
+ * - **任务级**（`logs_with_rejects` / `by_code` / `recent`）：**终态卡**被拒收。
+ *   DB 里这些任务会被标 `notify_failed` ⇒ 这一桶与 DB 同口径。
+ * - **提示级**（`advisory_logs` / `advisory_by_code`）：**配额告警卡**被拒收。
+ *   那张卡不写 `notify_failed`（它是早期提示信号，不是"任务已终态"的账）
+ *   ⇒ 混进任务级就是 doctor 与 DB 互相打脸。
+ *
+ * 分桶靠日志行末尾的 `card=<label>`（见 notifier.ts 的 NotifyOptions.label）。
+ * **老日志没有标签 ⇒ 一律算任务级**（保守：宁可多报，也不把没标过的证据悄悄降级）。
+ */
 export interface NotifyFailureStats {
-  /** 含 reject 记录的 runner 日志数。 */
+  /** 含**任务级** reject 记录的 runner 日志数（终态卡被拒收）。 */
   logs_with_rejects: number;
-  /** 按 code 聚合的次数。 */
+  /** 任务级：按 code 聚合的次数。 */
   by_code: Record<string, number>;
-  /** 最近的失败样本（task id + code + 时间）。 */
+  /** 任务级：最近的失败样本（task id + code + msg）。 */
   recent: Array<{ task_id: string; code: string; msg: string }>;
+  /** 含**提示级** reject 记录的 runner 日志数（配额告警卡被拒收）。 */
+  advisory_logs: number;
+  /** 提示级：按 code 聚合的次数。 */
+  advisory_by_code: Record<string, number>;
 }
 
 /**
@@ -151,7 +168,9 @@ export function classifyWebhook(url: string | undefined): WebhookState {
 /** 从 runner 日志里聚合通知失败证据。 */
 export function scanNotifyFailures(home: string = agentExHome()): NotifyFailureStats {
   const dir = join(home, "logs");
-  const stats: NotifyFailureStats = { logs_with_rejects: 0, by_code: {}, recent: [] };
+  const stats: NotifyFailureStats = {
+    logs_with_rejects: 0, by_code: {}, recent: [], advisory_logs: 0, advisory_by_code: {},
+  };
   if (!existsSync(dir)) return stats;
   let files: string[];
   try {
@@ -166,20 +185,34 @@ export function scanNotifyFailures(home: string = agentExHome()): NotifyFailureS
     } catch {
       continue;
     }
-    const re = /feishu rejected: HTTP (\d+) code=(-?\d+) msg=(.*?)\s*\(attempt/g;
+    // 末尾的 `card=<label>` 是**可选**的：老日志没有它 ⇒ 归任务级（保守，见 NotifyFailureStats）。
+    // 标签与 `)` 之间只允许空格/制表符：若用 \s 会跨行匹配到下一行的 card=，把别的日志串进来。
+    const re = /feishu rejected: HTTP (\d+) code=(-?\d+) msg=(.*?)\s*\(attempt[^)]*\)(?:[ \t]+card=(\S+))?/g;
     let m: RegExpExecArray | null;
-    const codesHere: Array<{ code: string; msg: string }> = [];
+    const codesHere: Array<{ code: string; msg: string; advisory: boolean }> = [];
     while ((m = re.exec(text)) !== null) {
-      codesHere.push({ code: m[2], msg: m[3] });
+      codesHere.push({ code: m[2], msg: m[3], advisory: m[4] === "quota_warning" });
     }
     if (codesHere.length === 0) continue;
-    stats.logs_with_rejects += 1;
-    for (const c of codesHere) {
-      stats.by_code[c.code] = (stats.by_code[c.code] ?? 0) + 1;
+    // 同一个 runner 日志里可能两类卡都有（配额卡先到、终态卡后到）⇒ 两桶各算各的，
+    // 但每个桶里「一个日志 = 一个受影响任务」。
+    const taskLevel = codesHere.filter((c) => !c.advisory);
+    const advisory = codesHere.filter((c) => c.advisory);
+    if (taskLevel.length > 0) {
+      stats.logs_with_rejects += 1;
+      for (const c of taskLevel) {
+        stats.by_code[c.code] = (stats.by_code[c.code] ?? 0) + 1;
+      }
+      // 每个日志只记一条（同一任务重试 3 次算一次失败，但计数保留全部尝试数）
+      const first = taskLevel[0];
+      stats.recent.push({ task_id: f.replace(/^runner-/, "").replace(/\.log$/, ""), code: first.code, msg: first.msg });
     }
-    // 每个日志只记一条（同一任务重试 3 次算一次失败，但计数保留全部尝试数）
-    const first = codesHere[0];
-    stats.recent.push({ task_id: f.replace(/^runner-/, "").replace(/\.log$/, ""), code: first.code, msg: first.msg });
+    if (advisory.length > 0) {
+      stats.advisory_logs += 1;
+      for (const c of advisory) {
+        stats.advisory_by_code[c.code] = (stats.advisory_by_code[c.code] ?? 0) + 1;
+      }
+    }
   }
   stats.recent.sort((a, b) => (a.task_id < b.task_id ? 1 : -1));
   return stats;
@@ -639,6 +672,25 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
       severity: "warn",
       title: `${stats.logs_with_rejects} task(s) had notifications rejected in the past (${attempts} attempt(s) total)`,
       detail: `${parts}. Most recent: ${stats.recent[0]?.task_id}.`,
+      fix: fixes.length > 0 ? fixes.join("; ") : undefined,
+    });
+  }
+
+  // 提示级（配额告警卡）：**与 notify_failed 无关**，必须单独一条。
+  // 把它混进上面那条，doctor 就会说「N 个任务的通知被拒收」，而 DB 里那些任务的
+  // notify_failed 仍是 0（配额卡本来就不写它）⇒ 两处口径矛盾，人不知道该信谁。
+  if (stats.advisory_logs > 0) {
+    const attempts = Object.values(stats.advisory_by_code).reduce((a, b) => a + b, 0);
+    const parts = Object.entries(stats.advisory_by_code)
+      .map(([code, n]) => `code=${code} ×${n} attempt(s)${FEISHU_ERRORS[code] ? ` (${FEISHU_ERRORS[code].meaning})` : ""}`)
+      .join("; ");
+    const fixes = Object.keys(stats.advisory_by_code)
+      .map((code) => FEISHU_ERRORS[code]?.fix)
+      .filter((f): f is string => Boolean(f));
+    findings.push({
+      severity: "warn",
+      title: `${stats.advisory_logs} task(s) had quota warning cards rejected (${attempts} attempt(s) total)`,
+      detail: `${parts}. These are advisory quota-warning cards: the task still reached a terminal state, and notify_failed is NOT affected — it only tracks the terminal card. The same cause usually hits the terminal card too; the task-level entry above says whether it did.`,
       fix: fixes.length > 0 ? fixes.join("; ") : undefined,
     });
   }

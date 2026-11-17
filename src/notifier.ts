@@ -8,6 +8,19 @@ export interface NotifyOptions {
   dryRun?: boolean;
   /** 单次请求超时 ms；默认 10_000。超时按一次失败计数，走既有重试。 */
   timeoutMs?: number;
+  /**
+   * 卡片类型标签（completed / failed / needs_input / quota_warning）。
+   *
+   * 只出现在拒收日志行的末尾（`card=<label>`），不参与投递逻辑。
+   * 它的唯一用途是让 doctor 能把日志证据**分桶**：
+   * **终态卡**被拒收 = 任务通知失败（DB 里 notify_failed 会被标上）；
+   * **配额告警卡**被拒收 = 只是早期提示信号丢了（notify_failed 不受影响）。
+   * 两者在日志里本来长得一模一样 ⇒ 不打标签，doctor 就只能与 DB 的口径矛盾。
+   *
+   * 不传 label ⇒ 日志行保持旧格式。老日志按**任务级**算（保守：宁可多报，
+   * 也不把没标过的证据悄悄降级成提示）。
+   */
+  label?: string;
 }
 
 export type FeishuStatus = "needs_input" | "completed" | "failed" | "quota_warning";
@@ -54,6 +67,8 @@ async function post(webhookUrl: string, payload: FeishuPayload, opts: NotifyOpti
   const doFetch = opts.fetchImpl ?? fetch;
   const delays = opts.delays ?? [1000, 4000];
   const timeoutMs = opts.timeoutMs ?? 10_000;
+  // 拒收日志末尾的卡片标签（doctor 靠它分桶，见 NotifyOptions.label）。
+  const labelSuffix = opts.label ? ` card=${opts.label}` : "";
   // 最后一次尝试的结果：三次都失败时把它带出去（code 就是病因）
   let last: FeishuResult = { ok: false, code: null, msg: "没有发出任何请求", httpStatus: null };
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -70,11 +85,11 @@ async function post(webhookUrl: string, payload: FeishuPayload, opts: NotifyOpti
       const code = typeof body.code === "number" ? body.code : res.ok ? 0 : -1;
       if (code === 0) return { ok: true, code: 0, msg: body.msg ?? "", httpStatus: res.status };
       last = { ok: false, code, msg: body.msg ?? "", httpStatus: res.status };
-      console.error(`[notifier] feishu rejected: HTTP ${res.status} code=${code} msg=${body.msg ?? ""} (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      console.error(`[notifier] feishu rejected: HTTP ${res.status} code=${code} msg=${body.msg ?? ""} (attempt ${attempt}/${MAX_ATTEMPTS})${labelSuffix}`);
     } catch (e) {
       const reason = e instanceof Error && e.name === "AbortError" ? `timed out after ${timeoutMs}ms` : String(e);
       last = { ok: false, code: null, msg: reason, httpStatus: null };
-      console.error(`[notifier] ${reason} (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      console.error(`[notifier] ${reason} (attempt ${attempt}/${MAX_ATTEMPTS})${labelSuffix}`);
     } finally {
       clearTimeout(timer);
     }
