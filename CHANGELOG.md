@@ -6,21 +6,52 @@
 > ⚠️ **0.3.2 从未发布**：它只存在于 git（`chore(release): 0.3.2`），npm 上最高曾停留在 0.3.1。
 > 0.4.0 包含了 0.3.2 的全部内容，并新增了用户可见子命令 ⇒ 按 semver 走 minor，直接发 0.4.0。
 
-## Unreleased
+## 0.5.1（2026-11-17）
 
-**`doctor` 会指出 worker PATH 的工具链缺口，并给出补全命令。**
+**六个「任务卡死 / 通知丢失 / 进程残留」的老毛病一起修掉，外加 doctor 的两处口径修正。**
 
-- 从旧版本升级上来的 config 没有 `profile.path_dirs`，而 worker 的 PATH 是自建的
-  （`dirname(bin)` → `path_dirs` → 系统目录，不继承 shell）⇒ node/npm/bun/git 要等到
-  任务里第一次调用才以 `command not found` 炸出来。`agent-ex doctor` 现在会探测你 shell 里的
-  这几个命令，把**没被 worker PATH 覆盖**的目录报成 warn，并给出
-  `agent-ex profile set <profile> path_dirs …`（已有目录保留在前）。
-- 判据是**缺口**不是「字段缺失」：目录已被 `dirname(bin)` / `path_dirs` / 系统目录覆盖时不报；
-  `bin` 本身不可用时也不报（病灶在 bin）。doctor 仍然只读，`--fix` 的范围不变。
-- **`profile set <p> path_dirs ""` 由「删掉键」改为「写 `[]`」**。两者从此是两种状态：
-  `[]` = 你明确表态不要额外目录（doctor 不再提示补全），缺席 = 从未配过（doctor 会提示）。
-  删键的话这两种状态在文件里长得一样，doctor 只能对主动清空过的用户反复唠叨。
-- 工具链探测与其依赖的 worker PATH 目录列表移到 `src/agent-env.ts`：`init` 与 `doctor` 共用同一份。
+- **超时不再挂死**：agent 自己退出、但有个逃逸孙进程一直占着 stdout（被 init 收养 ⇒ 杀不掉、管道不关）
+  ⇒ 旧实现把「落终态」挂在 child 的 `close` 事件上，那个事件永不触发 ⇒ 任务永远停在 `running`。
+  实测有一次挂了 **16.5 小时**，最后靠人工 cancel 收场。现在超时后有 **8s 宽限**：agent 不退出就自己落
+  `failed(timeout)` 并推卡 ⇒ agent 卡死不会让任务永远停在 `running`。
+- **SIGTERM 时真等通知回执**：旧 handler 只是「启动」了等待就 `process.exit(0)`，回执随进程一起消失
+  ⇒ 飞书拒收时 `notify_failed` 标不上、日志里也不会有 `[notifier] feishu rejected` ⇒ doctor 扫不到，
+  正是它本该抓的那类静默失败。现在会真等到回执落地（最多 `AGENT_EX_NOTIFY_GRACE_MS`，默认 40s，
+  盖住 notifier 自己最坏的 ~35s）；等不到就把「没送达」标进 DB 再走。
+- **配额告警卡也会被等到**：它原先是 fire-and-forget（不进等待集合）⇒ SIGTERM / 超时兜底退出时它被掐断，
+  「这个任务正在配额上要挂了」的早期告警**静默丢失**。现在它在飞也会被等。
+  但它被掐断**不**标 `notify_failed`——那笔账只记「任务终态那张卡」。
+- **webhook 解析失败不再崩 runner**：`{env:VAR}` 变量缺失时 `resolveEnvPlaceholders` 会抛错，旧代码两处都没接：
+  终态卡那条异常穿出 `main`（任务已终态、runner 却 exit(1) ⇒ `notify_failed` 标不上、也没卡发出），
+  配额卡那条抛在 `rl.on("line")` 里（uncaughtException ⇒ runner 当场死 ⇒ 任务永远停在 `running`）。
+  现在解析失败 = 通知失败（终态卡标 `notify_failed`），不是崩溃。
+- **`cancel` 不再硬杀正在排空通知的 runner**：`cancel` 走 `killTree`，默认 3s 后对整个进程组补 SIGKILL，
+  而 runner 要等在飞的飞书通知（最多 40s）⇒ 排空中被砍，回执丢失（卡早 flush 给飞书了，丢的是「飞书收没收」）。
+  现在 runner 排空期间会写一个 drain 标记，宿主据此放过它——它排空后自己退出。
+- **不再留孤儿 agent**：runner 退出时 agent 还活着（宿主只杀 runner 本身、agent 在同组里活了下来；
+  或 runner 崩了、Node 默认直接退出）⇒ 没人杀它、没人读它的 stdout，它一直烧 token。
+  新增 `src/agent-guard.ts` 持有这条不变式：「runner 不许在 agent 还活着时退出」。
+- **doctor 的历史失败分两桶**：runner 对终态卡和配额告警卡写的是同一行拒收日志 ⇒ doctor 把配额卡的拒收
+  也算成「任务通知被拒收」，而 DB 里那些任务的 `notify_failed` 仍是 0 ⇒ 两处口径矛盾。
+  现在拒收日志行末尾带 `card=<标签>`，doctor 据此分桶：任务级（终态卡，与 `notify_failed` 同一口径）
+  与提示级（配额告警卡，明说不影响 `notify_failed`）。老日志没有标签 ⇒ 一律算任务级（保守）。
+- **`doctor` 会指出 worker PATH 的工具链缺口，并给出补全命令**：
+  - 从旧版本升级上来的 config 没有 `profile.path_dirs`，而 worker 的 PATH 是自建的
+    （`dirname(bin)` → `path_dirs` → 系统目录，不继承 shell）⇒ node/npm/bun/git 要等到
+    任务里第一次调用才以 `command not found` 炸出来。`agent-ex doctor` 现在会探测你 shell 里的
+    这几个命令，把**没被 worker PATH 覆盖**的目录报成 warn，并给出
+    `agent-ex profile set <profile> path_dirs …`（已有目录保留在前）。
+  - 判据是**缺口**不是「字段缺失」：目录已被 `dirname(bin)` / `path_dirs` / 系统目录覆盖时不报；
+    `bin` 本身不可用时也不报（病灶在 bin）。doctor 仍然只读，`--fix` 的范围不变。
+  - **`profile set <p> path_dirs ""` 由「删掉键」改为「写 `[]`」**。两者从此是两种状态：
+    `[]` = 你明确表态不要额外目录（doctor 不再提示补全），缺席 = 从未配过（doctor 会提示）。
+    删键的话这两种状态在文件里长得一样，doctor 只能对主动清空过的用户反复唠叨。
+  - 工具链探测与其依赖的 worker PATH 目录列表移到 `src/agent-env.ts`：`init` 与 `doctor` 共用同一份。
+- **通知表与代码对齐**：`docs/user-guide/notifications.md` 的「什么时候发通知」此前与代码不符两处——
+  `needs_input` 实际**会**发卡（❓「需要输入」卡，不发的话没人知道要去答复）、
+  `cancelled` 实际**不发**卡（cancel 是主动叫停：server 先把任务置为 `cancelled`，
+  runner 随后收尾时那张终态卡也就落不下来）。两处都已按实际行为改写。
+- 另附两份设计文档：超时归因设计（`docs/specs/`）与它的「悬空步」判据。
 
 ## 0.5.0（2026-11-12）
 
