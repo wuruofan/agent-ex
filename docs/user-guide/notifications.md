@@ -90,8 +90,9 @@ agent-ex doctor --send
 
 | 事件 | 发不发 |
 | :--- | :--- |
-| 任务终态（`completed` / `failed` / `cancelled`） | ✅ 发 |
-| 任务进入 `needs_input` | ❌ 不发（还没终态，等答复完再续跑） |
+| 任务终态（`completed` / `failed`） | ✅ 发 |
+| 任务进入 `needs_input` | ✅ 发（❓「需要输入」卡——不发的话你根本不知道要去答复；答复后续跑会再发一张终态卡） |
+| 任务被 `cancel` | ❌ 不发（`cancel` 是「主动叫停」：server 先把任务置为 `cancelled`，runner 随后收尾时那张终态卡也就落不下来了——发起的人就在现场，群里不必再报一次） |
 | 配额告警 | ✅ 实时发 |
 | `doctor --send` 自检卡 | ✅ 发（正文不含产品名，避免关键词闸门假通过） |
 
