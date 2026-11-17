@@ -316,6 +316,43 @@ agent-ex wait --help                         # 应 exit 0
    - ⚠️ **ENTER 要落在「URL 已打印」之后**：npm 先花十几秒取登录页，早了会把 ENTER 消耗在取 URL 那一步，
      后面就卡在「Press ENTER to open in the browser」不动了 ⇒ 把 `sleep` 设成 60~75 秒。
 
+### 0.5.1 执行记录（2026-11-17：六个挂死/丢通知/留孤儿的老毛病 + doctor 两处口径）
+
+**这一轮是 2026-11-15 起那条线上故障链的收尾**：一个任务挂了 16.5 小时 ⇒ 挖出超时兜底缺失、
+SIGTERM 回执丢失、配额告警卡被掐断、webhook 解析失败崩 runner、`cancel` 硬杀排空中的 runner、孤儿 agent，
+最后是 doctor 把「配额卡被拒收」算成「任务通知失败」而 DB 里 `notify_failed` 仍是 0 的口径矛盾。
+
+| 项 | 结果 |
+| :--- | :--- |
+| 版本号 | `0.5.1`（**不是 0.5.2、也不是 0.6.0**）：全是行为修复，没有新增用户可见功能 ⇒ 按 semver 走 patch |
+| 内容 | 超时 8s 宽限兜底；SIGTERM 真等通知回执（`AGENT_EX_NOTIFY_GRACE_MS`，默认 40s）；配额告警卡纳入退出等待；webhook 解析失败 = 通知失败而不是崩溃；`cancel` 不再硬杀排空中的 runner（drain 标记 + `killTree` 的 `spareRoot`）；新增 `src/agent-guard.ts` 保证 runner 不留孤儿 agent；doctor 历史失败分**任务级/提示级**两桶；doctor 报 worker PATH 缺口并给补全命令；通知表与代码对齐 |
+| 代码提交 | ✅ 12 个提交推到 `origin/main`（`19c05ec` … `05f7ce3`），发版 commit `b7ac2bb` |
+| `npm run typecheck` / `npm run build` | ✅ build-meta = `v0.5.1 b7ac2bb`（**与 tag 严格一致**：先提交再重建再打包） |
+| `npm test` | ✅ 31 files / 559 passed |
+| 打包 | `npm pack` = 229,449 B / 82 files / sha1 `1b08fa6098e01f16c8b8fd11500d0576bc446644` |
+| 干净目录装包 | ✅ 版本 0.5.1、build-meta gitSha `b7ac2bb`、6 个子命令齐全、`wait --help` 正常、MCP 6/6 |
+| npm 认证 | ⚠️ **`~/.npmrc` 里 0.5.0 留下的 40 字符 token 又失效了**（curl `/-/whoami` 与 npm 都是 401）⇒ `NPM_CONFIG_USERCONFIG=/tmp/afex-publish-npmrc` + `npm login --auth-type=web` 重登（`~/.npmrc` 仍被 WorkBuddy 文件代理拦，写不进去） |
+| npm publish | ✅ EOTP 网页认证一次 → `PUT 202` → `+ agent-ex-mcp@0.5.1` |
+| 上线核验 | ✅ registry `versions` 含 0.5.1 / `latest=0.5.1`；`dist.shasum` = `1b08fa60…6644` 与本地 tgz 一致；线上 tgz（带 `?cb=` 绕 CDN 负缓存）与本地 `cmp` **逐字节一致**；线上 readme 与仓库根 README.md **逐字符相同**（16,557 字符）；从 registry 装回冒烟全绿 |
+| `v0.5.1` tag | ✅ `b7ac2bb`（= `chore(release): 0.5.1`，与包内 build-meta 的 gitSha 严格一致） |
+
+**这轮踩到的坑**：
+
+1. **旧 token 又悄悄过期了**（第二次，0.4.0 → 0.5.0 → 0.5.1 两次都中）：`~/.npmrc` 里的 40 字符 token
+   到发版时已经 401（不是包不存在、也不是权限范围问题）。⇒ 每次发版第一件事仍是
+   `npm whoami --registry https://registry.npmjs.org` 探活，401 就重登。
+2. **`~/.npmrc` 依然写不进去**（与 0.3.1 同因，WorkBuddy 文件代理拦 `~/.npmrc` 写入）⇒ 继续用
+   `NPM_CONFIG_USERCONFIG=/tmp/afex-publish-npmrc`（login 与 publish 都带它，全程不碰 `~/.npmrc`）。
+   代价没变：**用户全局 `~/.npmrc` 里那个失效 token 还在**，需要用户自己在终端 `npm login` 修一次。
+3. **ENTER 的时机这轮没那么玄**：login 用 `sleep 10`、publish 用 `sleep 15` 就一次跑通（登录页打得很快）。
+   0.5.0 记的「设 60~75s」是保险值——真卡在「Press ENTER to open in the browser」不动就往大调。
+4. **PUT 202 之后 registry 要等**：packument 约 45 秒后才出现 0.5.1 ⇒ 判据用
+   `curl -H 'Cache-Control: no-cache' '<packument>?cb=<ts>'` 轮询，**别拿 `npm view` 当失败证据**。
+5. **发版批次里带了一处 skill 文档改动**（`df828b8` 在 `SKILL.md` 的排错表里补了 `card=` 标签的读法）。
+   约束 1（push 必须早于 publish）针对的是「skill 去调还不存在的子命令」这类**硬依赖**；
+   这里只是文档描述，0.5.0 的包里 skill 与代码同在一个 tarball ⇒ 用户装包不会出现「新 skill + 旧包」错配，
+   故不拆成 publish 之后的 commit B。
+
 ## 出错了怎么查
 
 见 `AGENTS.md` 的「出错了怎么查」与「EOTP：网页认证怎么在非交互环境里走完」。
