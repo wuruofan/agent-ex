@@ -16,6 +16,7 @@ import { join, dirname } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 import type { AddressInfo } from "node:net";
 
 // 集成测试直接跑预编译的 dist/runner.js（生产同款路径），避开 tsx 冷启动给每个 runner 进程加的延迟——
@@ -435,6 +436,19 @@ suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
       }
       expect(alive()).toBe(false);
       expect({ truncated, responded }).toEqual({ truncated: false, responded: true });
+      // runner 退了 ⇒ agent 必须跟着死。宿主只 SIGTERM 了 runner 本体（没杀组），
+      // agent 若还活着就是**孤儿**：没人杀它、没人读它的输出，它会一直烧 token。
+      const agentPid = Number(readFileSync(pidfile, "utf8"));
+      expect(agentPid).toBeGreaterThan(0);
+      const agentGone = await (async () => {
+        const dl = Date.now() + 6000;
+        while (Date.now() < dl) {
+          try { process.kill(agentPid, 0); } catch { return true; }
+          await new Promise((res) => setTimeout(res, 50));
+        }
+        return false;
+      })();
+      expect(agentGone).toBe(true);
     } finally {
       // agent 还在跑（runner 退出不等于 agent 被杀）——按 pidfile 收尾
       try {
@@ -445,15 +459,28 @@ suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
     }
   }, 40_000);
 
-  // 不变式：**只有终态卡**决定 notify_failed。配额告警卡被掐断（黑洞 webhook 永远不回）
-  // ⇒ runner 宽限耗尽后退出 ⇒ 但 notify_failed 必须仍是 false（那是终态卡的账）。
+  // 不变式：**只有终态卡**决定 notify_failed。配额告警卡被掐断（黑洞）⇒
+  // 宽限耗尽时不能因为它而标 notify_failed——那是终态卡的账。
+  // 这里让 webhook 对**第一张（配额卡）永不响应**、对第二张（终态卡）正常响应：
+  // 两张卡命运不同，才能把「配额卡失败」和「终态卡失败」分开验。
   it("配额卡被掐断也不许标 notify_failed（那是终态卡的账）", async () => {
-    const server = createServer(() => { /* 黑洞：收下请求永不响应 */ });
+    let seen = 0;
+    const server = createServer((req, res) => {
+      seen++;
+      const n = seen;
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        if (n === 1) return; // 第一张（配额卡）：收下但永不响应 ⇒ 永远在飞
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ code: 0, msg: "ok" }));
+      });
+    });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
     const port = (server.address() as AddressInfo).port;
     const pidfile = join(home, "agent.pid");
     // 宽限走短路径（生产默认 40s 是为了盖住 notifier 最坏耗时 ~35s）
-    process.env.AGENT_EX_NOTIFY_GRACE_MS = "800";
+    process.env.AGENT_EX_NOTIFY_GRACE_MS = "2000";
     try {
       setupHome({ FAKE_MODE: "quota", FAKE_PIDFILE: pidfile }, 30);
       writeFileSync(join(home, "config.json"), JSON.stringify({
@@ -471,22 +498,28 @@ suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
       const id = (r as { task_id: string }).task_id;
       const db = join(home, "tasks.db");
       const readTask = () => openStore(db).getTask(id) as { pid: number; notify_failed: boolean };
-      // 等配额卡真的发出去（runner 日志里有 notifier 的痕迹）
-      const sent = Date.now() + 10_000;
-      while (Date.now() < sent) {
-        const log = join(home, "logs", `runner-${id}.log`);
-        if (existsSync(log) && readFileSync(log, "utf8").includes("[notifier]")) break;
+      // 等配额卡发出去（webhook 收到第一张）
+      const arrived = Date.now() + 10_000;
+      while (Date.now() < arrived && seen < 1) {
         await new Promise((res) => setTimeout(res, 50));
       }
+      expect(seen).toBe(1);
       const pid = readTask().pid;
       expect(pid).toBeGreaterThan(0);
       process.kill(pid, "SIGTERM");
-      // 宽限耗尽 ⇒ runner 自己退出
+      // 收尾会落一张终态卡（第二张）⇒ 它正常送达 ⇒ 终态通知已落地
+      const second = Date.now() + 10_000;
+      while (Date.now() < second && seen < 2) {
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      expect(seen).toBe(2);
+      // runner 最终退出（宽限耗尽 ⇒ 它不等那张永远不回的配额卡）
       const exited = Date.now() + 15_000;
       while (Date.now() < exited) {
         try { process.kill(pid, 0); } catch { break; }
         await new Promise((res) => setTimeout(res, 50));
       }
+      // 终态卡已送达 ⇒ 不能标 notify_failed（配额卡被掐断不算终态通知失败）
       expect(readTask().notify_failed).toBe(false);
       // 宽限耗尽这件事要留下痕迹（否则「没人等」和「等了但没到」分不清）
       expect(readFileSync(join(home, "logs", `runner-${id}.log`), "utf8")).toContain("notify grace exhausted");
@@ -616,6 +649,44 @@ suite("integration: 通知的 webhook 解析失败", () => {
         if (apid > 0) { try { process.kill(apid, "SIGKILL"); } catch { /* 已死 */ } }
       } catch { /* 无 pidfile */ }
     }
+  }, 30_000);
+});
+
+suite("integration: runner 崩溃不留孤儿", () => {
+  // 2026-11-17 实测：runner 崩了（uncaughtException）之后 agent 以 PPID=1 活到人工清理
+  // ⇒ 持续烧 token。Node 的默认行为是「打印栈然后退」，没有机会收尾 ⇒ 必须自己装处理器。
+  // 这里用编译产物跑一个最小 runner：登记一个长驻子进程 → 装致命异常处理器 → 异步抛异常。
+  it("致命异常 ⇒ 先收掉 agent 再退（不留孤儿）", async () => {
+    const script = join(home, "crash-child.mjs");
+    const gcPidfile = join(home, "grandchild.pid");
+    writeFileSync(script, `
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { attachAgent, installFatalAgentCleanup } from ${JSON.stringify(join(repoRoot, "dist", "agent-guard.js"))};
+const gc = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+writeFileSync(${JSON.stringify(gcPidfile)}, String(gc.pid));
+attachAgent(gc.pid);
+installFatalAgentCleanup();
+setTimeout(() => { throw new Error("boom"); }, 50);
+`);
+    const child = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+    const code = await new Promise<number | null>((res) => child.on("close", (c) => res(c)));
+    expect(stderr).toContain("uncaughtException");
+    expect(code).toBe(1);
+    // 孙进程必须跟着死（不能以 PPID=1 变孤儿继续跑）
+    const gcPid = Number(readFileSync(gcPidfile, "utf8"));
+    expect(gcPid).toBeGreaterThan(0);
+    const gone = await (async () => {
+      const dl = Date.now() + 6000;
+      while (Date.now() < dl) {
+        try { process.kill(gcPid, 0); } catch { return true; }
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      return false;
+    })();
+    expect(gone).toBe(true);
   }, 30_000);
 });
 

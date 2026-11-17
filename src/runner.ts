@@ -16,6 +16,7 @@ import { profileModelLabel } from "./model-check.js";
 import { sendFeishuCard, buildFeishuCard } from "./notifier.js";
 import { dbPath, drainDir, drainMarkerPath } from "./paths.js";
 import { killTree } from "./proc-tree.js";
+import { attachAgent, detachAgent, installFatalAgentCleanup, killAgentTreeSync, terminateAgentTree } from "./agent-guard.js";
 
 const MAX_ROUNDS = 5;
 /**
@@ -94,6 +95,8 @@ interface RunOutcome {
 const pendingNotifies = new Set<Promise<void>>();
 /** 终态通知的落地状态：只有它决定 notify_failed。 */
 let terminalNotify: { settled: boolean } | null = null;
+/** runner 正在收尾（SIGTERM / 致命异常）⇒ agent 的退出不再被当成「任务失败的原因」。 */
+let shuttingDown = false;
 
 /**
  * 登记一个在飞的飞书请求；settle 后自动移出集合。
@@ -130,28 +133,49 @@ async function exitAfterNotify(
   store: ReturnType<typeof openStore>,
   task: Task,
 ): Promise<void> {
-  const pending = [...pendingNotifies];
-  if (pending.length) {
-    // 标记「正在排空」：宿主的 killTree 在 SIGKILL 前会看它（见 proc-tree 的 spareRoot）。
-    // 不标的话，cancel 的 3s 宽限一到就把本进程硬杀 ⇒ 通知的回执随进程一起消失。
-    markDraining(task.id);
-    try {
-      const settled = await Promise.race([
-        // 成功或失败都算「落地了」：失败时各自的 .then 已经把该标的都标上了。
-        Promise.all(pending.map((p) => p.then(() => true, () => true))),
-        sleep(NOTIFY_GRACE_MS).then(() => false),
-      ]);
-      if (!settled) {
-        console.error(`[runner] notify grace exhausted (${NOTIFY_GRACE_MS}ms); ${pending.length} notification(s) still in flight`);
-        if (terminalNotify && !terminalNotify.settled) {
-          try { store.patch(task.id, { notify_failed: true }); } catch { /* best effort */ }
-        }
-      }
-    } finally {
-      clearDraining(task.id);
-    }
+  shuttingDown = true;
+  markDraining(task.id);
+  try {
+    // **先**把 worker 收掉：它一停，close 事件让主流程去落终态（终态卡这时才被登记）。
+    // 顺序反了的话——先排空后杀 agent——主流程会在我们退出前才发终态卡，那张卡必被掐断。
+    await terminateAgentTree();
+    // 再排空通知：终态卡 / 配额卡都得落地，回执不能随进程一起消失。
+    await drainNotifications(store, task);
+  } finally {
+    clearDraining(task.id);
   }
   process.exit(0);
+}
+
+/**
+ * 等所有在飞的通知落地（宽限内），返回时**没有**通知还在飞。
+ *
+ * 为什么要**循环**而不是取一次快照：排空期间可能又登记了新通知——
+ * ① 迟到的配额告警卡（agent 的 stdout 还在缓冲里）；② 主流程刚落的终态卡。
+ * 只等第一批 ⇒ 后登记的那些会被随进程一起掐断 ⇒ 回执丢失 ⇒ 静默失败。
+ */
+async function drainNotifications(
+  store: ReturnType<typeof openStore>,
+  task: Task,
+): Promise<void> {
+  const deadline = Date.now() + NOTIFY_GRACE_MS;
+  for (;;) {
+    const pending = [...pendingNotifies];
+    if (!pending.length) return; // 没有在飞的了 ⇒ 收工
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const settled = await Promise.race([
+      // 成功或失败都算「落地了」：失败时各自的 .then 已经把该标的都标上了。
+      Promise.all(pending.map((p) => p.then(() => true, () => true))),
+      sleep(remaining).then(() => false),
+    ]);
+    if (!settled) break;
+    // 这一批都落地了 ⇒ 回去看有没有新登记的（continue）
+  }
+  console.error(`[runner] notify grace exhausted (${NOTIFY_GRACE_MS}ms); notifications still in flight`);
+  if (terminalNotify && !terminalNotify.settled) {
+    try { store.patch(task.id, { notify_failed: true }); } catch { /* best effort */ }
+  }
 }
 
 /**
@@ -272,6 +296,9 @@ async function main(): Promise<void> {
         stdio: ["pipe", "pipe", "pipe"],
       });
       log.write(JSON.stringify({ type: "_runner", event: "spawn", argv: fullArgv, round: task.rounds, attempt, child_pid: child.pid }) + "\n");
+      // 登记活着的 agent：runner 任何一条退出路径都得先把它收掉，否则它变孤儿持续烧 token
+      // （见 src/agent-guard.ts 的不变式）。
+      if (child.pid !== undefined) attachAgent(child.pid);
       child.stdin!.write(prompt);
       child.stdin!.end();
 
@@ -335,6 +362,8 @@ async function main(): Promise<void> {
 
       child.on("close", (code) => {
         clearTimeout(timeoutTimer);
+        // agent 已经退出 ⇒ 注销它（退出前不该再杀一个已经死掉的 pid）。
+        detachAgent();
         // agent 正常退出了 ⇒ 宽限内的强制收尾不再需要（否则会把已完成的活判成超时失败）
         if (forceFinalizeTimer) { clearTimeout(forceFinalizeTimer); forceFinalizeTimer = null; }
         log.end();
@@ -385,6 +414,11 @@ async function main(): Promise<void> {
     if (!timeoutFinalized) {
       finalize(store, task, "failed", { error: timeoutError, result: trunc(finalText) }, cfg);
     }
+  } else if (shuttingDown) {
+    // runner 被收尾（SIGTERM / 致命异常）⇒ 任务没跑完。落 failed 而不是留在 running：
+    // 留在 running 就是「没人知道它没了」，正是 2026-11-15 那类故障。
+    // cancel 场景：服务端已把任务改成 cancelled ⇒ 这次 transition 失败 ⇒ 不发卡、只留一行日志。
+    finalize(store, task, "failed", { error: "runner terminated before the task finished", result: trunc(finalText) }, cfg);
   } else if (question) {
     if (task.rounds >= MAX_ROUNDS) {
       finalize(store, task, "failed", { error: `rounds limit (${MAX_ROUNDS}) reached with pending question`, question: trunc(question) }, cfg);
@@ -495,4 +529,15 @@ function pushQuotaWarning(
   );
 }
 
-main().catch((e) => { console.error("[runner] fatal:", e); process.exit(1); });
+// 进程 'exit' 钩子：任何退出路径（含将来新增的 process.exit）都不该把 agent 留成孤儿。
+// 只能同步硬杀 —— 'exit' 钩子里没法 await。
+process.on("exit", () => { killAgentTreeSync(); });
+// 致命异常自己处理：Node 的默认行为是「打印栈然后退」⇒ agent 变孤儿。
+// 装了 handler 之后 Node 不再自动退出 ⇒ 能先收干净 agent 再退（见 agent-guard.ts）。
+installFatalAgentCleanup();
+
+main().catch(async (e) => {
+  console.error("[runner] fatal:", e);
+  await terminateAgentTree();
+  process.exit(1);
+});

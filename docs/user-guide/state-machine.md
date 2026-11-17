@@ -68,6 +68,16 @@
 `cancel` 对终态任务**幂等**（返回当前状态，不改写）；对 `running` 任务会 SIGTERM 级联杀掉 agent 进程树。
 若返回带 `warning`，说明进程树快照不可用（沙箱拒绝 setuid `/bin/ps`），组外逃逸的 agent 子进程可能残留。
 
+**runner 自己被收尾时**（宿主 SIGTERM runner 本体，不走 `cancel`）：先杀掉 agent 进程树，再落
+`failed`（`error` 为 `runner terminated before the task finished`），最后等在飞的飞书卡片落地再退出。
+
+⇒ 任务不会因为 runner 被收尾而永远停在 `running`。只有 runner 被**强杀**（外部 `SIGKILL` / 掉电）
+才会来不及落终态 —— 那时靠 `agent-ex wait` 的预算兜底（`WAIT=timeout`，exit 2）叫醒主 agent。
+
+> 2026-11-17 修：此前 runner 收到 SIGTERM 就直接退出，agent 进程**没人管** ⇒ 它变成孤儿继续跑、
+> 持续烧 token（实测以 `PPID=1` 活到人工清理）。现在退出前一定先收掉 agent 进程树。
+> `cancel` 路径本来就没这个问题（它走 `killTree` 组杀，agent 一起死）。
+
 ### 状态查询
 
 `status({ task_id })` 返回字段含 `status / rounds / profile / project_path / started_at / created_at /
