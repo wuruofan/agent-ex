@@ -353,6 +353,30 @@ SIGTERM 回执丢失、配额告警卡被掐断、webhook 解析失败崩 runner
    这里只是文档描述，0.5.0 的包里 skill 与代码同在一个 tarball ⇒ 用户装包不会出现「新 skill + 旧包」错配，
    故不拆成 publish 之后的 commit B。
 
+### 2026-11-18 流程补记：CHANGELOG 与 GitHub Release 入流程
+
+核对 0.1.0～0.5.1 的发版历史时发现：CHANGELOG 直到 `adecb7d`（2026-11-11）才创建，
+一次性补写了 0.1.0～0.4.0；0.4.0 及更早的 `chore(release)` 提交都没碰它，从 0.5.0 起才同步。
+GitHub Releases 则一直是空的（`gh release list` 无输出），虽然 tag 从 v0.1.0 到 v0.5.1 都齐。
+
+判断（纯 npm 分发的包）：Release 的「分发资产」价值为零，「发布说明」已被 CHANGELOG 覆盖，
+唯一不可替代的是 **GitHub 关注者的更新通知 + 仓库主页 Releases 区块的活跃度信号**。
+ ⇒ 值得加，但 release body 必须从 CHANGELOG **派生**而非手抄（否则第二个真相源会漂移），
+ 也不用 `--generate-notes`（Conventional Commits 倒出来不是给用户看的措辞）。
+
+流程改动（权威版本见 `AGENTS.md`「发布（npm）」③ / ⑪）：
+
+| 项 | 状态 |
+| :--- | :--- |
+| 步骤③ | ✅ 写 CHANGELOG 与改版本号合并，两者必须同一提交；`AGENTS.md` 已改 |
+| 步骤⑪ | ✅ npm publish + ⑨⑩ 核验之后发 release；`gh release create --verify-tag --notes-file`，`AGENTS.md` 已改 |
+| `scripts/release-notes.mjs` | ✅ 新增：从 CHANGELOG 截取 `## $V（` 到下一个 `## `，找不到版本报错退出 |
+| dry-run | ✅ 见下方 |
+
+**dry-run（2026-11-18，不实际发布）**：用已有版本验证提取脚本——0.5.1 / 0.5.0 / 0.1.0（首尾）
+逐字对齐 CHANGELOG 对应章节，不存在的版本以非 0 退出；`gh release create` 未执行，
+只核验了认证态与参数。
+
 ## 出错了怎么查
 
 见 `AGENTS.md` 的「出错了怎么查」与「EOTP：网页认证怎么在非交互环境里走完」。

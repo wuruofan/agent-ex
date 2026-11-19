@@ -141,13 +141,17 @@ npm whoami --registry https://registry.npmjs.org     # 期望输出你的 npm �
 
 打不出用户名就别往下走——后面每一步都会以 E401 / E404 的形式失败（见「出错了怎么查」）。
 
-**③ 改版本号**（`package.json` 与 `package-lock.json` 一起改）
+**③ 写 CHANGELOG + 改版本号**
+
+先在 `CHANGELOG.md` 顶部写这一版条目（`## X.Y.Z（YYYY-MM-DD）` + 一句概括 + 空行 + 要点列表）。
+**改动写得越具体越好**——这段会原样成为 GitHub Release 的正文，是给用户看的唯一一份说明。
+历史上 0.1.0～0.4.0 是事后补写的，从 0.5.0 起才进 release commit；这一步把它固化进流程。
 
 ```bash
-npm version 0.3.0 --no-git-tag-version
+npm version 0.3.0 --no-git-tag-version    # package.json 与 package-lock.json 一起改
 ```
 
-**④ 提交 + 推送 + 打 tag**
+**④ 提交 + 推送 + 打 tag**（CHANGELOG 与版本号必须在这同一次提交里）
 
 ```bash
 git add -A && git commit -m "chore(release): 0.3.0" && git push origin main
@@ -218,6 +222,21 @@ D=$(mktemp -d)
   && npm install agent-ex-mcp@0.3.0 --registry https://registry.npmjs.org --prefer-online \
   && node "$REPO/scripts/smoke-stdio.mjs" "$D/node_modules/agent-ex-mcp/dist/server.js" )
 ```
+
+**⑪ 发 GitHub Release**（核验全绿之后做；失败不影响已发布的 npm 包，可安全重试）
+
+```bash
+V=0.3.0
+node scripts/release-notes.mjs "$V" > /tmp/release-notes.md   # 从 CHANGELOG 派生，不手写第二份
+cat /tmp/release-notes.md                                     # 先看一眼，确认章节抓对了
+gh release create "v$V" --verify-tag --title "$V" --notes-file /tmp/release-notes.md
+```
+
+> **为什么从 CHANGELOG 派生**：release body 若手抄就成第二份真相，改一边忘一边就漂移；
+> `--generate-notes` 又会把 Conventional Commits 原样倒出来，不是给用户看的措辞。
+> `scripts/release-notes.mjs` 只截取 CHANGELOG 里 `## $V（` 到下一个 `## ` 之间，找不到就报错退出，
+> 保证 release 正文与 CHANGELOG 逐字一致。
+> `--verify-tag` 要求 tag 已存在且 release 绑在它上，避免凭空建一个和 ④ 的 tag 脱节的 release。
 
 ### 出错了怎么查
 
