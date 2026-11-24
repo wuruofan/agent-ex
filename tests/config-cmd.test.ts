@@ -61,6 +61,13 @@ describe("config list", () => {
     seed({ profiles: { default: { executor: "claude", env: {}, path_dirs: ["/a", "/b"] } } });
     expect(listConfig(home).profiles[0].path_dirs).toEqual(["/a", "/b"]);
   });
+
+  it("返回有效 cost：声明优先，未声明时按结构化判定", () => {
+    seed(); // claude + 空 env，未声明 ⇒ metered
+    expect(listConfig(home).profiles[0].cost).toBe("metered");
+    seed({ profiles: { default: { executor: "claude", env: {}, cost: "free" } } });
+    expect(listConfig(home).profiles[0].cost).toBe("free");
+  });
 });
 
 describe("config set —— 白名单字段", () => {
@@ -183,6 +190,12 @@ describe("profile create —— 物化内置预设（只创建，不切默认）
     expect(env.OPENCODE_CONFIG_CONTENT).toContain(ZEN_FREE_PLACEHOLDER);
   });
 
+  it("物化内置 zen-free profile 时写入 cost: free（新装用户不受闸门误伤）", () => {
+    seed();
+    createProfile(home, "opencode-zen-free", { bin: "/bin/ls" });
+    expect(readConfig(home).profiles["opencode-zen-free"].cost).toBe("free");
+  });
+
   it("executor 不存在时自动注册（带 --auto）", () => {
     seed();
     createProfile(home, "opencode-zen-free", { bin: "/bin/ls" });
@@ -296,6 +309,26 @@ describe("profile set —— 改 profile 的字段（键必须受约束）", () 
   it("executor 指向不存在的名字时拒绝", () => {
     seed();
     expect(() => setProfileValue(home, "default", "executor", "nope")).toThrow(/Unknown executor/);
+  });
+
+  it("用保留字 cost 声明成本并落盘", () => {
+    seed();
+    const r = setProfileValue(home, "default", "cost", "free");
+    expect(r.value).toBe("free");
+    expect(readConfig(home).profiles.default.cost).toBe("free");
+    setProfileValue(home, "default", "cost", "metered");
+    expect(readConfig(home).profiles.default.cost).toBe("metered");
+  });
+
+  it("cost 非法值报错且不写盘", () => {
+    seed({ profiles: { default: { executor: "claude", env: {}, cost: "free" } } });
+    expect(() => setProfileValue(home, "default", "cost", "paid")).toThrow(/"free" or "metered"/);
+    expect(readConfig(home).profiles.default.cost).toBe("free");
+  });
+
+  it("保留字不匹配 env key 规则时，错误文案里列出 cost", () => {
+    seed();
+    expect(() => setProfileValue(home, "default", "bad_key", "x")).toThrow(/cost/);
   });
 
   it("拒绝会改写 worker 启动面的 key（NODE_OPTIONS ≈ 任意代码执行）", () => {

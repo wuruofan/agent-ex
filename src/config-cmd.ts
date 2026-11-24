@@ -19,7 +19,13 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { agentExHome } from "./paths.js";
 import { BRAND } from "./brand.js";
-import { validateConfig, resolveBinPath, type Config } from "./config.js";
+import {
+  validateConfig,
+  resolveBinPath,
+  effectiveProfileCost,
+  type Config,
+  type ProfileCost,
+} from "./config.js";
 import { parseOpencodeModel } from "./model-check.js";
 import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
 
@@ -63,6 +69,8 @@ export interface ConfigListResult {
     is_default: boolean;
     env: string[];
     path_dirs: string[];
+    /** 有效成本：声明的值有效时用它，否则走 effectiveProfileCost 的结构化判定。 */
+    cost: ProfileCost;
   }>;
   executors: Array<{ name: string; bin: string; bin_ok: boolean }>;
   notify: { dry_run: boolean; keyword: string; webhook: string };
@@ -109,6 +117,8 @@ export function listConfig(home: string = agentExHome()): ConfigListResult {
       env: Object.keys(p.env ?? {}),
       // 读的是未校验的原始 JSON ⇒ 形状不对时按"没配置"展示，不把坏值带进 UI
       path_dirs: Array.isArray(p.path_dirs) ? p.path_dirs : [],
+      // 声明优先；声明缺失或非法时退回结构化判定（非法值不该被当成一档展示）
+      cost: p.cost === "free" || p.cost === "metered" ? p.cost : effectiveProfileCost(p),
     })),
     // bin_ok 必须是真的探测结果：恒为 true 的字段是在骗人
     // （与 doctor 的 resolveBinPath 判定同源，见 config.ts）
@@ -206,9 +216,13 @@ export function setConfigValue(home: string, key: string, rawValue: string): { k
 export const ZEN_FREE_PROFILE_NAME = "opencode-zen-free";
 
 /** 已知的内置 profile 名（`profile create <name>` 时物化）。 */
-export const BUILTIN_PROFILES: Record<string, { executor: string; env: Record<string, string>; desc: string }> = {
+export const BUILTIN_PROFILES: Record<
+  string,
+  { executor: string; env: Record<string, string>; desc: string; cost: ProfileCost }
+> = {
   [ZEN_FREE_PROFILE_NAME]: {
     executor: "opencode",
+    cost: "free",
     env: {
       OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: ZEN_FREE_PLACEHOLDER, small_model: ZEN_FREE_PLACEHOLDER }),
       // 偏好"家族前缀"（软口味）：命中的 free 模型优先，取不到就退化为不挑食，绝不因此失败。
@@ -304,7 +318,7 @@ export function createProfile(home: string, name: string, opts: { bin?: string; 
   }
   // 深拷贝 env：直接挂 builtin.env 会让后续的 `profile set` 原地改到**进程内的常量**上
   // （同一进程里再物化一次就会带上被改过的值）。
-  c.profiles[name] = { executor: builtin.executor, env: { ...builtin.env } };
+  c.profiles[name] = { executor: builtin.executor, env: { ...builtin.env }, cost: builtin.cost };
   if (opts.use) c.defaults.profile = name;
   writeConfig(home, c);
   return { profile: name, desc: builtin.desc, executor: builtin.executor, executor_created: executorCreated, switched_default: Boolean(opts.use) };
@@ -319,8 +333,10 @@ export interface ProfileSetResult {
 /**
  * 改一个 profile 的字段。
  *
- * `<KEY>` 有两种：
+ * `<KEY>` 有三种：
  *  - `executor`（保留字，小写）：改这个 profile 用哪个 executor；值必须是已存在的 executor 名。
+ *  - `path_dirs`（保留字）：逗号分隔的绝对目录列表。
+ *  - `cost`（保留字，小写）：成本声明，值只接受 `free` / `metered`。
  *  - 其余：环境变量名，必须匹配 `^[A-Z][A-Z0-9_]*$`。
  *
  * 为什么要这么收：profile env 是**注入 worker 进程**的环境变量，
@@ -391,11 +407,23 @@ export function setProfileValue(
     return { profile: profileName, key, value };
   }
 
+  // ---- cost（保留字）----
+  // ⚠️ 必须放在 ENV_KEY_RE 检查**之前**："cost" 是小写，不匹配 ^[A-Z][A-Z0-9_]*$，
+  // 放到后面会被当成非法 env key 拒掉。
+  if (key === "cost") {
+    if (value !== "free" && value !== "metered") {
+      throw new Error(`"cost" expects "free" or "metered", got "${rawValue}"`);
+    }
+    p.cost = value;
+    writeConfig(home, c);
+    return { profile: profileName, key, value };
+  }
+
   // ---- 环境变量 ----
   if (!ENV_KEY_RE.test(key)) {
     throw new Error(
       `"${key}" is not a valid env key — expected uppercase letters/digits/underscore (e.g. ZEN_FREE_PREFER) ` +
-      `or the reserved words "executor" / "path_dirs"`,
+      `or the reserved words "executor" / "path_dirs" / "cost"`,
     );
   }
   if (FORBIDDEN_ENV_KEYS.has(key) || FORBIDDEN_ENV_PREFIXES.some((p2) => key.startsWith(p2))) {

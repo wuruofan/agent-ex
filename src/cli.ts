@@ -92,7 +92,7 @@ export function runConfig(args: string[]): number {
       const mark = p.is_default ? ansi.dim("  (default)") : "";
       const env = p.env.length > 0 ? `  env=${p.env.join(",")}` : "";
       const pp = p.path_dirs.length > 0 ? `  path_dirs=${p.path_dirs.join(",")}` : "";
-      console.log(`  ${ansi.bold(ansi.cyan(p.name))}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${env}${pp}${mark}`);
+      console.log(`  ${ansi.bold(ansi.cyan(p.name))}  executor=${p.executor}  cost=${p.cost}${p.model ? `  model=${p.model}` : ""}${env}${pp}${mark}`);
     }
     console.log(`\n${ansi.bold("Executors:")}`);
     // bin_ok 必须真的渲染出来：只在结构里探测、界面上不显示，等于没修
@@ -146,7 +146,7 @@ export function runProfile(args: string[]): number {
       const mark = p.is_default ? ansi.dim("  (default)") : "";
       const env = p.env.length > 0 ? `  env=${p.env.join(",")}` : "";
       const pp = p.path_dirs.length > 0 ? `  path_dirs=${p.path_dirs.join(",")}` : "";
-      console.log(`  ${ansi.bold(ansi.cyan(p.name))}  executor=${p.executor}${p.model ? `  model=${p.model}` : ""}${env}${pp}${mark}`);
+      console.log(`  ${ansi.bold(ansi.cyan(p.name))}  executor=${p.executor}  cost=${p.cost}${p.model ? `  model=${p.model}` : ""}${env}${pp}${mark}`);
     }
     // 只列**还没物化**的预设：已经进了 config 的再列一遍，等于说"它不在 config 里"，是假话
     const unmaterialized = Object.keys(BUILTIN_PROFILES).filter((n) => !l.profiles.some((p) => p.name === n));
@@ -204,13 +204,18 @@ export function runProfile(args: string[]): number {
     if (!name || !key || value === undefined) {
       console.error(
         `usage: agent-ex profile set <profile> <key> <value>\n` +
-        `  key: an env var name (e.g. ZEN_FREE_PREFER) or the reserved words "executor" / "path_dirs"`,
+        `  key: an env var name (e.g. ZEN_FREE_PREFER) or the reserved words "executor" / "path_dirs" / "cost"`,
       );
       return 2;
     }
     try {
       const r = setProfileValue(home, name, key, value);
       console.log(`${ansi.green(MARK.ok)} ${r.profile}.${r.key} = ${ansi.bold(JSON.stringify(r.value))}`);
+      if (r.key === "cost" && r.value === "free") {
+        // 声明 free 是"这个 profile 真的不花钱"的正式表态（声明优先于结构化判定）——
+        // 值得一句提醒，避免把付费档顺手洗成免费档。
+        console.log(`  ${ansi.dim("Confirm this profile really costs nothing before relying on it.")}`);
+      }
       return 0;
     } catch (e) {
       console.error(`${ansi.red(MARK.error)} ${(e as Error).message}`);
