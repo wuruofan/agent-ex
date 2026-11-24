@@ -49,9 +49,10 @@ function baseCfg(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     executors: { claude: { bin: "/bin/ls" } },
     // ⚠️ cost 必须显式声明：未声明的 profile 会按 metered 处理并产出一条 info，
-    // 那条 info 会让「配置干净」的断言多出一条 finding（这里显式声明成免费档，
+    // 那条 info 会让「配置干净」的断言多出一条 finding（这里显式声明成计费档，
     // 让这些用例继续只测它们各自关心的那一件事）。
-    profiles: { default: { executor: "claude", env: {}, cost: "free" } },
+    // 也不能声明成 free：free + 非 opencode executor 会触发「声明 free 但系统无法独立验证」的 warn。
+    profiles: { default: { executor: "claude", env: {}, cost: "metered" } },
     notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: BRAND },
     defaults: { profile: "default", timeout_sec: 3600 },
     ...over,
@@ -653,5 +654,61 @@ describe("doctor —— 模型存活预检", () => {
     const r = await doctor({ home, userHome, which: NO_TOOLCHAIN, probeImpl: async () => { called = true; return { code: 0, stdout: "", stderr: "" }; } });
     expect(called).toBe(false);
     expect(r.findings.some((x) => /model/i.test(x.title))).toBe(false);
+  });
+});
+
+describe("doctor —— profile 的 cost 档位（D4/D7）", () => {
+  function writeCostCfg(profile: Record<string, unknown>): void {
+    writeCfg({
+      executors: { claude: { bin: "/bin/ls" }, opencode: { bin: "/bin/ls" } },
+      profiles: { p: profile },
+      notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: BRAND },
+      defaults: { profile: "p", timeout_sec: 3600 },
+    });
+    writeFileSync(join(home, ".env"), "FEISHU_WEBHOOK_URL=https://open.feishu.cn/hook/test\n");
+  }
+
+  it("未声明 cost ⇒ info finding，report.ok 仍是 true（info 不阻断启动）", async () => {
+    writeCostCfg({ executor: "claude", env: {} });
+    const r = await doctor({ home, userHome, which: NO_TOOLCHAIN });
+    const f = r.findings.find((x) => x.title.includes("no cost declared"));
+    expect(f?.severity).toBe("info");
+    expect(r.ok).toBe(true);
+    // info 的文案不能复用 error 那句（会谎报「这会让 server 起不来」）
+    expect(f?.detail).not.toContain("keep the server from starting");
+  });
+
+  it("cost 值非法 ⇒ error finding、report.ok=false、且不标 fixable", async () => {
+    writeCostCfg({ executor: "claude", env: {}, cost: "cheap" });
+    const r = await doctor({ home, userHome, which: NO_TOOLCHAIN });
+    const f = r.findings.find((x) => x.title.includes("invalid cost"));
+    expect(f?.severity).toBe("error");
+    expect(f?.fixable).toBeUndefined();
+    expect(r.ok).toBe(false);
+  });
+
+  it("声明 free 但结构化判定不是 free ⇒ warn（不自动改判，也不标 fixable）", async () => {
+    writeCostCfg({ executor: "claude", env: {}, cost: "free" });
+    const r = await doctor({ home, userHome, which: NO_TOOLCHAIN });
+    const f = r.findings.find((x) => x.title.includes('declares cost "free"'));
+    expect(f?.severity).toBe("warn");
+    expect(f?.fixable).toBeUndefined();
+    expect(f?.fix).toContain("agent-ex profile set p cost metered");
+    expect(r.ok).toBe(true);
+  });
+
+  it("声明 free 且结构化判定就是 free（opencode + 占位符）⇒ 不报那条 warn", async () => {
+    writeCostCfg({
+      executor: "opencode",
+      env: {
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({
+          model: "{model:zen-free}",
+          small_model: "{model:zen-free}",
+        }),
+      },
+      cost: "free",
+    });
+    const r = await doctor({ home, userHome, which: NO_TOOLCHAIN });
+    expect(r.findings.some((x) => x.title.includes('declares cost "free"'))).toBe(false);
   });
 });

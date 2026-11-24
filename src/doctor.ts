@@ -23,6 +23,7 @@ import {
   resolveBinPath,
   validateConfig,
   collectConfigIssues,
+  isStructurallyFree,
   type Config,
   type ConfigIssueCode,
 } from "./config.js";
@@ -563,16 +564,48 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
   // 2026-10-23 实测两处假阴性：doctor 报"一切正常"、exit 0，而同一份配置
   // loadConfig 直接抛错、server 起不来（timeout_sec 是字符串、defaults 整块缺失）。
   // 规则只写一份（config.ts 的 collectConfigIssues），这里把**没被具名检查覆盖**的
-  // 那些补成 error finding。
+  // 那些补成 finding。
+  //
+  // ⚠️ 严重级别读 issue.severity（config.ts 是真相源）：info 的文案必须另写一套——
+  // 复用 error 那句"这会让 server 起不来"就是谎报严重性（info 不阻断启动）。
+  // report.ok 只看有没有 error（见本函数末尾），所以 info 不会把体检变成红灯。
   for (const issue of collectConfigIssues(c)) {
     const key = emitKey(issue.code, issue.subject);
     if (emitted.has(key)) continue;
     emitted.add(key);
+    const isInfo = issue.severity === "info";
     findings.push({
-      severity: "error",
-      title: `Config problem: ${issue.message}`,
-      detail: "This comes from the shared validation rules in config.ts (the same ones loadConfig throws on at startup) — the same config would keep the server from starting.",
+      severity: isInfo ? "info" : "error",
+      title: isInfo ? `Config note: ${issue.message}` : `Config problem: ${issue.message}`,
+      detail: isInfo
+        ? "Informational only — it does not block startup; it means dispatching to that profile needs an explicit cost authorization."
+        : "This comes from the shared validation rules in config.ts (the same ones loadConfig throws on at startup) — the same config would keep the server from starting.",
       fix: issue.fix,
+    });
+  }
+
+  // ---- 6b-2. 声明 free 但结构化判定不是 free（D7 兜底）----
+  //
+  // 声明优先（D2）：profile 写 cost:"free" 就按 free 处理——哪怕结构化判据说它不是免费档。
+  // 但「声明」只是文件里的一个词，系统**无法独立验证**（有 shell 的 agent 能伪造它，
+  // 任何留痕也区分不出来）⇒ 这里只报 warn 请用户复核。
+  //
+  // ⚠️ **不自动改判**：改写声明 = 替用户表态，与 doctor --fix 的宪章冲突
+  // （FIXABLE_KINDS 也不加 cost）。severity 是 warn 不是 info：info 既不阻断也不显眼，
+  // 而这是一处**不一致**（声明与判定打架）。
+  for (const [name, raw] of Object.entries(c.profiles ?? {})) {
+    const p = (raw ?? {}) as { executor?: unknown; env?: unknown; cost?: unknown };
+    if (p.cost !== "free") continue;
+    const executor = typeof p.executor === "string" ? p.executor : "";
+    const env = (p.env && typeof p.env === "object" && !Array.isArray(p.env)
+      ? (p.env as Record<string, string>)
+      : {});
+    if (isStructurallyFree(executor, env)) continue;
+    findings.push({
+      severity: "warn",
+      title: `Profile "${name}" declares cost "free" but the system cannot verify it`,
+      detail: "It declared free, but the structured check does not confirm it (the executor is not opencode, or the model/small_model fields are not both the {model:zen-free} placeholder) — please confirm this profile really costs nothing.",
+      fix: `agent-ex profile set ${name} cost metered`,
     });
   }
 
