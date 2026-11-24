@@ -65,7 +65,7 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
 | `profiles.<name>.executor` | 引用 `executors` 里的某个 executor。 |
 | `profiles.<name>.env` | 传给 agent 子进程的环境变量；支持 `{env:VAR}` 占位符（见 §5）。**opencode 一般留空**（provider 由 opencode 自己的 `auth.json`/`opencode.json` 管理）；要给某个 profile 单独指定模型，写 `OPENCODE_CONFIG_CONTENT: "{\"model\":\"provider/model\"}"`——`extra_flags` 是 executor 级，多 profile 无法用它区分模型。**不要在此写 `PATH`**（会被拒绝）；要给 worker 补 PATH 目录用 `profiles.<name>.path_dirs`（见 §4）。 |
 | `profiles.<name>.path_dirs` | 插进 worker `PATH` 的额外**绝对路径目录**列表（位于 executor 的 bin 目录之后、系统目录之前）。典型用途：让 worker 用 nvm 的 `node`。 |
-| `profiles.<name>.cost` | `"free"` 或 `"metered"`——这个 profile 会不会花钱。**不声明按 `metered` 处理**（fail-safe）；声明了 `"free"` 则按声明走（见 §3.1）。 |
+| `profiles.<name>.cost` | `"free"` 或 `"metered"`——这个 profile 会不会花钱。**不声明按 `metered` 处理**（fail-safe）；声明了 `"free"` 则按声明走（见 §2.1）。 |
 | `notify.feishu_webhook_url` | 飞书机器人 webhook；支持 `{env:FEISHU_WEBHOOK_URL}` 占位符。 |
 | `notify.dry_run` | `true`（缺省）→ 只打印通知内容不真发；`false` → 真发。 |
 | `notify.keyword` | 附加在卡片末尾的「关键词」安全闸门。**缺省 = `agent-ex`**（`src/brand.ts` 的 `BRAND`，`loadConfig` 自动填入），一般无需手写。同一行还会标出这次用的 profile 与模型。详见《[飞书通知详解](notifications.md)》。 |
@@ -89,7 +89,7 @@ agent-ex profile set minimax-3 cost metered
 `profile set` 的保留字：`executor`（换 executor）、`path_dirs`（worker PATH 目录，逗号分隔，空值清空）、
 `cost`（计费档，取值 `free` / `metered`），其余 key 视为 env 变量名。
 
-### 3.1 `profiles.<name>.cost`：计费档与派发闸门
+### 2.1 `profiles.<name>.cost`：计费档与派发闸门
 
 `cost` 决定「派发到这个 profile 会不会花钱」，取值只有 `free` / `metered`：
 
