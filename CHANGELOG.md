@@ -11,9 +11,13 @@
 **派发到计费档 profile 现在需要显式授权：这是用户可见的破坏性行为变化。**
 
 - **profile 新增 `cost` 字段**（`"free"` / `"metered"`），声明这个 profile 会不会花钱。
-  **不声明按 `metered` 处理**（fail-safe）⇒ 升级后，既有配置里那些不是 zen-free 的 profile
-  **第一次派发会被拦下来**。逃生口是 `agent-ex profile set <name> cost free`（确认真不花钱才用）；
-  `agent-ex init` 产出的配置已带正确的 `cost`，新装用户不会踩这个坑。
+  **不声明按 `metered` 处理**（fail-safe）⇒ 升级后，既有配置里那些**结构化判定不是 free** 的 profile
+  （几乎所有 claude 档与硬编码模型的 opencode 档）**每次派发都会被拦**——直到你显式声明
+  `agent-ex profile set <name> cost free`（确认真不花钱才用），或每次调用带 `allow_metered: true`。
+  结构化判定就是 free 的（`opencode-zen-free` 那类：executor 是 opencode 且 `model` / `small_model`
+  **都**是 `{model:zen-free}` 占位符）照常放行，不受影响。
+  `agent-ex init` 产出的配置会**显式**写好 `cost`（新装用户 `doctor` 一开始就是干净的、不会看到一堆 info），
+  但 claude 档 / 自带 key 的 opencode 档本来仍是 metered ⇒ 派发仍需 `allow_metered`。
 - **`agent_ex_submit` 新增 `allow_metered`**：派发到计费档必须带 `allow_metered: true`，
   否则直接拒绝（且**不留下任务行**）。这个开关**按次**生效——429、额度上限、free 池全挂、
   超时、失败**都不是**同意计费，不能靠加这个参数把任务"救活"。
