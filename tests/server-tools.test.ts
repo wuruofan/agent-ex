@@ -23,6 +23,17 @@ function listTools(extra: Record<string, string>): Promise<string[]> {
 }
 
 /**
+ * 列出工具的**完整**定义（名字 + inputSchema）——断言 schema 里的字段类型时用。
+ */
+function listToolDetails(extra: Record<string, string>): Promise<{ name: string; inputSchema?: { properties?: Record<string, { type?: string }> } }[]> {
+  return withServer(extra, (send, onReply) => {
+    send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+    onReply(2, (m: { result?: { tools?: { name: string; inputSchema?: { properties?: Record<string, { type?: string }> } }[] } }) =>
+      m.result?.tools ?? []);
+  });
+}
+
+/**
  * 调用一个工具，返回原始 JSON-RPC 响应（成功或失败都要看得到）。
  */
 function callTool(
@@ -144,6 +155,23 @@ describe("MCP server tool registration", () => {
     expect(r.text).toMatch(/Unrecognized key/i);
   }, 120_000);
 
+  // 计费闸门的参数必须真的在 schema 里（设计文档 D8 / V30）：
+  // 老 server 不认识 allow_metered，`.strict()` 会响亮报错，而 0.3.0 那种非 strict 会**静默剥离**
+  // ⇒ 调用方以为闸门生效了。所以「参数在 schema 里」这件事本身要钉住。
+  it("agent_ex_submit 的 schema 里有 allow_metered: boolean", async () => {
+    const tools = await listToolDetails({ AGENT_EX_TEST_MODE: "0" });
+    const submitTool = tools.find((t) => t.name === "agent_ex_submit");
+    expect(submitTool?.inputSchema?.properties?.allow_metered?.type).toBe("boolean");
+  }, 120_000);
+
+  it("带 allow_metered 的 submit 调用不被当成未知参数（.strict() 不误伤）", async () => {
+    // 用一个空 home（没有 config.json）：submit 会因配置问题失败，但**不会**是「未知参数」——
+    // 那正是这条断言要盯的（老 server 上 allow_metered 会被 .strict() 响亮拒绝）。
+    const r = await callTool({}, "agent_ex_submit", { prompt: "hello", allow_metered: true });
+    expect(r.error).toBeUndefined();
+    expect(r.text ?? "").not.toMatch(/Unrecognized key/i);
+  }, 120_000);
+
   it("accepts the documented arguments and actually applies them", async () => {
     // 在独立 home 里先造一条已终态任务：若 include_finished 被静默剥离，status 会走
     // listActive() 返回 []，下面的 toContain 就会红。早先只断言 Array.isArray 时，
@@ -152,7 +180,7 @@ describe("MCP server tool registration", () => {
     const store = openStore(join(home, "tasks.db"));
     store.createTask({
       id: "task_done_fixture", prompt: "x", project_path: home, executor: "fake", profile: "fake",
-      timeout_sec: 60, log_path: join(home, "logs", "done.jsonl"), role: "worker", created_at: 1,
+      timeout_sec: 60, log_path: join(home, "logs", "done.jsonl"), role: "worker", created_at: 1, cost: "free",
     });
     store.claimToRunning("task_done_fixture", process.pid);
     store.transition("task_done_fixture", ["running"], "completed", { result: "done" });

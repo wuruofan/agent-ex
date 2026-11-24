@@ -22,7 +22,7 @@ function newTask(p: Partial<NewTask> = {}): NewTask {
   return {
     id: "task_test_000001", prompt: "do it", project_path: "/tmp", executor: "claude",
     profile: "minimax-3", timeout_sec: 60, log_path: join(dir, "task_test_000001.jsonl"),
-    role: "worker", created_at: 1000, ...p,
+    role: "worker", created_at: 1000, cost: "free", ...p,
   };
 }
 
@@ -71,8 +71,32 @@ describe("store", () => {
     expect(t.session_id).toBe("sid-1");
   });
 
-  it("listActive returns only queued/running/needs_input", () => {
+  // 成本留痕的写入口必须是**结构上唯一**的（设计文档 D10）：
+  // 类型上 TaskPatch 已经没有 cost（编译期写不出来），运行时 patch() 再挡一次 `as any` 绕过。
+  it("cost 只能由 setCost 写：patch() 运行时剔除 cost 键", () => {
     const s = openStore(join(dir, "t.db"));
+    s.createTask(newTask({ cost: "" }));
+    s.patch("task_test_000001", { cost: "metered" } as never);
+    expect(s.getTask("task_test_000001")?.cost).toBe("");
+    s.setCost("task_test_000001", "metered");
+    expect(s.getTask("task_test_000001")?.cost).toBe("metered");
+  });
+
+  it("粘性 metered：旧值是 metered 时 setCost('free') 不覆盖（已发生的计费事实不被抹掉）", () => {
+    const s = openStore(join(dir, "t.db"));
+    s.createTask(newTask({ cost: "metered" }));
+    s.setCost("task_test_000001", "free");
+    expect(s.getTask("task_test_000001")?.cost).toBe("metered");
+  });
+
+  it("旧值是 free 时 setCost('metered') 会升档（该轮确实过了计费闸门）", () => {
+    const s = openStore(join(dir, "t.db"));
+    s.createTask(newTask({ cost: "free" }));
+    s.setCost("task_test_000001", "metered");
+    expect(s.getTask("task_test_000001")?.cost).toBe("metered");
+  });
+
+  it("listActive returns only queued/running/needs_input", () => {    const s = openStore(join(dir, "t.db"));
     s.createTask(newTask({ id: "task_a" }));
     s.createTask(newTask({ id: "task_b" }));
     s.createTask(newTask({ id: "task_c" }));

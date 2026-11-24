@@ -20,6 +20,12 @@ interface TaskView {
   status: string;
   rounds: number;
   profile: string;
+  /**
+   * 派发当时该 profile 的**有效成本**（"free" / "metered"）。
+   *
+   * 升级前的历史任务行没有这一列 ⇒ 回显为「**未记录**」——不是 free，也不是 metered。
+   */
+  cost: string;
   timeout_sec: number;
   elapsed_sec: number | null;
   progress: string | null;
@@ -49,6 +55,7 @@ function view(t: Task): TaskView {
     status: t.status,
     rounds: t.rounds,
     profile: t.profile,
+    cost: t.cost ? t.cost : "未记录",
     timeout_sec: t.timeout_sec,
     elapsed_sec: t.started_at ? (t.ended_at ?? now) - t.started_at : null,
     progress: t.progress,

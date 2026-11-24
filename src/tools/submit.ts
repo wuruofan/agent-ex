@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { statSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { openStore } from "../store.js";
-import { loadConfig, type Config } from "../config.js";
+import { loadConfig, effectiveProfileCost, type Config, type ProfileCost } from "../config.js";
 import { logsDir, dbPath } from "../paths.js";
 import { spawnDetachedRunner } from "../spawn-runner.js";
 import {
@@ -19,6 +19,16 @@ export interface SubmitArgs {
   profile?: string;
   continue_of?: string;
   timeout_sec?: number;
+  /**
+   * 计费授权：**仅当用户本轮明确同意为这次派发付费时**才传 true。
+   *
+   * 目标 profile 是计费档（metered）而这个开关缺省 ⇒ 派发被拒（见 costGateError）。
+   * 免费档（free）不需要它。
+   *
+   * ⚠️ 429 / 额度上限 / free 池全挂 / 超时 / 失败 **都不构成**同意计费——
+   * 那种情况下正确的做法是停下来报告，不是加这个参数重试。
+   */
+  allow_metered?: boolean;
 }
 
 /** 测试注入点：替换模型存活探测的真实 spawn。生产调用方不传。 */
@@ -56,6 +66,47 @@ function missingModelError(profileName: string, ref: { model: string; provider: 
     `profile "${profileName}" points at model "${ref.model}", which is not in the available list for provider ` +
     `"${ref.provider}" (opencode models). The id looks offline — update OPENCODE_CONFIG_CONTENT to a model that still exists before dispatching.`
   );
+}
+
+/**
+ * 计费闸门的拒绝文案（设计文档 D3）。
+ *
+ * 必须包含：profile 名 + 「若用户已同意计费，请传 `allow_metered: true` 重试」。
+ * 被拒的是**默认档**（调用方没传 profile）时额外点名 `defaults.profile` 是谁——
+ * 否则调用方无法判断该改默认还是该传参。
+ *
+ * 末句是刻意的：429 / 额度上限 / 超时 / 失败都**不构成**同意计费，
+ * 不写清楚的话，调用方很容易在这几种情况下自己加 `allow_metered` 重试。
+ */
+function costGateError(profileName: string, opts: { isDefault?: boolean; reason?: string } = {}): string {
+  const who = opts.isDefault
+    ? `profile "${profileName}" (it is the current defaults.profile)`
+    : `profile "${profileName}"`;
+  const reason = opts.reason ? ` ${opts.reason}` : "";
+  return (
+    `${who} is a metered profile — dispatching to it may cost money.${reason} ` +
+    `If the user has explicitly agreed to pay for this run, pass allow_metered: true and retry. ` +
+    `A quota error, an exhausted free pool, a timeout, or a failed run is NOT that agreement.`
+  );
+}
+
+/**
+ * 计费闸门：计费档必须带 `allow_metered: true` 才能派发。
+ *
+ * 返回 null = 放行；返回字符串 = 拒绝理由（直接回给调用方）。
+ *
+ * ⚠️ 判定用的是**有效成本**（声明优先，未声明按结构化判定），真相源在 config.ts 的
+ * `effectiveProfileCost()`——doctor 与这里共用它，改判定逻辑时两处同时变。
+ */
+function checkCostGate(
+  profileName: string,
+  cost: ProfileCost,
+  allowMetered: boolean | undefined,
+  opts: { isDefault?: boolean; reason?: string } = {},
+): string | null {
+  if (cost !== "metered") return null;   // 免费档无需授权
+  if (allowMetered === true) return null; // 用户已授权
+  return costGateError(profileName, opts);
 }
 
 /**
@@ -112,8 +163,21 @@ export async function submit(args: SubmitArgs, deps: SubmitDeps = {}): Promise<S
       if (!t) return { error: `task ${args.continue_of} not found` };
       if (t.status !== "needs_input") return { error: `task ${args.continue_of} is "${t.status}", expected "needs_input"` };
 
-      // 续跑分支同样要探测：任务行里存了当初的 profile / executor。
+      // ---- 计费闸门：必须在**状态变更**与**模型探测**之前（设计文档 D3 的四条硬约束）----
+      // profile 用**任务行**里的（不是 args.profile——续跑时传 profile 无效，现实现即如此）；
+      // executor 也用**任务行**里的：runner 起的是 task.executor（runner.ts:240-242），
+      // 而 env 取自当前 config 的 profile。profile.executor 被改成 opencode+占位符、任务行仍是 claude 时，
+      // 按 profile.executor 判会放行一个**付费**档 ⇒ 这里必须按 task.executor 判。
       const tProfile = cfg.profiles[t.profile];
+      const tCost: ProfileCost = tProfile ? effectiveProfileCost(tProfile, t.executor) : "metered";
+      const gate = checkCostGate(t.profile, tCost, args.allow_metered, {
+        reason: tProfile
+          ? undefined
+          : "It is no longer in config.json, so its cost cannot be determined (treated as metered).",
+      });
+      if (gate) return { error: gate };
+
+      // 续跑分支同样要探测：任务行里存了当初的 profile / executor。
       const tProbe = tProfile
         ? await probeProfileModel(cfg, t.executor, tProfile.env ?? {}, t.profile, deps.runImpl)
         : null;
@@ -123,6 +187,8 @@ export async function submit(args: SubmitArgs, deps: SubmitDeps = {}): Promise<S
       const rounds = t.rounds + 1;
       const ok = store.transition(args.continue_of, ["needs_input"], "running", { rounds });
       if (!ok) return { error: `task ${args.continue_of} state changed concurrently (now "${store.getTask(args.continue_of)?.status}")` };
+      // 留痕：写该轮的有效成本。粘性 metered 由 setCost 保证（已发生的计费事实不被后续轮次抹掉）。
+      store.setCost(args.continue_of, tCost);
       appendFileSync(t.log_path, JSON.stringify({ type: "user_prompt", round: rounds, text: args.prompt }) + "\n");
       const { pid, spawnError } = spawnRunnerWithAsyncErrorCapture(args.continue_of, "running");
       if (pid !== null) store.patch(args.continue_of, { pid });
@@ -143,6 +209,13 @@ export async function submit(args: SubmitArgs, deps: SubmitDeps = {}): Promise<S
     const profile = cfg.profiles[profileName];
     if (!profile) return { error: `unknown profile "${profileName}"` };
     if (!cfg.executors[profile.executor]) return { error: `profile "${profileName}" references unknown executor` };
+
+    // ---- 计费闸门：必须在**模型探测**与**建任务**之前（设计文档 D3 的四条硬约束）----
+    // 前置到探测之前有两个理由：① 被拒的调用不该白付一次 `opencode models` 子进程；
+    // ② "模型 missing" 不该先于 "cost 拒绝" 返回——那会掩盖真正的原因。
+    const cost = effectiveProfileCost(profile);
+    const gate = checkCostGate(profileName, cost, args.allow_metered, { isDefault: args.profile === undefined });
+    if (gate) return { error: gate };
 
     // ---- 模型存活预检：missing 直接拒绝派发（不创建任务）；unknown 只告警 ----
     const probe = await probeProfileModel(cfg, profile.executor, profile.env ?? {}, profileName, deps.runImpl);
@@ -179,6 +252,7 @@ export async function submit(args: SubmitArgs, deps: SubmitDeps = {}): Promise<S
       id, prompt: args.prompt, project_path, executor: profile.executor, profile: profileName,
       timeout_sec, log_path: join(logsDir(), `${id}.jsonl`), role: "worker",
       created_at: Math.floor(Date.now() / 1000),
+      cost,
     });
     const { pid, spawnError } = spawnRunnerWithAsyncErrorCapture(id, "queued");
     if (pid !== null) store.patch(id, { pid });

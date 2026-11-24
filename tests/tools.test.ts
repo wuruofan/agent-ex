@@ -26,7 +26,7 @@ beforeEach(() => {
   mkdirSync(join(home, "logs"), { recursive: true });
   writeFileSync(join(home, "config.json"), JSON.stringify({
     executors: { fake: { bin: process.execPath, extra_flags: ["ignored"] } },
-    profiles: { fake: { executor: "fake", env: {} } },
+    profiles: { fake: { executor: "fake", env: {}, cost: "free" } },
     notify: { feishu_webhook_url: "https://example.invalid/hook", dry_run: true },
     defaults: { profile: "fake", timeout_sec: 60 },
   }));
@@ -69,7 +69,7 @@ describe("submit", () => {
     store.createTask({
       id, prompt: "p", project_path: home, executor: "fake", profile: "fake",
       timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: Math.floor(Date.now() / 1000), cost: "free",
     });
     store.transition(id, ["queued"], "needs_input", { question: "q" });
     const r = await submit({ prompt: "answer", continue_of: id });
@@ -113,6 +113,9 @@ describe("submit", () => {
       const profiles: Record<string, unknown> = {
         [profileName]: {
           executor,
+          // 显式声明免费档：fake/opencode 夹具都不产生真实计费（模型探测走注入的 runImpl）。
+          // 不声明 ⇒ 按 metered 处理 ⇒ 每个 submit() 都会被计费闸门拦下，闸门的失败原因会被淹没。
+          cost: "free",
           env: executor === "opencode"
             ? { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model }) }
             : { ANTHROPIC_MODEL: model },
@@ -183,7 +186,7 @@ describe("submit", () => {
       store.createTask({
         id, prompt: "p", project_path: home, executor: "opencode", profile: "oc",
         timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
-        created_at: Math.floor(Date.now() / 1000),
+        created_at: Math.floor(Date.now() / 1000), cost: "free",
       });
       store.transition(id, ["queued"], "needs_input", { question: "q" });
       const r = await submit(
@@ -202,6 +205,175 @@ describe("submit", () => {
   });
 });
 
+describe("submit —— 计费闸门（cost gate）", () => {
+  /**
+   * 写一份带指定 profile / 默认档的配置。
+   *
+   * executors 固定给 fake / claude / opencode 三个（bin 都是本机 node）——
+   * 闸门只关心 profile 的 executor 与 env，不关心 bin 真伪。
+   */
+  function writeGateCfg(profiles: Record<string, unknown>, defaults: Record<string, unknown>): void {
+    writeFileSync(join(home, "config.json"), JSON.stringify({
+      executors: {
+        fake: { bin: process.execPath, extra_flags: ["ignored"] },
+        claude: { bin: process.execPath },
+        opencode: { bin: process.execPath },
+      },
+      profiles,
+      notify: { feishu_webhook_url: "https://example.invalid/hook", dry_run: true },
+      defaults,
+    }));
+  }
+
+  const countTasks = (): number => {
+    const s = openStore(join(home, "tasks.db"));
+    try { return s.listRecent(200).length; } finally { s.close(); }
+  };
+
+  it("metered 且未授权 ⇒ 拒绝，tasks 表没有新行", async () => {
+    writeGateCfg({ paid: { executor: "claude", env: {}, cost: "metered" } }, { profile: "paid", timeout_sec: 60 });
+    const before = countTasks();
+    const r = await submit({ prompt: "hello", project_path: home });
+    expect(r).toMatchObject({ error: expect.any(String) });
+    const err = (r as { error: string }).error;
+    expect(err).toContain('profile "paid"');
+    expect(err).toContain("allow_metered: true");
+    expect(countTasks()).toBe(before);
+    expect(mockedSpawn).not.toHaveBeenCalled();
+  });
+
+  it("metered 且 allow_metered=true ⇒ 正常建任务，行里记 cost=metered，status 也回显", async () => {
+    writeGateCfg({ paid: { executor: "claude", env: {}, cost: "metered" } }, { profile: "paid", timeout_sec: 60 });
+    const r = await submit({ prompt: "hello", project_path: home, allow_metered: true });
+    expect(r).toMatchObject({ status: "queued", rounds: 1 });
+    const id = (r as { task_id: string }).task_id;
+    expect(openStore(join(home, "tasks.db")).getTask(id)?.cost).toBe("metered");
+    expect(status({ task_id: id })).toMatchObject({ cost: "metered" });
+  });
+
+  it("free 档无需授权即可派发", async () => {
+    writeGateCfg({ freep: { executor: "claude", env: {}, cost: "free" } }, { profile: "freep", timeout_sec: 60 });
+    const r = await submit({ prompt: "hello", project_path: home });
+    expect(r).toMatchObject({ status: "queued", rounds: 1 });
+    const id = (r as { task_id: string }).task_id;
+    expect(openStore(join(home, "tasks.db")).getTask(id)?.cost).toBe("free");
+  });
+
+  it("默认档是 metered 且省略 profile ⇒ 被拦，文案点名 defaults.profile", async () => {
+    writeGateCfg({ paid: { executor: "claude", env: {}, cost: "metered" } }, { profile: "paid", timeout_sec: 60 });
+    const r = await submit({ prompt: "hello", project_path: home });
+    const err = (r as { error: string }).error;
+    expect(err).toContain("defaults.profile");
+    expect(err).toContain('"paid"');
+  });
+
+  it("闸门在模型存活探测之前：被拒的调用不产生 opencode models 子进程", async () => {
+    writeGateCfg(
+      {
+        paid: {
+          executor: "opencode",
+          env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: "prov/Offline" }) },
+          cost: "metered",
+        },
+      },
+      { profile: "paid", timeout_sec: 60 },
+    );
+    const runImpl = vi.fn();
+    const r = await submit({ prompt: "hello", project_path: home }, { runImpl });
+    expect(r).toMatchObject({ error: expect.any(String) });
+    expect(runImpl).not.toHaveBeenCalled();
+  });
+
+  it("续跑一个 metered 任务且未授权 ⇒ 拒绝，任务仍是 needs_input", async () => {
+    writeGateCfg({ paid: { executor: "claude", env: {}, cost: "metered" } }, { profile: "paid", timeout_sec: 60 });
+    const store = openStore(join(home, "tasks.db"));
+    const id = "task_cont_metered";
+    store.createTask({
+      id, prompt: "p", project_path: home, executor: "claude", profile: "paid",
+      timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
+      created_at: Math.floor(Date.now() / 1000), cost: "metered",
+    });
+    store.transition(id, ["queued"], "needs_input", { question: "q" });
+    const r = await submit({ prompt: "answer", continue_of: id });
+    expect(r).toMatchObject({ error: expect.any(String) });
+    expect((r as { error: string }).error).toContain('profile "paid"');
+    // 关键：状态**不变**（闸门必须排在状态变更之前，不能先 transition 再报错）
+    expect(store.getTask(id)?.status).toBe("needs_input");
+    expect(store.getTask(id)?.rounds).toBe(1);
+    expect(mockedSpawn).not.toHaveBeenCalled();
+  });
+
+  it("续跑时 profile 已从 config 删除 ⇒ 按 metered 拒绝（fail-safe）", async () => {
+    writeGateCfg({ other: { executor: "claude", env: {}, cost: "free" } }, { profile: "other", timeout_sec: 60 });
+    const store = openStore(join(home, "tasks.db"));
+    const id = "task_gone";
+    store.createTask({
+      id, prompt: "p", project_path: home, executor: "claude", profile: "gone",
+      timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
+      created_at: Math.floor(Date.now() / 1000), cost: "free",
+    });
+    store.transition(id, ["queued"], "needs_input", { question: "q" });
+    const r = await submit({ prompt: "answer", continue_of: id });
+    expect(r).toMatchObject({ error: expect.any(String) });
+    expect((r as { error: string }).error).toContain('profile "gone"');
+    expect(store.getTask(id)?.status).toBe("needs_input");
+  });
+
+  it("续跑时 profile.executor 是 opencode+占位符、任务行是 claude ⇒ 按 metered 拒绝（P0-4 绕过口）", async () => {
+    // 结构化判定看 profile（opencode + 占位符 ⇒ free），但 runner 起的是**任务行**的 claude（付费 CLI）
+    // ⇒ 必须按 task.executor 判，否则这里就是一个续跑绕过口。
+    writeGateCfg(
+      {
+        p: {
+          executor: "opencode",
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: "{model:zen-free}", small_model: "{model:zen-free}" }),
+          },
+        },
+      },
+      { profile: "p", timeout_sec: 60 },
+    );
+    const store = openStore(join(home, "tasks.db"));
+    const id = "task_mismatch";
+    store.createTask({
+      id, prompt: "p", project_path: home, executor: "claude", profile: "p",
+      timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
+      created_at: Math.floor(Date.now() / 1000), cost: "free",
+    });
+    store.transition(id, ["queued"], "needs_input", { question: "q" });
+    const r = await submit({ prompt: "answer", continue_of: id });
+    expect(r).toMatchObject({ error: expect.any(String) });
+    expect(store.getTask(id)?.status).toBe("needs_input");
+    expect(mockedSpawn).not.toHaveBeenCalled();
+  });
+
+  it("粘性 metered：metered 任务续跑一轮、该轮判定为 free ⇒ 行里仍是 metered", async () => {
+    // 任务当初是 metered；后来 profile 被改成 free ⇒ 该轮判定为 free（声明优先）
+    writeGateCfg({ p: { executor: "claude", env: {}, cost: "free" } }, { profile: "p", timeout_sec: 60 });
+    const store = openStore(join(home, "tasks.db"));
+    const id = "task_sticky";
+    store.createTask({
+      id, prompt: "p", project_path: home, executor: "claude", profile: "p",
+      timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
+      created_at: Math.floor(Date.now() / 1000), cost: "metered",
+    });
+    store.transition(id, ["queued"], "needs_input", { question: "q" });
+    const r = await submit({ prompt: "answer", continue_of: id });
+    expect(r).toMatchObject({ task_id: id, status: "running", rounds: 2 });
+    // 已发生的计费事实不被后续轮次的 free 判定抹掉
+    expect(store.getTask(id)?.cost).toBe("metered");
+  });
+
+  it("升级前的历史行（cost 为空串）⇒ status 回显「未记录」，不得当成 free", () => {
+    const store = openStore(join(home, "tasks.db"));
+    store.createTask({
+      id: "task_legacy", prompt: "x", project_path: home, executor: "claude", profile: "p",
+      timeout_sec: 60, log_path: join(home, "logs", "legacy.jsonl"), role: "worker", created_at: 1, cost: "",
+    });
+    expect(status({ task_id: "task_legacy" })).toMatchObject({ cost: "未记录" });
+  });
+});
+
 describe("status", () => {
   it("no-arg returns empty array when no active tasks", () => {
     expect(status({})).toEqual([]);
@@ -210,7 +382,7 @@ describe("status", () => {
     const store = openStore(join(home, "tasks.db"));
     store.createTask({
       id: "task_q", prompt: "x", project_path: home, executor: "fake", profile: "fake",
-      timeout_sec: 60, log_path: join(home, "logs", "q.jsonl"), role: "worker", created_at: 1,
+      timeout_sec: 60, log_path: join(home, "logs", "q.jsonl"), role: "worker", created_at: 1, cost: "free",
     });
     store.claimToRunning("task_q", process.pid);
     store.transition("task_q", ["running"], "needs_input", { question: "which db?" });
@@ -225,7 +397,7 @@ describe("status", () => {
     const store = openStore(join(home, "tasks.db"));
     store.createTask({
       id: "task_to", prompt: "x", project_path: home, executor: "fake", profile: "fake",
-      timeout_sec: 120, log_path: join(home, "logs", "to.jsonl"), role: "worker", created_at: 1,
+      timeout_sec: 120, log_path: join(home, "logs", "to.jsonl"), role: "worker", created_at: 1, cost: "free",
     });
     const v = status({ task_id: "task_to" }) as { timeout_sec?: number };
     expect(v.timeout_sec).toBe(120);
@@ -236,7 +408,7 @@ describe("status", () => {
     const seedFinished = (store: ReturnType<typeof openStore>, id: string, created_at: number) => {
       store.createTask({
         id, prompt: "x", project_path: home, executor: "fake", profile: "fake",
-        timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker", created_at,
+        timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker", created_at, cost: "free",
       });
       store.claimToRunning(id, process.pid);
       store.transition(id, ["running"], "completed", { result: "done" });
@@ -275,7 +447,7 @@ describe("status", () => {
       seedFinished(store, "task_done", 1);
       store.createTask({
         id: "task_live", prompt: "x", project_path: home, executor: "fake", profile: "fake",
-        timeout_sec: 60, log_path: join(home, "logs", "live.jsonl"), role: "worker", created_at: 2,
+        timeout_sec: 60, log_path: join(home, "logs", "live.jsonl"), role: "worker", created_at: 2, cost: "free",
       });
       const v = status({ include_finished: true }) as { task_id: string }[];
       const ids = v.map((t) => t.task_id);
@@ -299,7 +471,7 @@ describe("status", () => {
       const store = openStore(join(home, "tasks.db"));
       store.createTask({
         id: "task_queued", prompt: "x", project_path: home, executor: "fake", profile: "fake",
-        timeout_sec: 60, log_path: join(home, "logs", "q.jsonl"), role: "worker", created_at: 5,
+        timeout_sec: 60, log_path: join(home, "logs", "q.jsonl"), role: "worker", created_at: 5, cost: "free",
       });
       const v = status({ include_finished: true }) as {
         task_id: string; started_at: number | null;
@@ -314,7 +486,7 @@ describe("cancel", () => {
     const store = openStore(join(home, "tasks.db"));
     store.createTask({
       id: "task_c1", prompt: "x", project_path: home, executor: "fake", profile: "fake",
-      timeout_sec: 60, log_path: join(home, "logs", "c1.jsonl"), role: "worker", created_at: 1,
+      timeout_sec: 60, log_path: join(home, "logs", "c1.jsonl"), role: "worker", created_at: 1, cost: "free",
     });
     store.claimToRunning("task_c1", process.pid);
     store.transition("task_c1", ["running"], "needs_input", { question: "q" });
@@ -337,7 +509,7 @@ describe("setStartedAt (test helper)", () => {
     const store = openStore(join(home, "tasks.db"));
     store.createTask({
       id: "task_sa", prompt: "x", project_path: home, executor: "fake", profile: "fake",
-      timeout_sec: 60, log_path: join(home, "logs", "sa.jsonl"), role: "worker", created_at: 1,
+      timeout_sec: 60, log_path: join(home, "logs", "sa.jsonl"), role: "worker", created_at: 1, cost: "free",
     });
     store.claimToRunning("task_sa", process.pid);
     expect(setStartedAt({ task_id: "task_sa", started_at: 1234 })).toEqual({ task_id: "task_sa", started_at: 1234 });

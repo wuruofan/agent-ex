@@ -51,6 +51,7 @@ async function main(): Promise<void> {
         "任务已提交，卡住/完成会推飞书，无需轮询。",
         "同一 project_path 的写任务并发会互相踩文件——plan 负责串行派发或确保改动文件不重叠；只读分析任务不受此限，可并行。",
         "对 needs_input 任务答疑续跑时传 continue_of=task_id，prompt 填答案，worker 将带着原上下文继续。",
+        "目标 profile 是计费档时必须传 allow_metered=true，且只在用户本轮明确同意付费时传——429、额度上限、超时、失败都不构成同意。",
       ].join("\n"),
       inputSchema: z.object({
         prompt: z.string().describe("任务工单（首轮）或对 worker 问题的答复（续跑）"),
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
         profile: z.string().optional().describe("运行 profile 名，默认取 config defaults.profile"),
         continue_of: z.string().optional().describe("续跑目标任务 id（该任务须为 needs_input）"),
         timeout_sec: z.number().int().positive().optional().describe("每轮超时秒数，默认取 config"),
+        allow_metered: z.boolean().optional().describe("计费授权：仅当用户已明确同意为这次派发付费时才传 true；免费档不需要"),
       }).strict(),
     },
     async (args) => json(await submit(args))

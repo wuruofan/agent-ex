@@ -54,14 +54,30 @@ export interface Task {
   error: string | null;
   log_path: string;
   role: string;
+  /**
+   * 派发当时该 profile 的**有效成本**（"free" / "metered"）。
+   *
+   * 空串 = **未记录**（升级前的历史行；不是 free，也不是 metered）。
+   *
+   * ⚠️ 它记录的是「工具在派发当时依据当时配置作出的判定」，**不是**「模型是否真的收费」的真值
+   * （见设计文档 D10 的诚实修正）。写入口只有 `setCost()`——也就是只有过了计费闸门的派发能写它。
+   */
+  cost: string;
   created_at: number;
   started_at: number | null;
   ended_at: number | null;
   notify_failed: boolean;
 }
 
-export type NewTask = Pick<Task, "id" | "prompt" | "project_path" | "executor" | "profile" | "timeout_sec" | "log_path" | "role" | "created_at">;
-export type TaskPatch = Partial<Omit<Task, "id" | "status" | "created_at">>;
+export type NewTask = Pick<Task, "id" | "prompt" | "project_path" | "executor" | "profile" | "timeout_sec" | "log_path" | "role" | "created_at" | "cost">;
+/**
+ * 普通字段更新用的补丁类型。
+ *
+ * ⚠️ **`cost` 被排除在外**（设计文档 D10）：`cost` 一旦留在 TaskPatch 里，任何
+ * `store.patch(id, { cost })` 的调用方都能绕过计费闸门写值 ⇒ 「只有过了闸门的派发才会留痕」
+ * 就从机制保证退化成约定。写它只能用专用的 `setCost()`。
+ */
+export type TaskPatch = Partial<Omit<Task, "id" | "status" | "created_at" | "cost">>;
 
 /**
  * 目标列定义 —— 建表与迁移共用同一份真相。
@@ -95,6 +111,7 @@ const COLUMNS: Record<string, string> = {
   error: "error TEXT",
   log_path: "log_path TEXT NOT NULL DEFAULT ''",
   role: "role TEXT NOT NULL DEFAULT 'worker'",
+  cost: "cost TEXT NOT NULL DEFAULT ''",
   created_at: "created_at INTEGER NOT NULL DEFAULT 0",
   started_at: "started_at INTEGER",
   ended_at: "ended_at INTEGER",
@@ -187,10 +204,24 @@ export class Store {
   createTask(t: NewTask): void {
     this.db
       .prepare(
-        `INSERT INTO tasks (id, prompt, project_path, executor, profile, timeout_sec, log_path, role, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO tasks (id, prompt, project_path, executor, profile, timeout_sec, log_path, role, created_at, cost)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(t.id, t.prompt, t.project_path, t.executor, t.profile, t.timeout_sec, t.log_path, t.role, t.created_at);
+      .run(t.id, t.prompt, t.project_path, t.executor, t.profile, t.timeout_sec, t.log_path, t.role, t.created_at, t.cost);
+  }
+  /**
+   * 写任务的成本留痕（设计文档 D10）——**唯一**能写 `cost` 列的入口。
+   *
+   * 只有过了计费闸门的派发才会调它 ⇒ 「cost=metered ⇒ 至少有一轮带 allow_metered 过了闸门」
+   * 是**结构保证**，不是约定（`TaskPatch` 里没有 cost，`patch()` 也会在运行时剔除它）。
+   *
+   * **粘性 metered**：已经发生的计费事实不能被后续轮次的 free 判定抹掉 ⇒
+   * 旧值是 metered 时保持 metered，其余取新值。
+   */
+  setCost(id: string, cost: "free" | "metered"): void {
+    this.db
+      .prepare(`UPDATE tasks SET cost = CASE WHEN cost = 'metered' THEN 'metered' ELSE ? END WHERE id = ?`)
+      .run(cost, id);
   }
   getTask(id: string): Task | undefined {
     const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Record<string, unknown> | undefined;
@@ -210,14 +241,20 @@ export class Store {
   transition(id: string, from: TaskStatus[], to: TaskStatus, patch: TaskPatch = {}): boolean {
     if (from.length === 0) return false;
     if (from.some((s) => TERMINAL_STATUSES.includes(s))) return false;
-    const [sql, args] = buildUpdate(patch, `status=?`, `id=? AND status IN (${from.map(() => "?").join(",")})`);
+    const built = buildUpdate(patch, `status=?`, `id=? AND status IN (${from.map(() => "?").join(",")})`);
+    if (!built) return false;
+    const [sql, args] = built;
     const r = this.db.prepare(sql).run(...args, to, id, ...from);
     return r.changes === 1;
   }
   /** 非状态字段更新（progress/session_id/files_changed/result 等）。 */
   patch(id: string, patch: TaskPatch): void {
     if (Object.keys(patch).length === 0) return;
-    const [sql, args] = buildUpdate(patch, "", `id=?`);
+    const built = buildUpdate(patch, "", `id=?`);
+    // built 为 null = 补丁里只剩被剔除的键（如 cost）⇒ 没有任何列要改 ⇒ 什么都不做
+    // （否则会拼出 "UPDATE tasks SET  WHERE ..." 的坏 SQL）。
+    if (!built) return;
+    const [sql, args] = built;
     this.db.prepare(sql).run(...args, id);
   }
   listActive(): Task[] {
@@ -261,17 +298,31 @@ export function openReadonlyStore(dbPath: string): DatabaseSync {
   return new (databaseSyncCtor())(dbPath, { readOnly: true });
 }
 
-function buildUpdate(patch: TaskPatch, setExtra: string, whereExtra: string): [string, (string | number | bigint | null)[]] {
+/**
+ * 把补丁拼成 UPDATE 语句。
+ *
+ * 返回 null = **没有任何列要改**（补丁里只剩被剔除的键，比如只有 cost）
+ * ⇒ 调用方应当什么都不做，而不是拼出 "UPDATE tasks SET  WHERE …" 的坏 SQL。
+ */
+function buildUpdate(
+  patch: TaskPatch,
+  setExtra: string,
+  whereExtra: string,
+): [string, (string | number | bigint | null)[]] | null {
   const sets: string[] = [];
   const args: (string | number | bigint | null)[] = [];
   for (const [k, v] of Object.entries(patch)) {
     if (v === undefined) continue;
+    // ⚠️ `cost` 只能由 setCost() 写（设计文档 D10）：类型上它已被排除在 TaskPatch 之外，
+    // 这里再挡一次运行时的 `as any` 绕过 ⇒ 「只有过了闸门的派发才会留痕」是结构保证，不是约定。
+    if (k === "cost") continue;
     sets.push(`${k}=?`);
     if (k === "files_changed") args.push(JSON.stringify(v));
     else if (k === "notify_failed") args.push(v ? 1 : 0);
     else args.push(v as string | number | null);
   }
   if (setExtra) sets.push(setExtra);
+  if (sets.length === 0) return null;
   const where = whereExtra ? ` WHERE ${whereExtra}` : "";
   return [`UPDATE tasks SET ${sets.join(", ")}${where}`, args];
 }

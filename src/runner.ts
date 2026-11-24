@@ -230,7 +230,7 @@ function clearDraining(taskId: string): void {
 let activeModel: string | null = null;
 
 /**
- * 卡片底部小字：这次用哪个 profile、哪个模型跑的（与 keyword 同一行，见 notifier.ts）。
+ * 卡片底部小字：这次用哪个 profile、哪个模型跑的、跑的是哪一档成本（与 keyword 同一行，见 notifier.ts）。
  *
  * 只列事实、不加 `profile：`/`模型：` 标签——三个值都是标识符，位置即语义，
  * 标签只会让这行 12px 灰字变长、挤在一起反而不好扫（2026-11-10 用户定的格式）。
@@ -239,7 +239,16 @@ let activeModel: string | null = null;
  */
 function cardFooter(task: Task, cfg: Awaited<ReturnType<typeof loadConfig>>): string {
   const model = activeModel ?? profileModelLabel(cfg.profiles[task.profile]?.env);
-  return model ? `${task.profile}  ·  ${model}` : task.profile;
+  // 成本留痕（设计文档 D10）：三档——计费档 / 免费档 / 未记录。
+  // 空串（升级前的历史行）必须显示「未记录」，不能落到两档中的任何一档。
+  return [task.profile, model, costLabel(task.cost)].filter(Boolean).join("  ·  ");
+}
+
+/** 成本留痕的标签：空串/未知 = 「未记录」（升级前的历史行，不是 free）。 */
+function costLabel(cost: string | undefined): string {
+  if (cost === "metered") return "计费档";
+  if (cost === "free") return "免费档";
+  return "未记录";
 }
 
 async function main(): Promise<void> {

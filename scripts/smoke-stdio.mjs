@@ -5,13 +5,18 @@
 //   node scripts/smoke-stdio.mjs /path/to/server.js     # 用指定的 server 入口（发布前验证"装出来的包"时用这个）
 //   node scripts/smoke-stdio.mjs <server.js> <AGENT_EX_HOME>
 //
-// 断言三件事（2026-10-26 补齐）：
+// 断言四件事（2026-11-24 补齐第 4 条）：
 //   1) 六个生产工具全部注册
 //   2) TEST ONLY 工具**没有**被注册（它是 test mode 才开的，生产包不该暴露）
 //   3) server 确实起来了（stderr 里的 ready 标记）
+//   4) agent_ex_submit 的 schema 里有 allow_metered（计费闸门的参数）
 //
 // 为什么第 2 条要断言：0.1.0 漏打 CLI 层那类事故，症状就是"包里缺东西"，
 // 而 tools/list 是唯一能在发布前机械发现"少了哪个文件"的检查点。
+//
+// 为什么第 4 条要断言：allow_metered 是**新参数**，老 server 不认识它
+// （≥0.3.1 的 .strict() 会报 Unrecognized key，0.3.0 的非 strict 会静默剥离）
+// ⇒ 包里的 schema 少了它 = 计费闸门在装出来的包上不存在。
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -75,7 +80,8 @@ server.stdout.on("data", (d) => {
     if (!line) continue;
     try {
       const j = JSON.parse(line);
-      if (j.id === 2 && j.result?.tools) tools = j.result.tools.map((t) => t.name);
+      // 留住完整定义（不只是名字）：第 4 条断言要看 inputSchema。
+      if (j.id === 2 && j.result?.tools) tools = j.result.tools;
     } catch {}
   }
   if (tools) finish();
@@ -89,10 +95,11 @@ const finish = () => {
 
   let failed = false;
   if (tools) {
+    const names = tools.map((t) => t.name);
     console.log("server:", serverEntry);
-    console.log("tools:", tools.join(", "));
+    console.log("tools:", names.join(", "));
 
-    const missing = PRODUCTION_TOOLS.filter((n) => !tools.includes(n));
+    const missing = PRODUCTION_TOOLS.filter((n) => !names.includes(n));
     if (missing.length === 0) {
       console.log(`OK: ${PRODUCTION_TOOLS.length} 个生产工具全部注册`);
     } else {
@@ -100,11 +107,21 @@ const finish = () => {
       failed = true;
     }
 
-    const leaked = TEST_ONLY_TOOLS.filter((n) => tools.includes(n));
+    const leaked = TEST_ONLY_TOOLS.filter((n) => names.includes(n));
     if (leaked.length === 0) {
       console.log("OK: 未暴露 TEST ONLY 工具");
     } else {
       console.error("FAIL: 暴露了 TEST ONLY 工具", leaked);
+      failed = true;
+    }
+
+    // 第 4 条：计费闸门的参数必须真的在 schema 里（老 server 会静默剥离 / 响亮拒绝）。
+    const submitTool = tools.find((t) => t.name === "agent_ex_submit");
+    const allowMetered = submitTool?.inputSchema?.properties?.allow_metered;
+    if (allowMetered?.type === "boolean") {
+      console.log("OK: agent_ex_submit 的 schema 含 allow_metered: boolean");
+    } else {
+      console.error("FAIL: agent_ex_submit 的 schema 缺 allow_metered（计费闸门在装出来的包上不存在）");
       failed = true;
     }
   } else {

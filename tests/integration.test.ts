@@ -34,6 +34,7 @@ import { submit } from "../src/tools/submit.js";
 import { status } from "../src/tools/status.js";
 import { cancel } from "../src/tools/cancel.js";
 import { openStore } from "../src/store.js";
+import { spawnDetachedRunner } from "../src/spawn-runner.js";
 import { killTree, isPsAvailable } from "../src/proc-tree.js";
 import { scanNotifyFailures } from "../src/doctor.js";
 
@@ -146,7 +147,7 @@ function setupHome(extraProfileEnv: Record<string, string> = {}, timeoutSec = 30
   chmodSync(fakeAgent, 0o755);
   writeFileSync(join(home, "config.json"), JSON.stringify({
     executors: { fake: { bin: fakeAgent, extra_flags: [] } },
-    profiles: { fake: { executor: "fake", env: { PATH: process.env.PATH ?? "", ...extraProfileEnv } } },
+    profiles: { fake: { executor: "fake", env: { PATH: process.env.PATH ?? "", ...extraProfileEnv }, cost: "free" } },
     notify: { feishu_webhook_url: "https://example.invalid/hook", dry_run: true },
     defaults: { profile: "fake", timeout_sec: timeoutSec },
   }));
@@ -371,7 +372,7 @@ suite("integration: 通知在飞时收到 SIGTERM", () => {
       // 真发（dry_run=false）到本地黑洞 webhook
       writeFileSync(join(home, "config.json"), JSON.stringify({
         executors: { fake: { bin: fakeAgent, extra_flags: [] } },
-        profiles: { fake: { executor: "fake", env: { PATH: process.env.PATH ?? "" } } },
+        profiles: { fake: { executor: "fake", env: { PATH: process.env.PATH ?? "" }, cost: "free" } },
         notify: { feishu_webhook_url: `http://127.0.0.1:${port}/hook`, dry_run: false },
         defaults: { profile: "fake", timeout_sec: 30 },
       }));
@@ -435,6 +436,7 @@ suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
         profiles: {
           fake: {
             executor: "fake",
+          cost: "free",
             env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota", FAKE_PIDFILE: pidfile },
           },
         },
@@ -519,6 +521,7 @@ suite("integration: 配额告警卡在飞时收到 SIGTERM", () => {
         profiles: {
           fake: {
             executor: "fake",
+          cost: "free",
             env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota", FAKE_PIDFILE: pidfile },
           },
         },
@@ -591,6 +594,7 @@ suite("integration: 通知日志的卡片标签", () => {
         profiles: {
           fake: {
             executor: "fake",
+          cost: "free",
             env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota", FAKE_PIDFILE: pidfile },
           },
         },
@@ -668,6 +672,7 @@ suite("integration: cancel 撞上在飞的配额卡", () => {
         profiles: {
           fake: {
             executor: "fake",
+          cost: "free",
             env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota", FAKE_PIDFILE: pidfile },
           },
         },
@@ -711,7 +716,7 @@ suite("integration: 通知的 webhook 解析失败", () => {
     setupHome({}, 30);
     writeFileSync(join(home, "config.json"), JSON.stringify({
       executors: { fake: { bin: fakeAgent, extra_flags: [] } },
-      profiles: { fake: { executor: "fake", env: { PATH: process.env.PATH ?? "" } } },
+      profiles: { fake: { executor: "fake", env: { PATH: process.env.PATH ?? "" }, cost: "free" } },
       notify: { feishu_webhook_url: "{env:AFEX_MISSING_WEBHOOK}", dry_run: false },
       defaults: { profile: "fake", timeout_sec: 30 },
     }));
@@ -730,6 +735,7 @@ suite("integration: 通知的 webhook 解析失败", () => {
       profiles: {
         fake: {
           executor: "fake",
+        cost: "free",
           env: { PATH: process.env.PATH ?? "", FAKE_MODE: "quota", FAKE_PIDFILE: pidfile },
         },
       },
@@ -787,6 +793,83 @@ setTimeout(() => { throw new Error("boom"); }, 50);
     })();
     expect(gone).toBe(true);
   }, 30_000);
+});
+
+suite("integration: 终态卡的成本留痕（D10）", () => {
+  // 卡面是「人读」的留痕面：footer 必须写明这次跑的是计费档、免费档还是未记录。
+  async function captureCards(run: () => Promise<void>): Promise<string[]> {
+    const cards: string[] = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        cards.push(body);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ code: 0, msg: "ok" }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      await run(port);
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline && cards.length === 0) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return cards;
+    } finally {
+      server.close();
+    }
+  }
+
+  function writeCardCfg(port: number, cost: string): void {
+    writeFileSync(join(home, "config.json"), JSON.stringify({
+      executors: { fake: { bin: fakeAgent, extra_flags: [] } },
+      profiles: {
+        fake: {
+          executor: "fake",
+          cost,
+          env: { PATH: process.env.PATH ?? "", FAKE_MODE: "ok" },
+        },
+      },
+      notify: { feishu_webhook_url: `http://127.0.0.1:${port}/hook`, dry_run: false },
+      defaults: { profile: "fake", timeout_sec: 30 },
+    }));
+  }
+
+  it("metered 档 ⇒ 终态卡 footer 显示「计费档」", async () => {
+    const cards = await captureCards(async (port) => {
+      setupHome({ FAKE_MODE: "ok" }, 30);
+      writeCardCfg(port, "metered");
+      // 计费档必须带 allow_metered 才过得了闸门
+      const r = await submit({ prompt: "cost card", project_path: home, allow_metered: true });
+      const id = (r as { task_id: string }).task_id;
+      expect(await waitForTerminal(id, 25_000)).toBe("completed");
+    });
+    expect(cards.length).toBeGreaterThan(0);
+    expect(cards[0]).toContain("计费档");
+  }, 60_000);
+
+  it("升级前的历史行（cost 为空串）⇒ footer 显示「未记录」，不得落成 free", async () => {
+    const cards = await captureCards(async (port) => {
+      setupHome({ FAKE_MODE: "ok" }, 30);
+      writeCardCfg(port, "free");
+      // 直接造一条**没有 cost 列**的历史行（升级前的形状），再起 runner 跑它。
+      const id = "task_legacy_cost";
+      const store = openStore(join(home, "tasks.db"));
+      store.createTask({
+        id, prompt: "legacy", project_path: home, executor: "fake", profile: "fake",
+        timeout_sec: 30, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
+        created_at: Math.floor(Date.now() / 1000), cost: "",
+      });
+      store.close();
+      spawnDetachedRunner(id);
+      expect(await waitForTerminal(id, 25_000)).toBe("completed");
+    });
+    expect(cards.length).toBeGreaterThan(0);
+    expect(cards[0]).toContain("未记录");
+    expect(cards[0]).not.toContain("免费档");
+  }, 60_000);
 });
 
 suite("integration: needs_input → continue → completed", () => {
