@@ -38,6 +38,18 @@ describe("diffConfigs —— init 覆盖前的变更预告", () => {
     expect(c?.after).toBe("true");
   });
 
+  it("cost 变了要能看出改了什么（不能渲染成 X -> X）", () => {
+    // 回归：describeProfile 早期不含 cost ⇒ 只改 cost 时 same() 判定"有变化"，
+    // 但 before/after 打印完全相同 ⇒ 用户看到 `X -> X`，不知道到底改了什么。
+    const old = cfg({ profiles: { p: { executor: "claude", env: {}, cost: "metered" } } });
+    const changes = diffConfigs(old, cfg({ profiles: { p: { executor: "claude", env: {}, cost: "free" } } }));
+    const c = changes.find((x) => x.field === "profiles.p");
+    expect(c).toBeDefined();
+    expect(c?.before).toContain("cost=metered");
+    expect(c?.after).toContain("cost=free");
+    expect(c?.before).not.toBe(c?.after);
+  });
+
   it("报出默认 profile 变更与 timeout 变更", () => {
     const old = cfg({ defaults: { profile: "ds-v4", timeout_sec: 5400 } });
     const changes = diffConfigs(old, cfg());

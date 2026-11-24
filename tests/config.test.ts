@@ -113,6 +113,7 @@ describe("brand consistency", () => {
   it("init writes the same keyword into a fresh config", () => {
     const notify = buildConfig({
       executor: "claude",
+  cost: "metered",
       bin: process.execPath,
       profile: "p",
       env: {},

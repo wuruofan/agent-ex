@@ -48,7 +48,10 @@ function writeHealthy(over: Record<string, unknown> = {}): void {
 function baseCfg(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     executors: { claude: { bin: "/bin/ls" } },
-    profiles: { default: { executor: "claude", env: {} } },
+    // ⚠️ cost 必须显式声明：未声明的 profile 会按 metered 处理并产出一条 info，
+    // 那条 info 会让「配置干净」的断言多出一条 finding（这里显式声明成免费档，
+    // 让这些用例继续只测它们各自关心的那一件事）。
+    profiles: { default: { executor: "claude", env: {}, cost: "free" } },
     notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: BRAND },
     defaults: { profile: "default", timeout_sec: 3600 },
     ...over,

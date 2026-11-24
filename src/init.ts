@@ -17,7 +17,7 @@ import { homedir } from "node:os";
 import { join, dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentExHome, ensureRuntimeDirs } from "./paths.js";
-import { loadConfig, validateConfig, type Config } from "./config.js";
+import { loadConfig, validateConfig, type Config, type ProfileCost } from "./config.js";
 import { BRAND, HOME_DIR_NAME } from "./brand.js";
 import { BUILTIN_PROFILES, ZEN_FREE_PROFILE_NAME } from "./config-cmd.js";
 import { diffConfigs, renderChangeWarning } from "./init-changes.js";
@@ -226,6 +226,11 @@ export interface InitAnswers {
   bin: string;
   profile: string;
   env: Record<string, string>;
+  /**
+   * 成本档。**必填**（不是可选）：init 是"从零生成"一份新配置，
+   * 来源决定档位（zen free ⇒ free；自带 key / claude ⇒ metered），没有"没想好"这一态。
+   */
+  cost: ProfileCost;
   notify: { feishu_webhook_url: string; dry_run?: boolean; keyword?: string };
   timeout_sec: number;
   /** 探测到的工具链目录（进 worker PATH；空/缺省时不写这个键）。 */
@@ -251,6 +256,7 @@ export function buildConfig(a: InitAnswers) {
       [a.profile]: {
         executor: a.executor,
         env: a.env,
+        cost: a.cost,
         ...(a.path_dirs && a.path_dirs.length ? { path_dirs: a.path_dirs } : {}),
       },
     },
@@ -288,11 +294,12 @@ export function missingTokenKey(env: Record<string, string>, envKeys: ReadonlySe
 export function planOpencodeProfile(
   zen: boolean,
   nameAnswer: string,
-): { profile: string; env: Record<string, string> } {
-  if (!zen) return { profile: nameAnswer.trim() || "default", env: {} };
+): { profile: string; env: Record<string, string>; cost: ProfileCost } {
+  // 非 zen（自带 key 的 opencode）走计费档；zen free 确定免费。
+  if (!zen) return { profile: nameAnswer.trim() || "default", env: {}, cost: "metered" };
   const builtin = BUILTIN_PROFILES[ZEN_FREE_PROFILE_NAME];
   // 深拷贝：直接挂 builtin.env 会让后续的 `profile set` 原地改到**进程内的常量**上
-  return { profile: nameAnswer.trim() || ZEN_FREE_PROFILE_NAME, env: { ...builtin.env } };
+  return { profile: nameAnswer.trim() || ZEN_FREE_PROFILE_NAME, env: { ...builtin.env }, cost: "free" };
 }
 
 /**
@@ -481,6 +488,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
     const envUpdates: Record<string, string> = {};
     let env: Record<string, string> = {};
     let profile: string;
+    let cost: ProfileCost;
 
     if (executor === "claude") {
       // claude 分支里 profile 名必须**先**问：custom 的密钥变量名由它派生
@@ -500,6 +508,8 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
       // custom 无标准变量名可检测 → 只粘贴
       const secret = await collectSecret(rl, { label: "API key", varName: tokenVar, detect: presetName !== "custom" });
       if (secret) envUpdates[tokenVar] = secret;
+      // claude（任何 provider）都是计费档
+      cost = "metered";
     } else {
       console.log(`${ansi.dim(MARK.info)} opencode: the provider is managed by opencode itself (opencode auth login / opencode.json); agent-ex only launches it. For extra env vars, add them to the profile's env later.`);
       // zen free：零密钥、模型集会轮换 → 用 {model:zen-free} 占位符让 runner 每次 spawn 时动态解析。
@@ -509,6 +519,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
       const plan = planOpencodeProfile(zen, nameAnswer);
       profile = plan.profile;
       env = plan.env;
+      cost = plan.cost;
       if (zen) {
         console.log(
           `${ansi.dim(MARK.info)} Using built-in profile "${ZEN_FREE_PROFILE_NAME}" — ` +
@@ -524,7 +535,7 @@ export async function runInit(input: NodeJS.ReadableStream = process.stdin, opts
     const timeoutRaw = (await ask(rl, "Default timeout (seconds)", "3600")).trim();
     const timeout = Number.parseInt(timeoutRaw, 10) || 3600;
 
-    const config = buildConfig({ executor, bin, profile, env, notify, timeout_sec: timeout, path_dirs: toolchainDirs });
+    const config = buildConfig({ executor, bin, profile, env, cost, notify, timeout_sec: timeout, path_dirs: toolchainDirs });
 
     // ---- 覆盖前的变更预告：让用户知道"要放弃什么"再决定 ----
     // 位置在这里（而不是流程开头）是因为"要变成什么"必须等问答结束才知道；

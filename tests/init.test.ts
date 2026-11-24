@@ -145,6 +145,7 @@ describe("buildConfig", () => {
   it("produces a config with executor/profile/notify/defaults", () => {
     const cfg = buildConfig({
       executor: "claude",
+  cost: "metered",
       bin: "/bin/node",
       profile: "default",
       env: { A: "1" },
@@ -159,6 +160,7 @@ describe("buildConfig", () => {
   it("opencode executor 用 --auto（不是 claude 的 --dangerously-skip-permissions）", () => {
     const cfg = buildConfig({
       executor: "opencode",
+  cost: "metered",
       bin: "/usr/local/bin/opencode",
       profile: "oc",
       env: {},
@@ -171,6 +173,7 @@ describe("buildConfig", () => {
   it("path_dirs 非空时写进 profile", () => {
     const cfg = buildConfig({
       executor: "claude",
+  cost: "metered",
       bin: "/bin/node",
       profile: "default",
       env: {},
@@ -183,6 +186,7 @@ describe("buildConfig", () => {
   it("path_dirs 缺省或空数组时不写这个键", () => {
     const absent = buildConfig({
       executor: "claude",
+  cost: "metered",
       bin: "/bin/node",
       profile: "default",
       env: {},
@@ -192,6 +196,7 @@ describe("buildConfig", () => {
     expect(Object.keys(absent.profiles.default)).not.toContain("path_dirs");
     const empty = buildConfig({
       executor: "claude",
+  cost: "metered",
       bin: "/bin/node",
       profile: "default",
       env: {},
@@ -257,6 +262,25 @@ describe("init 的 opencode 分支 —— 与内置 preset 必须同名同 env",
     const plan = planOpencodeProfile(false, "");
     expect(plan.profile).toBe("default");
     expect(plan.env).toEqual({});
+  });
+
+  it("成本档跟着来源走：zen free ⇒ free，自带 key 的 opencode ⇒ metered", () => {
+    // init 是"从零生成"一份配置，来源决定档位，没有"没想好"这一态。
+    expect(planOpencodeProfile(true, "").cost).toBe("free");
+    expect(planOpencodeProfile(false, "").cost).toBe("metered");
+  });
+
+  it("buildConfig 把 cost 写进 profile（否则新装用户首次 doctor 就报 info）", () => {
+    const cfg = buildConfig({
+      executor: "opencode",
+      bin: "/usr/local/bin/opencode",
+      profile: "oc",
+      env: {},
+      cost: "free",
+      notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true },
+      timeout_sec: 3600,
+    });
+    expect(cfg.profiles.oc.cost).toBe("free");
   });
 
   it("env 是深拷贝：改它不会污染进程内的内置常量", () => {

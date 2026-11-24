@@ -109,10 +109,13 @@ export function diffConfigs(oldCfg: Config | null, newCfg: Config): ConfigChange
   return changes;
 }
 
-function describeProfile(p: { executor: string; env: Record<string, string> }): string {
+function describeProfile(p: { executor: string; env: Record<string, string>; cost?: string }): string {
   const model = p.env?.ANTHROPIC_MODEL ?? p.env?.OPENCODE_CONFIG_CONTENT ?? "";
   const modelPart = model ? `, model=${truncate(model, 40)}` : "";
-  return `executor=${p.executor}${modelPart}`;
+  // ⚠️ cost 必须出现在描述里：否则「只改了 cost」的差异会渲染成 `X -> X`
+  // （same() 判定有变化、但两边的描述串完全一样，用户看不到到底改了什么）。
+  const costPart = p.cost ? `, cost=${p.cost}` : "";
+  return `executor=${p.executor}${modelPart}${costPart}`;
 }
 
 function truncate(s: string, n: number): string {
