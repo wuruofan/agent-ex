@@ -2,16 +2,20 @@ import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BRAND } from "./brand.js";
 import { agentExHome, ensureRuntimeDirs } from "./paths.js";
+import { ZEN_FREE_PLACEHOLDER } from "./zen-free.js";
 
 export interface ExecutorConfig {
   bin: string;
   extra_flags?: string[];
 }
+export type ProfileCost = "free" | "metered";
 export interface ProfileConfig {
   executor: string;
   env: Record<string, string>;
   /** 插进 worker PATH 的额外绝对路径目录（位于 executor 的 bin 目录之后、系统目录之前）。 */
   path_dirs?: string[];
+  /** 显式声明的成本档；缺省时按 isStructurallyFree 结构化判定（见 effectiveProfileCost）。 */
+  cost?: ProfileCost;
 }
 export interface Config {
   executors: Record<string, ExecutorConfig>;
@@ -38,6 +42,51 @@ export function resolveEnvPlaceholders(env: Record<string, string>): Record<stri
     }
   }
   return out;
+}
+
+/**
+ * 结构化判定：这个 profile 是否**确定**不花钱。
+ *
+ * 四条**全部**满足才算 free（顺序即短路顺序）：
+ *  1. executor 是 opencode；
+ *  2. env.OPENCODE_CONFIG_CONTENT 能 JSON.parse（失败 ⇒ false，不抛）；
+ *  3. 解析出的 `model` **严格等于** {model:zen-free}；
+ *  4. 解析出的 `small_model` **严格等于** {model:zen-free}（缺省 ⇒ false）。
+ *
+ * 判据 4 不接受缺省：opencode 在 small_model 缺省时由它自己决定辅助模型，
+ * 那个默认值不在本仓控制范围、也无法静态判定是否收费 ⇒ 与全局 fail-safe 一致，按 metered。
+ *
+ * 占位符必须 import（ZEN_FREE_PLACEHOLDER 是唯一真相源），不能硬编码字面量。
+ */
+export function isStructurallyFree(executor: string, env: Record<string, string>): boolean {
+  if (executor !== "opencode") return false;
+  const raw = (env as Record<string, unknown> | undefined)?.OPENCODE_CONFIG_CONTENT;
+  if (typeof raw !== "string") return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object") return false;
+  const p = parsed as { model?: unknown; small_model?: unknown };
+  return p.model === ZEN_FREE_PLACEHOLDER && p.small_model === ZEN_FREE_PLACEHOLDER;
+}
+
+/**
+ * 「有效成本」的**唯一**判定函数（submit 与 doctor 共用，避免两份判定各自漂移）。
+ *
+ * 声明优先：profile.cost 是合法值就直接用它——即使结构化判定与它不一致
+ * （free 池成员与模型价格都会变，用户的显式表态优先于静态推断）。
+ * 未声明时走 isStructurallyFree；executorOverride 供续跑按**任务行**的 executor 判定。
+ *
+ * 没有 invalid 分支：非法 cost 是形状缺陷，collectConfigIssues 会报 error、loadConfig 会抛，
+ * submit 路径根本走不到这里。
+ */
+export function effectiveProfileCost(profile: ProfileConfig, executorOverride?: string): ProfileCost {
+  if (profile.cost === "free" || profile.cost === "metered") return profile.cost;
+  const env = (profile.env ?? {}) as Record<string, string>;
+  return isStructurallyFree(executorOverride ?? profile.executor, env) ? "free" : "metered";
 }
 
 export function loadConfig(home?: string): Config {
@@ -73,6 +122,7 @@ export type ConfigIssueCode =
   | "executor.bin"
   | "profile.executor"
   | "profile.path_dirs"
+  | "profile.cost"
   | "defaults.profile"
   | "notify.webhook"
   | "defaults.timeout_sec";
@@ -90,6 +140,11 @@ export interface ConfigIssue {
    * 会把"另一个 executor 也有问题"一起吞掉。去重键 = code + subject。
    */
   subject?: string;
+  /**
+   * 严重级别：缺省即 error（形状缺陷 / 阻断启动）。
+   * info 不阻断 loadConfig，也不让 doctor 变红——它只是"按 fail-safe 处理了"的提示。
+   */
+  severity?: "info" | "error";
 }
 
 /** 把任意值当成对象看待（非对象一律当作空对象）。 */
@@ -172,6 +227,38 @@ export function collectConfigIssues(cfg: unknown): ConfigIssue[] {
         });
       }
     }
+    // cost 的两条规则**判定来源不同**：
+    //  - 非法值 ⇒ 独立的合法判断（error，形状缺陷）；
+    //  - 未声明 ⇒ 调 effectiveProfileCost()（单一真相源，与 submit 同源）。
+    // 不能把非法值塞进 effectiveProfileCost——它没有 invalid 分支（见其文档）。
+    if (prof.cost === undefined) {
+      const effective = effectiveProfileCost({
+        executor: typeof exec === "string" ? exec : "",
+        env: asRecord(prof.env) as Record<string, string>,
+      });
+      if (effective !== "free") {
+        issues.push({
+          code: "profile.cost",
+          severity: "info",
+          message:
+            `profile "${name}" has no cost declared — treated as metered; ` +
+            `dispatching to it requires allow_metered: true ` +
+            `(use \`cost free\` only if you are sure it costs nothing)`,
+          // ⚠️ 主 fix 方向必须是 metered：这条 info 的前提就是"按 metered 处理"。
+          // 写成 cost free 等于给"把付费档洗成免费档"提供官方修复命令。
+          fix: `agent-ex profile set ${name} cost metered`,
+          subject: name,
+        });
+      }
+    } else if (prof.cost !== "free" && prof.cost !== "metered") {
+      issues.push({
+        code: "profile.cost",
+        severity: "error",
+        message: `profile "${name}" has invalid cost "${String(prof.cost)}" — expected "free" or "metered"`,
+        fix: `agent-ex profile set ${name} cost metered`,
+        subject: name,
+      });
+    }
   }
   const defaults = asRecord(c.defaults);
   const defProfile = defaults.profile;
@@ -219,7 +306,11 @@ function pathDirsProblem(v: unknown): string | null {
 
 function validate(cfg: Config): void {
   const issues = collectConfigIssues(cfg);
-  if (issues.length > 0) throw new Error(issues[0].message);
+  // 抛**第一条 error**，不是 issues[0]：加了 severity 之后 info 可能排在更前
+  // （cost 规则在 profiles 循环内，早于 defaults.timeout_sec 规则），
+  // 照旧取 issues[0] 会把一条 info 文案当错误消息抛出去。
+  const firstError = issues.find((i) => i.severity !== "info");
+  if (firstError) throw new Error(firstError.message);
 }
 
 /**

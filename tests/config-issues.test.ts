@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { collectConfigIssues, validateConfig, type Config } from "../src/config.js";
+import {
+  collectConfigIssues,
+  effectiveProfileCost,
+  isStructurallyFree,
+  validateConfig,
+  type Config,
+} from "../src/config.js";
 import { BRAND } from "../src/brand.js";
+import { ZEN_FREE_PLACEHOLDER } from "../src/zen-free.js";
 
 /**
  * config 的**唯一**校验真相源。
@@ -12,7 +19,7 @@ import { BRAND } from "../src/brand.js";
 function baseCfg(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     executors: { claude: { bin: "/bin/ls" } },
-    profiles: { default: { executor: "claude", env: {} } },
+    profiles: { default: { executor: "claude", env: {}, cost: "free" } },
     notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: BRAND },
     defaults: { profile: "default", timeout_sec: 3600 },
     ...over,
@@ -150,14 +157,137 @@ describe("collectConfigIssues —— profile.path_dirs 形状校验", () => {
   });
 });
 
-describe("validateConfig —— 文案与规则一一对应", () => {
-  it("抛的错与第一条 issue 的 message 一致", () => {
-    const cfg = baseCfg({ defaults: { profile: "default", timeout_sec: "3600" } });
-    const first = collectConfigIssues(cfg)[0];
-    expect(() => validateConfig(cfg as unknown as Config)).toThrow(first.message);
+describe("profile.cost —— 未声明 / 非法值", () => {
+  it("未声明 cost 且非结构化 free ⇒ 一条 info issue（带 subject 与 fix）", () => {
+    // claude + 空 env ⇒ 结构化判定不是 free
+    const issues = collectConfigIssues(baseCfg({ profiles: { default: { executor: "claude", env: {} } } }));
+    const i = issues.find((x) => x.code === "profile.cost");
+    expect(i).toBeDefined();
+    expect(i!.severity).toBe("info");
+    expect(i!.subject).toBe("default");
+    expect(i!.message).toMatch(/metered/);
+    expect(i!.message).toMatch(/allow_metered/);
+    // ⚠️ 回归锁（P0-1）：fix 方向必须是把隐式默认显式化，绝不能是 cost free
+    expect(i!.fix).toBe("agent-ex profile set default cost metered");
+    expect(i!.fix).not.toContain("cost free");
   });
 
-  it("正常配置不抛错", () => {
+  it("结构化 free 的 profile 未声明 cost 时不报 info（zen-free 不受影响）", () => {
+    const issues = collectConfigIssues(baseCfg({
+      executors: { opencode: { bin: "/bin/ls" } },
+      profiles: {
+        zen: {
+          executor: "opencode",
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              model: ZEN_FREE_PLACEHOLDER,
+              small_model: ZEN_FREE_PLACEHOLDER,
+            }),
+          },
+        },
+      },
+      defaults: { profile: "zen", timeout_sec: 3600 },
+    }));
+    expect(issues.filter((x) => x.code === "profile.cost")).toEqual([]);
+  });
+
+  it("cost 值非法 ⇒ severity error（不是 info）", () => {
+    const issues = collectConfigIssues(baseCfg({
+      profiles: { default: { executor: "claude", env: {}, cost: "paid" } },
+    }));
+    const i = issues.find((x) => x.code === "profile.cost");
+    expect(i).toBeDefined();
+    expect(i!.severity).toBe("error");
+    expect(i!.subject).toBe("default");
+    expect(i!.message).toContain("paid");
+    expect(i!.fix).toBeTruthy();
+  });
+
+  it("声明合法的 free / metered 不产出 cost issue", () => {
+    for (const cost of ["free", "metered"] as const) {
+      const issues = collectConfigIssues(baseCfg({ profiles: { default: { executor: "claude", env: {}, cost } } }));
+      expect(issues.filter((x) => x.code === "profile.cost")).toEqual([]);
+    }
+  });
+});
+
+describe("effectiveProfileCost / isStructurallyFree —— 判定唯一真相源", () => {
+  const zenEnv = (model: unknown, smallModel?: unknown): Record<string, string> => ({
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(
+      smallModel === undefined ? { model } : { model, small_model: smallModel },
+    ),
+  });
+
+  it("V1：未声明且非结构化 free ⇒ metered；声明 free ⇒ free（声明优先）", () => {
+    expect(effectiveProfileCost({ executor: "claude", env: {} })).toBe("metered");
+    // 声明优先：即使结构判定不 free，也尊重声明
+    expect(effectiveProfileCost({ executor: "claude", env: {}, cost: "free" })).toBe("free");
+    // 声明 metered 时即使结构像 free 也按 metered
+    expect(
+      effectiveProfileCost({ executor: "opencode", env: zenEnv(ZEN_FREE_PLACEHOLDER, ZEN_FREE_PLACEHOLDER), cost: "metered" }),
+    ).toBe("metered");
+  });
+
+  it("未声明 + 两个模型字段都是占位符 ⇒ free", () => {
+    expect(
+      effectiveProfileCost({ executor: "opencode", env: zenEnv(ZEN_FREE_PLACEHOLDER, ZEN_FREE_PLACEHOLDER) }),
+    ).toBe("free");
+  });
+
+  it("V3：只有 model 是占位符、small_model 缺省 ⇒ 不是 free（fail-safe）", () => {
+    expect(isStructurallyFree("opencode", zenEnv(ZEN_FREE_PLACEHOLDER))).toBe(false);
+    expect(effectiveProfileCost({ executor: "opencode", env: zenEnv(ZEN_FREE_PLACEHOLDER) })).toBe("metered");
+  });
+
+  it("V2：model 是占位符但 small_model 是硬编码 id ⇒ 不是 free", () => {
+    expect(isStructurallyFree("opencode", zenEnv(ZEN_FREE_PLACEHOLDER, "opencode/paid-model"))).toBe(false);
+  });
+
+  it("V2b：model 是硬编码 id 但 small_model 是占位符 ⇒ 不是 free", () => {
+    expect(isStructurallyFree("opencode", zenEnv("opencode/paid-model", ZEN_FREE_PLACEHOLDER))).toBe(false);
+  });
+
+  it("executor 不是 opencode ⇒ 不是 free", () => {
+    expect(isStructurallyFree("claude", zenEnv(ZEN_FREE_PLACEHOLDER, ZEN_FREE_PLACEHOLDER))).toBe(false);
+  });
+
+  it("OPENCODE_CONFIG_CONTENT 不是合法 JSON ⇒ false，不抛", () => {
+    expect(() => isStructurallyFree("opencode", { OPENCODE_CONFIG_CONTENT: "{not json" })).not.toThrow();
+    expect(isStructurallyFree("opencode", { OPENCODE_CONFIG_CONTENT: "{not json" })).toBe(false);
+    expect(isStructurallyFree("opencode", {})).toBe(false);
+  });
+
+  it("executorOverride 优先于 profile.executor（续跑按任务行的 executor 判定）", () => {
+    const profile = { executor: "opencode", env: zenEnv(ZEN_FREE_PLACEHOLDER, ZEN_FREE_PLACEHOLDER) };
+    expect(effectiveProfileCost(profile)).toBe("free");
+    // 任务行是 claude ⇒ runner 实际起的是付费 CLI ⇒ 按 metered
+    expect(effectiveProfileCost(profile, "claude")).toBe("metered");
+  });
+});
+
+describe("validateConfig —— 抛第一条 error（不是 issues[0]）", () => {
+  it("info 在前、error 在后时，抛的是 error 的 message", () => {
+    // profile 无 cost ⇒ info（profiles 循环，排在前）
+    // timeout 是字符串 ⇒ error（defaults 规则，排在后）
+    const cfg = baseCfg({
+      profiles: { default: { executor: "claude", env: {} } },
+      defaults: { profile: "default", timeout_sec: "3600" },
+    });
+    const issues = collectConfigIssues(cfg);
+    expect(issues[0].code).toBe("profile.cost");
+    expect(issues[0].severity).toBe("info");
+    const firstError = issues.find((i) => i.severity !== "info");
+    expect(firstError!.code).toBe("defaults.timeout_sec");
+
+    // 旧实现取 issues[0] 会抛 info 文案；现在必须抛 error 那条。
+    expect(() => validateConfig(cfg as unknown as Config)).toThrow(firstError!.message);
+    expect(() => validateConfig(cfg as unknown as Config)).not.toThrow(/has no cost declared/);
+  });
+
+  it("正常配置不抛错（info 不阻断）", () => {
     expect(() => validateConfig(baseCfg() as unknown as Config)).not.toThrow();
+    // 老配置（无 cost）只有 info ⇒ 也不抛
+    const legacy = baseCfg({ profiles: { default: { executor: "claude", env: {} } } });
+    expect(() => validateConfig(legacy as unknown as Config)).not.toThrow();
   });
 });
