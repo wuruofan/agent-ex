@@ -514,6 +514,29 @@ describe("--fix —— 只修确定性缺陷", () => {
     expect(cfg.notify.dry_run).toBe(true);
   });
 
+  it("只缺 cost 时 --fix 什么都不改（cost 不在可修清单里：替他表态 = 越权）", () => {
+    // 未声明 cost 只是一条 info（不阻断），而 --fix 的宪章是"只修确定性缺陷"：
+    // 把未声明写成 metered 语义零变化，写成 free 等于替他宣布"这个不花钱"。
+    writeCfg(baseCfg({ profiles: { default: { executor: "claude", env: {} } } }));
+    const before = readFileSync(join(home, "config.json"), "utf8");
+    const r = applyFixes(home);
+    expect(r.applied).toEqual([]);
+    expect(readFileSync(join(home, "config.json"), "utf8")).toBe(before);
+  });
+
+  it("cost 值非法时 --fix 整份不落盘（validateConfig 抛 error ⇒ 说清没写进去）", () => {
+    writeCfg(baseCfg({
+      profiles: { default: { executor: "claude", env: {}, cost: "cheap" } },
+      notify: { feishu_webhook_url: "{env:FEISHU_WEBHOOK_URL}", dry_run: true, keyword: "" },
+    }));
+    const before = readFileSync(join(home, "config.json"), "utf8");
+    const r = applyFixes(home);
+    expect(r.applied).toEqual([]);
+    expect(r.skipped.join()).toContain("not written");
+    expect(r.notes.join()).toContain("NOT written");
+    expect(readFileSync(join(home, "config.json"), "utf8")).toBe(before);
+  });
+
   it(".env 里已有同名变量时不覆盖（避免踩掉用户更晚改的值）", () => {
     writeCfg(baseCfg({ notify: { feishu_webhook_url: "https://open.feishu.cn/hook/abc", dry_run: true, keyword: BRAND } }));
     writeFileSync(join(home, ".env"), "FEISHU_WEBHOOK_URL=https://other/hook\n");
