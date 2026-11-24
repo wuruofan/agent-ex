@@ -11,19 +11,17 @@
 **派发到计费档 profile 现在需要显式授权：这是用户可见的破坏性行为变化。**
 
 - **profile 新增 `cost` 字段**（`"free"` / `"metered"`），声明这个 profile 会不会花钱。
-  **不声明按 `metered` 处理**（fail-safe）⇒ 升级后，既有配置里那些**结构化判定不是 free** 的 profile
-  （几乎所有 claude 档与硬编码模型的 opencode 档）**每次派发都会被拦**——直到你显式声明
-  `agent-ex profile set <name> cost free`（确认真不花钱才用），或每次调用带 `allow_metered: true`。
-  结构化判定就是 free 的（`opencode-zen-free` 那类：executor 是 opencode 且 `model` / `small_model`
-  **都**是 `{model:zen-free}` 占位符）照常放行，不受影响。
-  `agent-ex init` 产出的配置会**显式**写好 `cost`（新装用户 `doctor` 一开始就是干净的、不会看到一堆 info），
-  但 claude 档 / 自带 key 的 opencode 档本来仍是 metered ⇒ 派发仍需 `allow_metered`。
-- **`agent_ex_submit` 新增 `allow_metered`**：派发到计费档必须带 `allow_metered: true`，
-  否则直接拒绝（且**不留下任务行**）。这个开关**按次**生效——429、额度上限、free 池全挂、
+  **不声明按 `metered` 处理**（fail-safe）；声明了 `"free"` 就按声明走（doctor 会为
+  「声明了 free、但系统无法独立验证」报一条 warn，**不替你改判**）。
+  `agent-ex init` 产出的配置会**显式**写好 `cost`，新装用户的 `doctor` 一开始就是干净的。
+- **`agent_ex_submit` 新增 `allow_metered`：闸门只拦「切到付费档」这一种形状。**
+  派发到**当前配置的那个** profile（`defaults.profile`）**永远放行**——用户自己的选择，收费与否都一样；
+  切到免费档也放行。被拦的只有「切到**别的**、且会花钱的 profile」（且**不留下任务行**），
+  这正是事故的成因（agent 自主换到付费档）。这个开关**按次**生效——429、额度上限、free 池全挂、
   超时、失败**都不是**同意计费，不能靠加这个参数把任务"救活"。
 - **留痕**：每次派发的有效成本记在任务行的 `cost` 列，由 `agent_ex_status` 回显、
-  飞书终态卡页脚标注「计费档」/「免费档」/「未记录」。写入口只有闸门路径
-  （`store.setCost()`）⇒ 「只有过了闸门的派发才会留痕」是结构保证，不是约定。
+  飞书终态卡页脚标注「计费档」/「免费档」/「未记录」。写入口只有 `store.setCost()`
+  （submit 的闸门路径调用它）⇒ 「任务行的 cost 只能由工具在派发当时写入」是结构保证，不是约定。
 - **doctor**：未声明 `cost` 的 profile 报一条 info（**不阻断启动**，老配置照样能用）；
   `cost` 值非法报 error；声明 `free` 但系统无法独立验证时报 warn（只提示，**不自动改判**）。
 - **首步看门狗**：worker 起进程后 10 分钟内 stdout 一行都没出 ⇒ 判定挂死并快速失败，

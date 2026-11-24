@@ -55,7 +55,7 @@ agent_created: true
    - 「写」= `profile create|set|use`、`config set`、`doctor --fix`、以及任何对 `~/.agent-ex/config.json` 的直接编辑。**只有用户在本轮明确要求时才执行**，并在回报里写清改了哪个字段、从什么改成什么。
    - **禁的是因果，不是命令**：为了让任务跑下去而写配置——429/额度上限、free 池全挂、模型下线、超时、失败、同目录冲突——一律停、报告、给选项；不得用换 profile / 换默认 / 调超时 / 改密钥把任务"救活"。
    - **"顺手"同样禁止**：清理旧 profile、补 `path_dirs`、切默认、调 `timeout_sec`，没有用户当轮指令就不做。需要不同超时或模型时用 `submit` 的参数，不要改默认。
-   - **参数口径：`allow_metered` 只在用户本轮明确同意计费时传。** 它是**参数**不是配置，同样能被 agent 自己加上（老 server 上还会被静默剥离 ⇒ 以为闸门在工作）。429 / 额度上限 / free 池全挂 / 模型下线 / 超时 / 失败 / 同目录冲突 **都不构成同意计费**——遇到这些一律停、报告、给选项，**不要加 `allow_metered: true` 重试**。
+   - **参数口径：`allow_metered` 只在「切到**当前默认档以外**、且会花钱的 profile」且用户本轮明确指定了那个 profile（或明确同意付费）时传。** 用**当前配置里的默认档**（`defaults.profile`）**不需要**它——那是用户自己的选择，agent 照着用就行；切到免费档也不需要。它是**参数**不是配置，同样能被 agent 自己加上（老 server 上还会被静默剥离 ⇒ 以为闸门在工作）。429 / 额度上限 / free 池全挂 / 模型下线 / 超时 / 失败 / 同目录冲突 **都不构成同意计费**——遇到这些一律停、报告、给选项，**不要加 `allow_metered: true` 重试**。
    - 判据一句话：**这行命令是用户这轮让我干的吗？** 不是，就只读。
 
 ## 前置检查（Preflight）
@@ -64,7 +64,7 @@ agent_created: true
 
 - **包版本门槛 `agent-ex-mcp >= 0.3.1`**：`agent-ex wait` 自 0.3.0 起提供，但 Phase 2「[回来先查]」兜底要用的 `agent_ex_status({ include_finished: true })` 是 **0.3.1 才加的**。0.3.0 的 server 会**静默剥离**这个未知参数、只返回进行中的任务 → 空列表，宿主分不清「不支持」和「真的没有任务」。
 - **MCP server 能力探测**：`agent_ex_version` 报告 < 0.3.1，或 `tools/list` 里 `agent_ex_status` 的 schema 没有 `include_finished` ⇒ 旧 server。此时**不要**把空列表当成结论：让用户升级到 >= 0.3.1，或用手上已知的 task_id 走 `agent-ex wait <id> --once`。`agent-ex wait --help` 只能证明 CLI ≥ 0.3.0，**不能**证明 MCP server 有这个参数（两者可能是不同构建）。
-- **计费闸门能力探测**：`tools/list` 里 `agent_ex_submit` 的 schema 有没有 `allow_metered`。**没有 ⇒ 不能声称"闸门生效"**：metered profile 的派发必须先取得用户明确同意（人工确认，而不是靠参数兜底）。两种旧 server 形态都不能当成"闸门在工作"：≥ 0.3.1 的 `.strict()` 会**响亮拒绝**未知参数（`Unrecognized key(s)`），0.3.0 的非 strict 会**静默剥离**它。
+- **计费闸门能力探测**：`tools/list` 里 `agent_ex_submit` 的 schema 有没有 `allow_metered`。**没有 ⇒ 不能声称"闸门生效"**：切到计费档 profile 的派发必须先取得用户明确同意（人工确认，而不是靠参数兜底）。两种旧 server 形态都不能当成"闸门在工作"：≥ 0.3.1 的 `.strict()` 会**响亮拒绝**未知参数（`Unrecognized key(s)`），0.3.0 的非 strict 会**静默剥离**它。
 - **CLI 版本门槛 `agent-ex >= 0.3.0`**：Phase 2 的等待改用 `agent-ex wait`，旧包（0.2.0 及更早）没有这个子命令。探针 `agent-ex wait --help`：新版 **exit 0** 且打印 `usage: agent-ex wait <task_id> …`；旧版 **exit 2**，把 `wait` 当未知子命令并打印 `no command: start the MCP server on stdio`——此时**不要继续调用**，旧版会静默起一个等 stdin 的 MCP server（挂住不返回）。没装全局包时：正式路线 `npm i -g agent-ex-mcp`，源码路线在仓库根 `npm link`；宿主 shell 里找不到命令时可退回 `npx -y agent-ex-mcp@latest wait <task_id>`（每次走 npx，更慢且要联网）。实际等待时**以 stdout 的 `WAIT=` 行为判据**，不要只看退出码（`WAIT=timeout` 也是 exit 2，与旧版撞码）。
 - MCP server 可用：工具名 `agent_ex_submit` / `agent_ex_status` / `agent_ex_cancel`（WorkBuddy 中可能带前缀如 `mcp__agent-ex__*`）。若工具不可用，先检查 `~/.workbuddy/mcp.json` 注册与 `agent-ex/dist/server.js` 是否已 build，**不要**尝试用其他方式派发。
 - 需要 worker 干活的机器上 `project_path` 存在且可写；executor 的 agent CLI 已配置（`$AGENT_EX_HOME/config.json`，默认 `$HOME/.agent-ex/config.json`）。运行时密钥在 `$HOME/.agent-ex/.env`，**不要**在 prompt/参数里写任何密钥。
@@ -182,7 +182,7 @@ agent_created: true
 | `profile` | | 运行 profile 名。**省略 = 用户设定的 `defaults.profile`**；只有用户本轮点名 profile 时才填（见铁律 5）。 |
 | `timeout_sec` | | 单轮超时秒数；缺省 3600。**按「工单粒度与预算」定档**：实现单 3600；验证/全量回归型单 5400–10800。注意真超时**不重试**（`runner.ts` `if (outcome.timedOut) break`），预算宁可有富余 |
 | `continue_of` | | 仅续跑 `needs_input` 任务时填目标 `task_id`，此时 `prompt` 填对该任务问题的答复 |
-| `allow_metered` | | **计费授权**：目标 profile 是计费档（metered）时必须传 `true` 才能派发；免费档不需要。**只在用户本轮明确同意为这次派发付费时**才传——429 / 额度上限 / free 池全挂 / 超时 / 失败**都不构成同意**（铁律 5 的参数口径）。被拒时的错误文案里会有 profile 名与 `defaults.profile` 的名字，照它判断该改默认还是该传参。 |
+| `allow_metered` | | **计费授权**：只有「切到**当前默认档以外**、且会花钱的 profile」才需要传 `true`；用当前默认档、或切到免费档都不需要。**只在用户本轮明确指定了那个 profile（或明确同意为这次派发付费）时**才传——429 / 额度上限 / free 池全挂 / 超时 / 失败**都不构成同意**（铁律 5 的参数口径）。被拒时的错误文案里会有目标 profile 名与 `defaults.profile` 的名字：让用户切默认、还是这次带个授权，照它判断。 |
 
 返回 `{ task_id, status, rounds }` 或 `{ error }`；成功结果可能带可选 **`warning`** 字段（9/28 加）：同 `project_path` 已有活跃任务时返回——这是铁律 2 的**被检查版本**，但它**不区分读写**。出现时按 Step 1 矩阵判读：本单或在途任务只读 → 记录后继续；任一侧要写 → 停下向用户确认或等前序任务终态。
 
@@ -415,7 +415,7 @@ cancelled ← 任意非终态可取消
 | 工具不存在 / MCP 未连 | 检查 `~/.workbuddy/mcp.json` 与 `dist/server.js` 是否 build；重启后重试 |
 | **刚 submit 完，`agent-ex wait` 就报 `WAIT=not_found` / `agent_ex_status` 报 `not found`**（`task_muxhq896_247f77` 这种 14+ 字符 id） | **先怀疑自己打错了 id，不要怀疑任务没提交**。submit 的返回是权威，但它是一串长得像随机的字符，**手抄进 `agent-ex wait` / `agent_ex_status` 极易漏一个字符**（10/07 实测：把 `…hq896…` 抄成 `…h896…`，两个入口都报 `not found`，白白以为派发失败）。处置：**从 submit 的返回里复制粘贴**，别凭记忆敲；已报 not found 时用**不带参数的** `agent_ex_status`（列全部活跃任务）取回真实 id，再用它重起 `agent-ex wait`。 |
 | `agent_ex_submit` 返回带 `warning` 字段 | 同 `project_path` 已有活跃任务（铁律 2 的被检查版，**不区分读写**）——按 Step 1 矩阵判读：只读可继续，任一侧要写就停下等前序终态或向用户确认。 |
-| `agent_ex_submit` 被拒，报 `is a metered profile` | 计费闸门拦下了（口径见铁律 5 的参数口径）。**不要自己加 `allow_metered: true` 重试，也不要换 profile 绕开**——计费授权与换档都只能由用户做。把 profile 名（以及它是不是 `defaults.profile`）连同「这次要花钱」这件事报给用户，等用户明确同意付费再带 `allow_metered: true` 重派；用户不授权就停下报告。 |
+| `agent_ex_submit` 被拒，报 `is not the profile currently configured` | 计费闸门拦下了（口径见铁律 5 的参数口径）：你要切到一个**当前默认档以外、且会花钱**的 profile。**不要自己加 `allow_metered: true` 重试**——那是用户的决定。把目标 profile 名、当前 `defaults.profile`、以及「这次要花钱」一起报给用户：想长期用那个档就让他切默认（`profile use`，写配置要他点头），只想这一次就让他明确同意，之后带 `allow_metered: true` 重派。 |
 | **`agent-ex wait` 报 `WAIT=db_unreadable`（exit 6）**，或报 `WAIT=not_found` 但 `agent_ex_status` 说任务在 | **这是环境问题，不是任务问题**（10/16 实测定案）。最常见成因：宿主 shell 沙箱禁止写数据目录，SQLite 做 WAL recovery 需写 `-wal`/`-shm` 时被拒。CLI 已内置降级（整组复制 `tasks.db(+wal/+journal)` 到可写目录再读，输出 `DB_SOURCE=copy`）；降级也失败时 `--copy-dir <可写目录>` 指到工作区，或让该命令在沙箱外跑。**判据：`STATUS`/`WAIT` 是权威字段，退出码不是**——沙箱拒绝会让宿主把退出码报成 1，而任务本身可能已经 completed。0.3.0 起任务库默认 `journal_mode=TRUNCATE`，静止态不需要 `-wal`/`-shm`，只读沙箱可直接读；库头仍是 WAL 时才需要降级（转换要求「所有连接都退出」的窗口 ⇒ 重启 MCP server）。背景见 `docs/diagnostics/2026-10-16-readonly-sandbox.md`。 |
 | 任务 `failed`，`error: failed to spawn runner … ENOENT` | executor `bin` 解析失败（裸名 + PATH 找不到）→ 把这条命令**转给用户执行**：`agent-ex config set executors.<name>.bin <绝对路径>`（写配置须由用户发起，见铁律 5；不要手改 `config.json`） |
 | 飞书不推送 | `notify.dry_run` 还是 `true`；或 `FEISHU_WEBHOOK_URL` 不在 `.env` / server 环境。**先跑 `agent-ex doctor`**（或 MCP 工具 `agent_ex_doctor`）——它一次给出结论 + 病因 + 修复命令，不用自己翻日志猜。 |

@@ -578,7 +578,7 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
       severity: isInfo ? "info" : "error",
       title: isInfo ? `Config note: ${issue.message}` : `Config problem: ${issue.message}`,
       detail: isInfo
-        ? "Informational only — it does not block startup; it means dispatching to that profile needs an explicit cost authorization."
+        ? "Informational only — it does not block startup; it means switching to that profile (instead of the one currently configured) needs an explicit cost authorization."
         : "This comes from the shared validation rules in config.ts (the same ones loadConfig throws on at startup) — the same config would keep the server from starting.",
       fix: issue.fix,
     });

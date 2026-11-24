@@ -71,42 +71,50 @@ function missingModelError(profileName: string, ref: { model: string; provider: 
 /**
  * 计费闸门的拒绝文案（设计文档 D3）。
  *
- * 必须包含：profile 名 + 「若用户已同意计费，请传 `allow_metered: true` 重试」。
- * 被拒的是**默认档**（调用方没传 profile）时额外点名 `defaults.profile` 是谁——
- * 否则调用方无法判断该改默认还是该传参。
+ * 必须包含：被拦的 profile 名 + 当前默认档是谁 + 「用户已指定/已同意就传 `allow_metered: true` 重试」。
+ * 点名 `defaults.profile` 是必须的——否则调用方无法判断该「让用户切默认」还是「这次带个授权」。
  *
  * 末句是刻意的：429 / 额度上限 / 超时 / 失败都**不构成**同意计费，
  * 不写清楚的话，调用方很容易在这几种情况下自己加 `allow_metered` 重试。
  */
-function costGateError(profileName: string, opts: { isDefault?: boolean; reason?: string } = {}): string {
-  const who = opts.isDefault
-    ? `profile "${profileName}" (it is the current defaults.profile)`
-    : `profile "${profileName}"`;
-  const reason = opts.reason ? ` ${opts.reason}` : "";
+function costGateError(profileName: string, configuredProfile: string, reason?: string): string {
+  const extra = reason ? ` ${reason}` : "";
   return (
-    `${who} is a metered profile — dispatching to it may cost money.${reason} ` +
-    `If the user has explicitly agreed to pay for this run, pass allow_metered: true and retry. ` +
+    `profile "${profileName}" is not the profile currently configured (defaults.profile = "${configuredProfile}") ` +
+    `and it is a metered profile — switching to it may cost money.${extra} ` +
+    `If the user explicitly asked for this profile, or has agreed to pay for this run, ` +
+    `pass allow_metered: true and retry. ` +
     `A quota error, an exhausted free pool, a timeout, or a failed run is NOT that agreement.`
   );
 }
 
 /**
- * 计费闸门：计费档必须带 `allow_metered: true` 才能派发。
+ * 计费闸门：**切到**一个计费档 profile 时要用户点头。
  *
- * 返回 null = 放行；返回字符串 = 拒绝理由（直接回给调用方）。
+ * 三条判据，全满足才放行：
+ *  1. 目标 profile **就是用户当前配置的那个**（`defaults.profile`）⇒ **配置即授权**，放行。
+ *     用户自己选定的付费档是他的事，agent 照着用就行，不需要每次点头。
+ *  2. 目标 profile 是**免费档** ⇒ 不花钱，与钱无关，放行。
+ *  3. 其余（切到了别的、而且那个会花钱的 profile）⇒ 必须带 `allow_metered: true`。
+ *
+ * ⚠️ 闸门的目标是「**agent 自主换到付费档**」这个形状（事故的真正成因），
+ * 不是「这个 profile 收费」。把 1 也拦掉，会让用户自己的付费配置每次派发都要点头——
+ * 那既不解决问题，又把正常流程变成噪音。
  *
  * ⚠️ 判定用的是**有效成本**（声明优先，未声明按结构化判定），真相源在 config.ts 的
  * `effectiveProfileCost()`——doctor 与这里共用它，改判定逻辑时两处同时变。
  */
-function checkCostGate(
-  profileName: string,
-  cost: ProfileCost,
-  allowMetered: boolean | undefined,
-  opts: { isDefault?: boolean; reason?: string } = {},
-): string | null {
-  if (cost !== "metered") return null;   // 免费档无需授权
-  if (allowMetered === true) return null; // 用户已授权
-  return costGateError(profileName, opts);
+function checkCostGate(target: {
+  profileName: string;
+  cost: ProfileCost;
+  configuredProfile: string;
+  allowMetered: boolean | undefined;
+  reason?: string;
+}): string | null {
+  if (target.cost !== "metered") return null;              // 免费档：与钱无关
+  if (target.allowMetered === true) return null;            // 用户已点头
+  if (target.profileName === target.configuredProfile) return null; // 配置即授权
+  return costGateError(target.profileName, target.configuredProfile, target.reason);
 }
 
 /**
@@ -164,13 +172,18 @@ export async function submit(args: SubmitArgs, deps: SubmitDeps = {}): Promise<S
       if (t.status !== "needs_input") return { error: `task ${args.continue_of} is "${t.status}", expected "needs_input"` };
 
       // ---- 计费闸门：必须在**状态变更**与**模型探测**之前（设计文档 D3 的四条硬约束）----
+      // 拦的是「续跑切到了当前默认档以外、且会花钱的 profile」；目标就是默认档 ⇒ 配置即授权，放行。
       // profile 用**任务行**里的（不是 args.profile——续跑时传 profile 无效，现实现即如此）；
       // executor 也用**任务行**里的：runner 起的是 task.executor（runner.ts:240-242），
       // 而 env 取自当前 config 的 profile。profile.executor 被改成 opencode+占位符、任务行仍是 claude 时，
       // 按 profile.executor 判会放行一个**付费**档 ⇒ 这里必须按 task.executor 判。
       const tProfile = cfg.profiles[t.profile];
       const tCost: ProfileCost = tProfile ? effectiveProfileCost(tProfile, t.executor) : "metered";
-      const gate = checkCostGate(t.profile, tCost, args.allow_metered, {
+      const gate = checkCostGate({
+        profileName: t.profile,
+        cost: tCost,
+        configuredProfile: cfg.defaults.profile,
+        allowMetered: args.allow_metered,
         reason: tProfile
           ? undefined
           : "It is no longer in config.json, so its cost cannot be determined (treated as metered).",
@@ -211,10 +224,16 @@ export async function submit(args: SubmitArgs, deps: SubmitDeps = {}): Promise<S
     if (!cfg.executors[profile.executor]) return { error: `profile "${profileName}" references unknown executor` };
 
     // ---- 计费闸门：必须在**模型探测**与**建任务**之前（设计文档 D3 的四条硬约束）----
+    // 拦的是「切到了当前默认档以外、且会花钱的 profile」；目标就是默认档 ⇒ 配置即授权，放行。
     // 前置到探测之前有两个理由：① 被拒的调用不该白付一次 `opencode models` 子进程；
     // ② "模型 missing" 不该先于 "cost 拒绝" 返回——那会掩盖真正的原因。
     const cost = effectiveProfileCost(profile);
-    const gate = checkCostGate(profileName, cost, args.allow_metered, { isDefault: args.profile === undefined });
+    const gate = checkCostGate({
+      profileName,
+      cost,
+      configuredProfile: cfg.defaults.profile,
+      allowMetered: args.allow_metered,
+    });
     if (gate) return { error: gate };
 
     // ---- 模型存活预检：missing 直接拒绝派发（不创建任务）；unknown 只告警 ----

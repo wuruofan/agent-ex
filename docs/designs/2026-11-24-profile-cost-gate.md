@@ -136,8 +136,19 @@ effectiveProfileCost(profile, executorOverride?) -> "free" | "metered"
 
 | 分支 | 用哪个 profile / executor | 判定 | 拒绝时的副作用要求 |
 | :--- | :--- | :--- | :--- |
-| 新任务 | profile = `args.profile ?? cfg.defaults.profile`；executor = `profile.executor` | `effectiveProfileCost(profile)` | `return { error }`，**在 `store.createTask()` 之前** ⇒ **不插任务行** |
-| 续跑（`continue_of`） | profile = **任务行里的 `t.profile`**（不是 `args.profile`）；executor = **任务行里的 `t.executor`**（不是 `profile.executor`，见下） | `effectiveProfileCost(cfg.profiles[t.profile], t.executor)` | `return { error }`，**在 `store.transition(..., "running")` 之前** ⇒ 任务保持 `needs_input` |
+| 新任务 | profile = `args.profile ?? cfg.defaults.profile`；executor = `profile.executor` | `effectiveProfileCost(profile)`；**仅当「成本是 metered」且「目标 profile ≠ `cfg.defaults.profile`」才拦** | `return { error }`，**在 `store.createTask()` 之前** ⇒ **不插任务行** |
+| 续跑（`continue_of`） | profile = **任务行里的 `t.profile`**（不是 `args.profile`）；executor = **任务行里的 `t.executor`**（不是 `profile.executor`，见下） | `effectiveProfileCost(cfg.profiles[t.profile], t.executor)`；同样两条（目标 = 任务行的 profile，与**当前**默认档比） | `return { error }`，**在 `store.transition(..., "running")` 之前** ⇒ 任务保持 `needs_input` |
+
+**闸门条件（v6 修订，推翻 v5 的「目标 profile 是 metered 就拦」）**：
+
+```
+拦 ⇔ 有效成本是 metered  ∧  目标 profile ≠ 当前配置的那个（cfg.defaults.profile）
+```
+
+- 目标**就是**当前默认档（付费与否）⇒ **放行**：配置即授权（见 D5）。
+- 目标是**免费档**（无论是不是默认档）⇒ **放行**：与钱无关。
+- 目标是**别的、且会花钱的** profile ⇒ 需要 `allow_metered: true`。
+  这正是事故的形状（agent 自主换到付费档），闸门只拦它。
 
 四条硬约束：
 
@@ -164,9 +175,10 @@ effectiveProfileCost(profile, executorOverride?) -> "free" | "metered"
 **调用方可见影响**：续跑时传 `profile` **无效**（现实现即如此，`:116` 用的是任务行的 profile）。
 错误文案必须用 `t.profile`（不是 `args.profile`），SKILL 与 README 要写明这一点。
 
-错误文案必须包含：profile 名 + 「若用户已同意计费，请传 `allow_metered: true` 重试」。
-当被拒的是默认档（`args.profile` 缺省）时，额外说明「`defaults.profile` 是 X」——
-否则调用方无法判断该改默认还是该传参。
+错误文案必须包含：被拦的 profile 名 + **当前默认档的名字** + 「若用户已指定该 profile
+或已同意计费，请传 `allow_metered: true` 重试」。**点名默认档是必须的**——否则调用方无法判断
+该「让用户切默认」还是「这次带个授权」。末句必须写明：429 / 额度上限 / 超时 / 失败
+**都不构成**同意计费（否则调用方会在这些情况下自己加参数重试）。
 
 ### D4 doctor 只报不修 + severity 通道
 
@@ -205,22 +217,33 @@ effectiveProfileCost(profile, executorOverride?) -> "free" | "metered"
   **warn ⇒ "Config is usable, but one item needs attention"**；否则 "All good"。
   ⇒ **info 不参与 summary**（保持 "All good"），**D7 的 warn 会命中 warn 档**（这是既有语义，不是新行为）。
 
-### D5 默认档是 metered 时，省略 profile **也不放行**
+### D5 默认档就是用户当前的选择 ⇒ 省略 profile **放行**（v6 修订，推翻 v5）
 
-**决策：不放行。** `defaults.profile` 指向 metered profile 且调用方省略 `profile` 参数时，
-同样要求 `allow_metered: true`。
+**决策：放行。** `defaults.profile` 指向 metered profile、且调用方省略 `profile` 参数时，
+**不要求** `allow_metered: true`。
 
-理由两条：
+理由：闸门要拦的是**事故的形状**——agent 自主换到付费档。**用户自己在配置里选定的档位
+（哪怕是付费档）是用户的事**：那是他付费订阅的档，派多少活、要不要花钱，本来就在他的决定里。
 
-1. **授权的对象是"这次派发会不会花钱"，不是"配置里写了什么名字"。** `defaults.profile` 可能是
-   init 生成的、可能是别的 agent 写进去的、可能是历史迁移留下的——把它当授权，等于让
-   "配置里有个名字"变成"同意扣钱"，而这正是事故里最关键的那一步（agent 自己换了付费 profile）。
-2. **若放行，这条调用在任务记录里没有任何授权标记**——一个付费 profile 的派发、记录里看不出
-   与免费派发的区别。那就是事故的形状原样保留（"花钱从未出现在任何记录中"）。
+v5 的「不放行」有两个问题：
 
-代价与逃生口：只有付费档的用户，之后每次派发都要带 `allow_metered: true`；或者把默认切回
-免费档——**注意 `profile use` 只切默认、不物化 profile**（`src/config-cmd.ts:254-270`），
-所以没有免费档的用户要先建：
+1. **拦错了对象。** v5 把「目标 profile 是 metered」当闸门条件，于是用户自己的付费配置
+   **每次派发都要点头**——可事故里 agent 是**换了**档，不是"用了付费档"。⇒ 正常的付费工作流
+   被变成噪音，而真正的漏洞（自主切换）反倒被稀释在噪音里。
+   （2026-11-24 用户当场纠正：「用户 profile 当前选哪个用哪个才对啊，不要自主切才对付费 profile 才对吧」。）
+2. **代价不对称被搞反了。** v5 说「若放行，记录里没有授权标记」——但 D10 的**留痕**已经解决了这一条：
+   每轮的有效成本都记在任务行的 `cost` 列上，`agent_ex_status` 回显、终态卡页脚标注。
+   ⇒ 放行并不等于"记录里看不出"。
+
+⇒ 闸门条件收窄为：**成本是 metered** ∧ **目标 profile ≠ 当前配置的那个**（见 D3）。
+
+**残留风险要写明**：工具层无法验证 `defaults.profile` 是谁写进去的（它只是文件里的一个名字），
+所以这一层保证的是「派发**不会换**到别的付费档」，不是「钱只花在你亲自选过的档上」。
+补上这一层的正是 D1 的铁律 5（配置只读：写配置只能由用户发起）——那是**纪律层**的闸门。
+
+代价与逃生口：用户想长期用另一个付费档 ⇒ 他自己切默认
+（`agent-ex profile use <name>`，写配置要他点头）；只想这一次 ⇒ 带 `allow_metered: true`
+（且必须是用户本轮明确指定了那个 profile）。没有免费档的用户想换成免费档，先建：
 
 ```
 agent-ex profile create opencode-zen-free --use   # 建并切默认（一步到位）
@@ -339,8 +362,9 @@ profile 名，事后无法回答"这条任务是不是花钱的"。那正是事�
   一行逻辑，不需要第二张表。
 - 升级前的历史行该列为空串 = **未知**（不是 free）⇒ 回显与卡片都要显示"未记录"，不得落到某一档。
 
-**不变量（设计的核心，v4 收紧，v5 修措辞）**：**任务行 `cost = "metered"` ⇒ 该任务**至少有一轮**
-的 `effectiveProfileCost` 是 `"metered"`，且**那一轮**带着 `allow_metered: true` 过了闸门。**
+**不变量（设计的核心，v4 收紧，v5 修措辞，v6 随闸门条件改写）**：**任务行 `cost = "metered"` ⇒
+该任务**至少有一轮**的有效成本是 `"metered"`；**那一轮要么目标就是当时用户配置的默认档
+（配置即授权，v6），要么带着 `allow_metered: true` 过了闸门。**
 
 ⚠️ **v5 的措辞修正（确认轮发现的一处自相矛盾）**：v4 写的是"**任何一次**把 `cost` 写成 `"metered"`
 的派发，都必然带着 `allow_metered` 过了闸门"——这句话**字面为假**，因为它与"粘性 metered"规则冲突：
@@ -353,8 +377,8 @@ profile 名，事后无法回答"这条任务是不是花钱的"。那正是事�
 **实质没有受损**（真正发生的 metered 花费在 Round1、那一轮过了闸门；粘性只是保留标签，
 不产生任何未授权花费）——受损的是**陈述的准确性**：它会让实现者/评审误以为"每轮 metered 都过闸"。
 
-⇒ 正确表述是上面那句：**"至少有一轮 metered 且那一轮过了闸门"**；**sticky 保留轮的 `metered`
-不要求当轮 `allow_metered`**。
+⇒ 正确表述是上面那句：**"至少有一轮 metered，且那一轮要么是当前默认档、要么带了 `allow_metered`"**；
+**sticky 保留轮的 `metered` 不要求当轮 `allow_metered`**（v6 的闸门条件下，"当轮是当前默认档"也算合规）。
 
 **这个不变量必须是机制性的，不能只靠约定**（v4 采纳第 3 轮 P1-b）：
 
@@ -447,12 +471,12 @@ profile 名，事后无法回答"这条任务是不是花钱的"。那正是事�
 | V2 | D2 | `model` === 占位符、`small_model` === 硬编码付费 ⇒ **不是** free（按 metered 处理） |
 | V2b | D2 | `model` === 硬编码付费、`small_model` === 占位符 ⇒ **不是** free（`zen-free.ts:76`「任一值触发」最危险的误判源，V2 只覆盖了另一侧） |
 | V3 | D2 | `model` 与 `small_model` **都 === 占位符** ⇒ free；`model` === 占位符但 `small_model` **缺省** ⇒ **不是** free（按 metered，fail-safe） |
-| V4 | D3 | metered + 未传 `allow_metered` ⇒ `submit` 返回 error，**且 tasks 表没有新行** |
-| V5 | D3 | metered + `allow_metered: true` ⇒ 正常建任务 |
-| V6 | D3 | free profile 无需授权即可派发 |
-| V7 | D3/D4 | 续跑一个 metered 任务（needs_input）且未传 `allow_metered` ⇒ 返回 error，**任务仍是 `needs_input`**（不是 `running`） |
-| V8 | D3 | 续跑时任务行里的 profile 已被 config 删除 ⇒ 按 metered 处理（未授权 ⇒ 拒绝） |
-| V9 | D3 | **续跑时 `profile.executor`（opencode + 占位符）与 `task.executor`（claude）不一致 ⇒ 按 metered 拒绝**（P0-4 的绕过口） |
+| V4 | D3 | **切到** metered（非当前默认档）+ 未传 `allow_metered` ⇒ `submit` 返回 error，**且 tasks 表没有新行** |
+| V5 | D3 | 切到 metered + `allow_metered: true` ⇒ 正常建任务 |
+| V6 | D3 | free profile 无需授权即可派发；**默认档即 metered 时也无需授权**（配置即授权） |
+| V7 | D3/D4 | 续跑一个 metered 任务（needs_input）、**其 profile 不是当前默认档**且未传 `allow_metered` ⇒ 返回 error，**任务仍是 `needs_input`**（不是 `running`） |
+| V8 | D3 | 续跑时任务行里的 profile 已被 config 删除 ⇒ 按 metered 处理（且它不是当前默认档 ⇒ 未授权 ⇒ 拒绝） |
+| V9 | D3 | **续跑时 `profile.executor`（opencode + 占位符）与 `task.executor`（claude）不一致 ⇒ 按 metered 拒绝**（P0-4 的绕过口；该 profile 不是当前默认档 ⇒ 属于"切换" ⇒ 拦） |
 | V10 | D3 | cost 闸门在模型存活探测**之前**：被拒的调用**不**产生 `opencode models` 子进程（用注入的 `runImpl` 断言未被调用） |
 | V11 | D4 | 老配置（无 cost）`loadConfig` 不抛（info 不阻断） |
 | V12 | D4 | `collectConfigIssues` 对"未声明 cost"产出 `severity: "info"` 的 issue，且带 `subject` 与 `fix` |
@@ -464,7 +488,7 @@ profile 名，事后无法回答"这条任务是不是花钱的"。那正是事�
 | V18 | D4/D7 | `doctor` 遇到"声明 free 但结构判定不是 free" ⇒ 产出 **warn**（不是 info、不是 error）、带 `subject`、**不自动改判** |
 | V19 | D4 | `applyFixes` 在只有 cost 缺失、无其它可修项的配置上 `applied` 为空、文件内容不变 |
 | V20 | D4 | `applyFixes` 修其它字段时，配置里有非法 cost ⇒ 整份被拒（`validateConfig` 抛 error ⇒ 不落盘），skipped/notes 说清"没写进去" |
-| V21 | D5 | `defaults.profile` 指向 metered 且省略 `profile` ⇒ 被拦；错误文案里出现 `defaults.profile` 的名字 |
+| V21 | D5 | `defaults.profile` 指向 metered 且省略 `profile` ⇒ **放行**（配置即授权，v6）；**切到别的 metered 档**时被拦，且错误文案里出现 `defaults.profile` 的名字 |
 | V22 | D6 | `agent-ex init`（zen 分支）产出的 config 里 profile 带 `cost: "free"`；claude 分支带 `cost: "metered"` |
 | V23 | D6 | `agent-ex profile create opencode-zen-free` 产出的 profile 带 `cost: "free"` |
 | V24 | D6/D2 | `agent-ex profile set <p> cost free` 成功并落盘；`cost` 非法值被拒且**不写盘** |
@@ -655,3 +679,39 @@ v5 的修法（落在 D10）：不变量改成
    合流时注意两处都改到了 `main()` 附近的同一段。
 2. **D8 要求"发布时 bump 版本"**：包版本已经是 0.5.2，但 `allow_metered` 尚未进包 ⇒ 真正带
    `allow_metered` 的版本号要等实现落地后才确定，SKILL 的前置检查门槛文案按**实际发版版本**写。
+
+### 8.8 v5 → v6（用户纠正后的闸门收窄）
+
+**触发**：v5 实现完成后，用户当场指出闸门拦错了对象：
+
+> 「不对吧，是模型没有用 agent-ex 当前配置的 profile 才应该拦截吧？用户 profile 当前选哪个用哪个才对啊，
+> 不要自主切才对付费 profile 才对吧」
+
+**问题**：v5 的闸门条件是「目标 profile 的有效成本是 metered」⇒ **用户自己配置的付费档**（典型：
+`defaults.profile = minimax-3`，claude + API key）**每次派发都要带 `allow_metered: true`**。
+代价：
+
+- 用户的正常付费工作流被变成噪音——每派一个活都要一次"我同意付费"的点头；
+- 而事故的真正成因是 agent **自主换**到付费档（不是"用了付费档"）⇒ **真正要拦的那条被稀释在噪音里**；
+- v5 的理由二（"放行则记录里没有授权标记"）也已被 D10 的**留痕**解决 ⇒ 那条理由不再成立。
+
+**修订**：闸门条件收窄为
+
+```
+拦 ⇔ 有效成本是 metered  ∧  目标 profile ≠ 当前配置的那个（cfg.defaults.profile）
+```
+
+| 情况 | v5 | v6 |
+| :--- | :--- | :--- |
+| 默认档就是 metered，省略 `profile` | 拦 | **放行**（配置即授权） |
+| 显式传 `profile == defaults.profile` | 拦 | **放行** |
+| 切到**免费档**（非默认档） | 放行 | 放行 |
+| 切到**别的 metered 档** | 拦（要 `allow_metered`） | 拦（要 `allow_metered`） |
+
+**连带改动**：D3 的判定表与错误文案（必须点名当前默认档）、**D5 整段重写**（v5 的"不放行"被推翻，
+理由与残留风险重写）、D10 的不变量（「那一轮要么是当前默认档、要么带了 `allow_metered`」）、
+V4–V9 与 V21 的验收判据、SKILL 铁律 5 的参数口径与 Step 3 参数表、排错表新增一行、
+README×2 与 `docs/user-guide/configuration.md` §3.1 的闸门说明、CHANGELOG 的 0.6.0 条目。
+
+**诚实记录**：v5 的 D3/D5 是在**四轮 agent 评审全绿**之后被用户推翻的——评审能查出内部矛盾与遗漏，
+但**判不准"这个机制该不该有"这种产品判断**。这一条比 v5 的任何细节都更值得留在文档里。

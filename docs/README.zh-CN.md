@@ -216,7 +216,7 @@ server 是无状态的——状态全在 `tasks.db`。`restart` 不影响在跑�
 | `executors.<name>.bin` | agent CLI 的位置——**裸命令名或绝对路径皆可**。 |
 | `profiles.<name>.env` | 传给 agent 子进程的环境变量，`{env:VAR}` 占位符在任务运行时解析。**绝不要在这里写 `PATH` / `NODE_OPTIONS` / `LD_*` / `DYLD_*`**——那是 worker 的进程启动/加载面，等价于任意代码执行。 |
 | `profiles.<name>.path_dirs` | 追加给 worker `PATH` 的**绝对**目录列表。这是扩展 worker PATH 唯一受支持的方式。`"path_dirs": []` 表示「我明确不要额外目录」（doctor 不再建议）；字段不存在表示「从未配过」（doctor 会建议补全）。 |
-| `profiles.<name>.cost` | `"free"` 或 `"metered"`——派发到这个 profile 会不会花钱。**不声明按 `metered` 处理**，所以计费档的派发必须带 `allow_metered: true`。只有你确定它真不花钱时才声明 `"free"`——doctor 会为「无法独立验证」的情况报 warn。 |
+| `profiles.<name>.cost` | `"free"` 或 `"metered"`——派发到这个 profile 会不会花钱。**不声明按 `metered` 处理**，所以**切到**这个 profile（当它不是当前配置的那个时）需要 `allow_metered: true`。只有你确定它真不花钱时才声明 `"free"`——doctor 会为「无法独立验证」的情况报 warn。 |
 | `notify.dry_run` | `true`（缺省）只把卡片打到 stderr，不真发。 |
 | `notify.keyword` | 追加在卡片末尾的关键词。缺省 `agent-ex`；必须与机器人侧登记的词一致。 |
 | `defaults.profile` / `defaults.timeout_sec` | 默认 profile 与单轮超时秒数。 |
@@ -224,8 +224,10 @@ server 是无状态的——状态全在 `tasks.db`。`restart` 不影响在跑�
 真实密钥永不进 `config.json`：那里只写 `{env:VAR}` 占位符，真实值放 `$AGENT_EX_HOME/.env`
 （chmod 600，server 启动时自动加载）。
 
-**计费闸门**：派发到 `metered` 档的 profile 会被拒，除非调用方传 `allow_metered: true`——
-工具无从得知用户是否同意付费。这个开关是**按次**的：429 / 额度耗尽 / free 池全挂 / 超时 / 失败
+**计费闸门**：闸门只拦一种形状——**agent 自己切到付费 profile**。派发到用户当前配置的那个 profile
+（`defaults.profile`）**永远不被拦**：那是他自己的选择，收费与否都一样；切到免费档也不拦。
+需要 `allow_metered: true` 的是「切到**别的**、且会花钱的 profile」，而且只有用户明确点名了那个
+profile、或明确同意付费时才许传。这个开关是**按次**的：429 / 额度耗尽 / free 池全挂 / 超时 / 失败
 **都不是**同意付费，所以失败后不能加这个参数重试。每次派发的有效成本都会记在任务行上，
 由 `agent_ex_status` 回显、终态卡页脚标注（`计费档` / `免费档` / `未记录`）。
 

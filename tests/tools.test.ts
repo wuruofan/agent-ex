@@ -230,98 +230,140 @@ describe("submit —— 计费闸门（cost gate）", () => {
     try { return s.listRecent(200).length; } finally { s.close(); }
   };
 
-  it("metered 且未授权 ⇒ 拒绝，tasks 表没有新行", async () => {
+  /** 造一条 needs_input 的任务行（续跑场景的夹具）。 */
+  function seedNeedsInput(id: string, profile: string, executor = "claude", cost = "metered"): ReturnType<typeof openStore> {
+    const store = openStore(join(home, "tasks.db"));
+    store.createTask({
+      id, prompt: "p", project_path: home, executor, profile,
+      timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
+      created_at: Math.floor(Date.now() / 1000), cost,
+    });
+    store.transition(id, ["queued"], "needs_input", { question: "q" });
+    return store;
+  }
+
+  // —— 闸门拦的是「切到计费档」，不是「这个 profile 收费」——
+
+  it("默认档就是计费档 ⇒ 省略 profile 直接放行（配置即授权，不需要 allow_metered）", async () => {
     writeGateCfg({ paid: { executor: "claude", env: {}, cost: "metered" } }, { profile: "paid", timeout_sec: 60 });
-    const before = countTasks();
     const r = await submit({ prompt: "hello", project_path: home });
+    expect(r).toMatchObject({ status: "queued", rounds: 1 });
+    const id = (r as { task_id: string }).task_id;
+    // 放行不等于不记录：这一轮确实可能花钱 ⇒ 行里记 metered，status 也回显
+    expect(openStore(join(home, "tasks.db")).getTask(id)?.cost).toBe("metered");
+    expect(status({ task_id: id })).toMatchObject({ cost: "metered" });
+  });
+
+  it("显式传默认档的名字（profile == defaults.profile）⇒ 同样放行", async () => {
+    writeGateCfg({ paid: { executor: "claude", env: {}, cost: "metered" } }, { profile: "paid", timeout_sec: 60 });
+    const r = await submit({ prompt: "hello", project_path: home, profile: "paid" });
+    expect(r).toMatchObject({ status: "queued", rounds: 1 });
+  });
+
+  it("切到非默认档的计费 profile 且未授权 ⇒ 拒绝，tasks 表没有新行", async () => {
+    writeGateCfg(
+      {
+        freep: { executor: "claude", env: {}, cost: "free" },
+        paid: { executor: "claude", env: {}, cost: "metered" },
+      },
+      { profile: "freep", timeout_sec: 60 },
+    );
+    const before = countTasks();
+    const r = await submit({ prompt: "hello", project_path: home, profile: "paid" });
     expect(r).toMatchObject({ error: expect.any(String) });
     const err = (r as { error: string }).error;
     expect(err).toContain('profile "paid"');
+    // 文案必须点名当前默认档：否则调用方无法判断该「让用户切默认」还是「这次带个授权」
+    expect(err).toContain("defaults.profile");
+    expect(err).toContain('"freep"');
     expect(err).toContain("allow_metered: true");
     expect(countTasks()).toBe(before);
     expect(mockedSpawn).not.toHaveBeenCalled();
   });
 
-  it("metered 且 allow_metered=true ⇒ 正常建任务，行里记 cost=metered，status 也回显", async () => {
-    writeGateCfg({ paid: { executor: "claude", env: {}, cost: "metered" } }, { profile: "paid", timeout_sec: 60 });
-    const r = await submit({ prompt: "hello", project_path: home, allow_metered: true });
+  it("切到非默认档但**免费**的 profile ⇒ 无需授权（与钱无关）", async () => {
+    writeGateCfg(
+      {
+        freep: { executor: "claude", env: {}, cost: "free" },
+        paid: { executor: "claude", env: {}, cost: "metered" },
+      },
+      { profile: "paid", timeout_sec: 60 },
+    );
+    const r = await submit({ prompt: "hello", project_path: home, profile: "freep" });
+    expect(r).toMatchObject({ status: "queued", rounds: 1 });
+  });
+
+  it("切到非默认档的计费 profile 且带 allow_metered=true ⇒ 放行，行里记 cost=metered", async () => {
+    writeGateCfg(
+      {
+        freep: { executor: "claude", env: {}, cost: "free" },
+        paid: { executor: "claude", env: {}, cost: "metered" },
+      },
+      { profile: "freep", timeout_sec: 60 },
+    );
+    const r = await submit({ prompt: "hello", project_path: home, profile: "paid", allow_metered: true });
     expect(r).toMatchObject({ status: "queued", rounds: 1 });
     const id = (r as { task_id: string }).task_id;
     expect(openStore(join(home, "tasks.db")).getTask(id)?.cost).toBe("metered");
     expect(status({ task_id: id })).toMatchObject({ cost: "metered" });
   });
 
-  it("free 档无需授权即可派发", async () => {
-    writeGateCfg({ freep: { executor: "claude", env: {}, cost: "free" } }, { profile: "freep", timeout_sec: 60 });
-    const r = await submit({ prompt: "hello", project_path: home });
-    expect(r).toMatchObject({ status: "queued", rounds: 1 });
-    const id = (r as { task_id: string }).task_id;
-    expect(openStore(join(home, "tasks.db")).getTask(id)?.cost).toBe("free");
-  });
-
-  it("默认档是 metered 且省略 profile ⇒ 被拦，文案点名 defaults.profile", async () => {
-    writeGateCfg({ paid: { executor: "claude", env: {}, cost: "metered" } }, { profile: "paid", timeout_sec: 60 });
-    const r = await submit({ prompt: "hello", project_path: home });
-    const err = (r as { error: string }).error;
-    expect(err).toContain("defaults.profile");
-    expect(err).toContain('"paid"');
-  });
-
   it("闸门在模型存活探测之前：被拒的调用不产生 opencode models 子进程", async () => {
     writeGateCfg(
       {
+        freep: { executor: "claude", env: {}, cost: "free" },
         paid: {
           executor: "opencode",
           env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: "prov/Offline" }) },
           cost: "metered",
         },
       },
-      { profile: "paid", timeout_sec: 60 },
+      { profile: "freep", timeout_sec: 60 },
     );
     const runImpl = vi.fn();
-    const r = await submit({ prompt: "hello", project_path: home }, { runImpl });
+    const r = await submit({ prompt: "hello", project_path: home, profile: "paid" }, { runImpl });
     expect(r).toMatchObject({ error: expect.any(String) });
     expect(runImpl).not.toHaveBeenCalled();
   });
 
-  it("续跑一个 metered 任务且未授权 ⇒ 拒绝，任务仍是 needs_input", async () => {
+  it("续跑：任务行的 profile 就是当前默认档 ⇒ 放行（配置即授权）", async () => {
     writeGateCfg({ paid: { executor: "claude", env: {}, cost: "metered" } }, { profile: "paid", timeout_sec: 60 });
-    const store = openStore(join(home, "tasks.db"));
-    const id = "task_cont_metered";
-    store.createTask({
-      id, prompt: "p", project_path: home, executor: "claude", profile: "paid",
-      timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
-      created_at: Math.floor(Date.now() / 1000), cost: "metered",
-    });
-    store.transition(id, ["queued"], "needs_input", { question: "q" });
-    const r = await submit({ prompt: "answer", continue_of: id });
+    const store = seedNeedsInput("task_cont_ok", "paid");
+    const r = await submit({ prompt: "answer", continue_of: "task_cont_ok" });
+    expect(r).toMatchObject({ task_id: "task_cont_ok", status: "running", rounds: 2 });
+    expect(store.getTask("task_cont_ok")?.status).toBe("running");
+  });
+
+  it("续跑：任务行的 profile 不是当前默认档、且是计费档 ⇒ 拒绝，任务仍是 needs_input", async () => {
+    writeGateCfg(
+      {
+        freep: { executor: "claude", env: {}, cost: "free" },
+        paid: { executor: "claude", env: {}, cost: "metered" },
+      },
+      { profile: "freep", timeout_sec: 60 },
+    );
+    const store = seedNeedsInput("task_cont_metered", "paid");
+    const r = await submit({ prompt: "answer", continue_of: "task_cont_metered" });
     expect(r).toMatchObject({ error: expect.any(String) });
     expect((r as { error: string }).error).toContain('profile "paid"');
     // 关键：状态**不变**（闸门必须排在状态变更之前，不能先 transition 再报错）
-    expect(store.getTask(id)?.status).toBe("needs_input");
-    expect(store.getTask(id)?.rounds).toBe(1);
+    expect(store.getTask("task_cont_metered")?.status).toBe("needs_input");
+    expect(store.getTask("task_cont_metered")?.rounds).toBe(1);
     expect(mockedSpawn).not.toHaveBeenCalled();
   });
 
-  it("续跑时 profile 已从 config 删除 ⇒ 按 metered 拒绝（fail-safe）", async () => {
+  it("续跑时 profile 已从 config 删除 ⇒ 按 metered 处理；不是默认档时拒绝", async () => {
     writeGateCfg({ other: { executor: "claude", env: {}, cost: "free" } }, { profile: "other", timeout_sec: 60 });
-    const store = openStore(join(home, "tasks.db"));
-    const id = "task_gone";
-    store.createTask({
-      id, prompt: "p", project_path: home, executor: "claude", profile: "gone",
-      timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
-      created_at: Math.floor(Date.now() / 1000), cost: "free",
-    });
-    store.transition(id, ["queued"], "needs_input", { question: "q" });
-    const r = await submit({ prompt: "answer", continue_of: id });
+    const store = seedNeedsInput("task_gone", "gone", "claude", "free");
+    const r = await submit({ prompt: "answer", continue_of: "task_gone" });
     expect(r).toMatchObject({ error: expect.any(String) });
     expect((r as { error: string }).error).toContain('profile "gone"');
-    expect(store.getTask(id)?.status).toBe("needs_input");
+    expect(store.getTask("task_gone")?.status).toBe("needs_input");
   });
 
-  it("续跑时 profile.executor 是 opencode+占位符、任务行是 claude ⇒ 按 metered 拒绝（P0-4 绕过口）", async () => {
+  it("续跑时 profile.executor 是 opencode+占位符、任务行是 claude ⇒ 仍按 metered 拒绝（P0-4 绕过口）", async () => {
     // 结构化判定看 profile（opencode + 占位符 ⇒ free），但 runner 起的是**任务行**的 claude（付费 CLI）
-    // ⇒ 必须按 task.executor 判，否则这里就是一个续跑绕过口。
+    // ⇒ 必须按 task.executor 判。且任务行的 profile 不是当前默认档 ⇒ 属于「切换」⇒ 拦。
     writeGateCfg(
       {
         p: {
@@ -330,38 +372,25 @@ describe("submit —— 计费闸门（cost gate）", () => {
             OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: "{model:zen-free}", small_model: "{model:zen-free}" }),
           },
         },
+        other: { executor: "claude", env: {}, cost: "free" },
       },
-      { profile: "p", timeout_sec: 60 },
+      { profile: "other", timeout_sec: 60 },
     );
-    const store = openStore(join(home, "tasks.db"));
-    const id = "task_mismatch";
-    store.createTask({
-      id, prompt: "p", project_path: home, executor: "claude", profile: "p",
-      timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
-      created_at: Math.floor(Date.now() / 1000), cost: "free",
-    });
-    store.transition(id, ["queued"], "needs_input", { question: "q" });
-    const r = await submit({ prompt: "answer", continue_of: id });
+    const store = seedNeedsInput("task_mismatch", "p", "claude", "free");
+    const r = await submit({ prompt: "answer", continue_of: "task_mismatch" });
     expect(r).toMatchObject({ error: expect.any(String) });
-    expect(store.getTask(id)?.status).toBe("needs_input");
+    expect(store.getTask("task_mismatch")?.status).toBe("needs_input");
     expect(mockedSpawn).not.toHaveBeenCalled();
   });
 
   it("粘性 metered：metered 任务续跑一轮、该轮判定为 free ⇒ 行里仍是 metered", async () => {
     // 任务当初是 metered；后来 profile 被改成 free ⇒ 该轮判定为 free（声明优先）
     writeGateCfg({ p: { executor: "claude", env: {}, cost: "free" } }, { profile: "p", timeout_sec: 60 });
-    const store = openStore(join(home, "tasks.db"));
-    const id = "task_sticky";
-    store.createTask({
-      id, prompt: "p", project_path: home, executor: "claude", profile: "p",
-      timeout_sec: 60, log_path: join(home, "logs", `${id}.jsonl`), role: "worker",
-      created_at: Math.floor(Date.now() / 1000), cost: "metered",
-    });
-    store.transition(id, ["queued"], "needs_input", { question: "q" });
-    const r = await submit({ prompt: "answer", continue_of: id });
-    expect(r).toMatchObject({ task_id: id, status: "running", rounds: 2 });
+    const store = seedNeedsInput("task_sticky", "p", "claude", "metered");
+    const r = await submit({ prompt: "answer", continue_of: "task_sticky" });
+    expect(r).toMatchObject({ task_id: "task_sticky", status: "running", rounds: 2 });
     // 已发生的计费事实不被后续轮次的 free 判定抹掉
-    expect(store.getTask(id)?.cost).toBe("metered");
+    expect(store.getTask("task_sticky")?.cost).toBe("metered");
   });
 
   it("升级前的历史行（cost 为空串）⇒ status 回显「未记录」，不得当成 free", () => {

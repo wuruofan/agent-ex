@@ -229,7 +229,7 @@ The server is stateless — everything lives in `tasks.db`. `restart` does not a
 | `executors.<name>.bin` | Where the agent CLI lives — **a bare command name or an absolute path both work**. |
 | `profiles.<name>.env` | Environment for the agent process. `{env:VAR}` placeholders are resolved at task runtime. **Never put `PATH` / `NODE_OPTIONS` / `LD_*` / `DYLD_*` here** — that is the worker's process-loading surface, i.e. arbitrary code execution. |
 | `profiles.<name>.path_dirs` | Extra **absolute** directories appended to the worker's `PATH`. This is the only supported way to extend the worker's PATH. `"path_dirs": []` means "no extras, deliberately" (doctor stops suggesting dirs); an absent field means "never configured" (doctor suggests them). |
-| `profiles.<name>.cost` | `"free"` or `"metered"` — whether dispatching to this profile may cost money. **Undeclared means `metered`**, so a metered profile needs `allow_metered: true` on `agent_ex_submit`. Declare `"free"` only when you are sure it costs nothing — doctor warns when it cannot verify that for you. |
+| `profiles.<name>.cost` | `"free"` or `"metered"` — whether dispatching to this profile may cost money. **Undeclared means `metered`**, so switching *to* this profile (when it is not the one currently configured) needs `allow_metered: true`. Declare `"free"` only when you are sure it costs nothing — doctor warns when it cannot verify that for you. |
 | `notify.dry_run` | `true` (default) prints the card to stderr instead of sending it. |
 | `notify.keyword` | The keyword appended to every card. Defaults to `agent-ex`; it must match the keyword registered on the bot side. |
 | `defaults.profile` / `defaults.timeout_sec` | Default profile, and the per-round timeout in seconds. |
@@ -237,12 +237,15 @@ The server is stateless — everything lives in `tasks.db`. `restart` does not a
 Secrets never live in `config.json`: write `{env:VAR}` placeholders there and the real values into
 `$AGENT_EX_HOME/.env` (mode 600, auto-loaded by the server at startup).
 
-**Cost gate.** A dispatch to a `metered` profile is refused unless the caller passes
-`allow_metered: true` — the tool cannot know that the user agreed to pay. The flag is **per
-dispatch**: a quota error, an exhausted free pool, a timeout or a failed run is *not* an agreement
-to pay, so a failed run must not be retried with the flag added. The effective cost of every
-dispatch is recorded on the task row and shown by `agent_ex_status` and in the terminal card footer
-(`计费档` / `免费档` / `未记录`).
+**Cost gate.** The gate catches one shape: the agent **switching to a paid profile on its own**.
+Dispatching to the profile the user currently has configured (`defaults.profile`) is never
+blocked — that is the user's own choice, paid or not — and neither is switching to a free
+profile. What needs `allow_metered: true` is a switch to a *different*, metered profile, and the
+caller may only pass it when the user explicitly asked for that profile or agreed to pay. The
+flag is **per dispatch**: a quota error, an exhausted free pool, a timeout or a failed run is
+*not* an agreement to pay, so a failed run must not be retried with the flag added. The effective
+cost of every dispatch is recorded on the task row and shown by `agent_ex_status` and in the
+terminal card footer (`计费档` / `免费档` / `未记录`).
 
 Full reference — every field, `{model:zen-free}`, the `[1m]` context-window trick, `path_dirs`,
 the write whitelist:

@@ -242,7 +242,7 @@ export function collectConfigIssues(cfg: unknown): ConfigIssue[] {
           severity: "info",
           message:
             `profile "${name}" has no cost declared — treated as metered; ` +
-            `dispatching to it requires allow_metered: true ` +
+            `switching to it (when it is not the current defaults.profile) requires allow_metered: true ` +
             `(use \`cost free\` only if you are sure it costs nothing)`,
           // ⚠️ 主 fix 方向必须是 metered：这条 info 的前提就是"按 metered 处理"。
           // 写成 cost free 等于给"把付费档洗成免费档"提供官方修复命令。

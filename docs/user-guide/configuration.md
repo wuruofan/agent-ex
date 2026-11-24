@@ -93,24 +93,37 @@ agent-ex profile set minimax-3 cost metered
 
 `cost` 决定「派发到这个 profile 会不会花钱」，取值只有 `free` / `metered`：
 
-- **不声明 ⇒ 按 `metered` 处理**（fail-safe）。老配置升级上来都是这个形状 ⇒ 派发会被拦。
+- **不声明 ⇒ 按 `metered` 处理**（fail-safe）。
 - **声明了 ⇒ 按声明走**（声明优先）。`agent-ex profile set <name> cost free` 就是声明入口。
   ⚠️ 声明只是一个词，系统**无法独立验证**它真不花钱（executor 不是 opencode，或
   `model` / `small_model` 不是 `{model:zen-free}` 占位符时）⇒ `doctor` 会报一条 warn 提示复核，
   但**不会**替你改判（改判 = 替你表态）。
 
-派发到 `metered` 档时，`agent_ex_submit` 必须带 `allow_metered: true`，否则直接拒绝：
+**闸门拦的是「切换」，不是「收费」。** 三条判据：
+
+| 情况 | 结果 |
+|---|---|
+| 目标 profile **就是**当前配置的那个（`defaults.profile`） | **放行**——用户自己的选择，收费与否都一样 |
+| 目标是**免费档**（无论是不是当前默认档） | **放行**——与钱无关 |
+| 目标是**别的、且会花钱的** profile | 拒绝，除非带 `allow_metered: true` |
+
+被拒时的文案长这样（**点名当前默认档**，好判断该「让用户切默认」还是「这次带个授权」）：
 
 ```
-profile "minimax-3" (it is the current defaults.profile) is a metered profile — dispatching to it may cost money. …
+profile "minimax-3" is not the profile currently configured (defaults.profile = "opencode-zen-free")
+and it is a metered profile — switching to it may cost money. …
 ```
 
 - 这个开关是**按次**的：429 / 额度上限 / free 池全挂 / 超时 / 失败**都不构成**同意计费，
   不能靠加这个参数把任务"救活"。
-- 续跑（`continue_of`）同样要授权，且**按任务行里的 executor 判定**（不是 profile 的）——
-  runner 起的是任务行的 executor。续跑时传 `profile` 无效（用任务行里那个）。
+- 续跑（`continue_of`）走同一套判据（目标 = 任务行里的 profile），且**按任务行里的 executor 判成本**
+  （不是 profile 的）——runner 起的是任务行的 executor。续跑时传 `profile` 无效（用任务行里那个）。
 - 每次派发的有效成本会记在任务行的 `cost` 列上（`agent_ex_status` 回显，终态卡页脚标注
   `计费档` / `免费档` / `未记录`）。
+
+> ⚠️ **配置即授权的前提**：`defaults.profile` 必须是**用户**自己定的。铁律 5（配置只读）管的就是这条
+> ——agent 不得为了「让任务跑下去」改默认档。工具层无法验证配置是谁写的（它只是文件里的一个名字），
+> 所以这一层的保证是「派发不会**换**到别的付费档」，不是「钱只花在你亲自选过的档上」。
 
 **两类「确实免费却被判 metered」的形态**（结构化判定要求 `model` 与 `small_model` **都**是占位符）：
 
