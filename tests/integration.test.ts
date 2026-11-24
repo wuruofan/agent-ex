@@ -61,6 +61,13 @@ if (mode === "hang") {
   process.on("SIGTERM", () => process.exit(0));
   process.on("SIGINT", () => process.exit(0));
   setInterval(() => {}, 1000);
+} else if (mode === "silent") {
+  // 首步看门狗场景（2026-11-24 回归）：复刻 opencode 免费档额度耗尽的挂死形态 ——
+  // worker 进程活着、stdout 零输出、也不退出。旧实现只能等全局超时（默认 3600s）才落终态，
+  // 任务在 running 上白躺一小时（实测那次挂了 40 分钟才发现）。
+  process.on("SIGTERM", () => process.exit(0));
+  process.on("SIGINT", () => process.exit(0));
+  setInterval(() => {}, 1000);
 } else if (mode === "escape") {
   // P0-2 逃逸场景：agent 派生 detached 心跳子进程（脱离 runner 进程组，模拟 agent Bash 工具的
   // 逃逸长命令），自身 hang 等待 cancel。修复前 cancel 杀不掉该子进程，心跳文件持续增长。
@@ -300,6 +307,29 @@ suite("integration: timeout kills long-running agent", () => {
     const t = openStore(join(home, "tasks.db")).getTask(id) as { error?: string };
     expect(t.error).toMatch(/timeout/i);
   }, 12_000);
+});
+
+suite("integration: 首步看门狗（worker 活着但零输出）", () => {
+  // 2026-11-24 回归：opencode 免费档额度耗尽时，worker 进程活着但 stdout 一行都不出、
+  // 也不退出 ⇒ 旧实现只能等全局超时（默认 3600s）才落终态 ⇒ 任务在 running 上白躺一小时。
+  it("stdout 一直无输出 → 看门狗判 failed（先于全局超时），错误文案点名额度/限流", async () => {
+    process.env.AGENT_EX_FIRST_OUTPUT_TIMEOUT_MS = "1500";
+    try {
+      setupHome({ FAKE_MODE: "silent" }, 60); // timeout_sec=60：看门狗必须**先于**全局超时到
+      const r = await submit({ prompt: "silent worker", project_path: home });
+      const id = (r as { task_id: string }).task_id;
+      expect(await waitForTerminal(id, 25_000)).toBe("failed");
+      const t = openStore(join(home, "tasks.db")).getTask(id) as { error?: string; log_path?: string };
+      expect(t.error).toMatch(/no output/i);
+      expect(t.error).toMatch(/quota/i);
+      // 只跑一次：额度是账号级共享的，重试只是白等（省一次 10 分钟白等）
+      const spawns = readFileSync(t.log_path!, "utf8")
+        .split("\n").filter((l) => l.includes('"event":"spawn"')).length;
+      expect(spawns).toBe(1);
+    } finally {
+      delete process.env.AGENT_EX_FIRST_OUTPUT_TIMEOUT_MS;
+    }
+  }, 40_000);
 });
 
 suite("integration: timeout still reaches a terminal state when the agent never closes", () => {

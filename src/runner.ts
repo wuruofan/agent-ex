@@ -46,6 +46,26 @@ const MAX_RESULT_LEN = 4000;
  */
 const TIMEOUT_FINALIZE_GRACE_MS = 8000;
 
+/**
+ * 首步看门狗：spawn 之后多久内 stdout 还是**一行都没有**，就判定 worker 卡死。
+ *
+ * 为什么需要它（2026-11-24 实测的故障形态）：opencode 撞上免费档额度耗尽时报的是
+ * `AI_APICallError: Free usage limit reached.`——但它**既不往 stdout 输出、也不退出**：
+ * 进程活着、一句话不说。旧实现只有全局超时（`defaults.timeout_sec`，默认 3600s）兜底
+ * ⇒ 任务在 running 上白躺一小时，没人知道它已经死了（实测挂死 40 分钟才发现）。
+ *
+ * 判据是「**首行** stdout」而不是「有没有最终结果」：worker 只要吐出第一行事件就说明它真的开工了
+ * （之后卡住该由全局超时管）；一行都没有 ⇒ 它压根没跑起来。
+ *
+ * 取 10 分钟：本地慢模型 / 冷启动可能要几十秒才出第一行，10 分钟足够宽松；
+ * 又远小于默认的 3600s 全局超时 ⇒ 看门狗先到，给出**可诊断**的失败而不是一句 timeout。
+ * 可用 AGENT_EX_FIRST_OUTPUT_TIMEOUT_MS 覆盖（毫秒）——集成测试走短阈值。
+ */
+const FIRST_OUTPUT_TIMEOUT_MS = (() => {
+  const v = Number(process.env.AGENT_EX_FIRST_OUTPUT_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 600_000;
+})();
+
 // 瞬态重试：agent 自身内部重试耗尽后仍把 429/529 当作终态报错时，runner 再兜底重试。
 // 仅对「瞬时/可恢复」错误重试；timeout（真超时）、needs_input（等人工）、硬失败不重试。
 const MAX_ATTEMPTS = 3;
@@ -76,6 +96,11 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** 单次 agent 运行的结果快照（供重试循环与终态裁决共用）。 */
 interface RunOutcome {
   timedOut: boolean;
+  /**
+   * 首步看门狗判定：worker 进程活着但 stdout 一行都没出（典型成因：模型额度/限流耗尽后 CLI 静默挂死）。
+   * 与 timedOut 互斥：看门狗先到 ⇒ 走 stall 分支（不重试——额度是账号级共享的，重试只是白等）。
+   */
+  stalled: boolean;
   question: string | null;
   resultText: string | null;
   resultIsError: boolean;
@@ -265,8 +290,14 @@ async function main(): Promise<void> {
 
   // 超时的错误文案：超时定时器与「强制收尾」两处共用，保证 DB 里与卡片上的说法一致。
   const timeoutError = `timeout after ${task.timeout_sec}s (round ${task.rounds})`;
+  // 首步看门狗的阈值：默认 FIRST_OUTPUT_TIMEOUT_MS，但不能晚于本轮自身的超时
+  // （否则永远是全局超时先到，看门狗形同虚设）。
+  const firstOutputMs = Math.min(FIRST_OUTPUT_TIMEOUT_MS, task.timeout_sec * 1000);
+  // 看门狗判定时的错误文案（**快照**）：强制收尾与终态裁决两处落终态共用同一份，
+  // 保证 DB 里与卡片上的说法一致（worker 的 stderr 尾巴也只在判定那一刻取一次）。
+  let stallMessage = "";
   // 本次运行是否已经由「强制收尾」路径落过终态（避免 close 到达后再 finalize 一次）。
-  let timeoutFinalized = false;
+  let forceFinalized = false;
 
   // 单次 agent 运行：spawn → 逐行解析事件/落库/写日志 → 终态时 resolve 出本次运行结果。
   // 不设 detached：agent 继承 runner 的进程组（runner 自己是 leader），便于 cancel 时组杀级联到 agent。
@@ -274,7 +305,7 @@ async function main(): Promise<void> {
   // agentEnv 由调用方（重试循环）在每次 attempt 前构建：zen-free 占位符的动态解析结果随 attempt 变化（撞限换模）。
   function runAgent(attempt: number, agentEnv: NodeJS.ProcessEnv): Promise<RunOutcome> {
     return new Promise((resolve) => {
-      timeoutFinalized = false;
+      forceFinalized = false;
       const files = new Set<string>(task.files_changed ?? []);
       const log = createWriteStream(task.log_path, { flags: "a" });
       // buildCommand 返回的完整 argv 含 bin 作为 [0]；spawn 的第一个参数**也**是 bin。
@@ -303,6 +334,12 @@ async function main(): Promise<void> {
       child.stdin!.end();
 
       let timedOut = false;
+      // 首步看门狗判定：worker 活着但一句话都没说（见 FIRST_OUTPUT_TIMEOUT_MS）。
+      let stalled = false;
+      // stdout 是否已经出过第一行（出过 = worker 真的开工了，看门狗解除）。
+      let gotOutput = false;
+      // 首步看门狗定时器；worker 出第一行时解除。
+      let firstOutputTimer: NodeJS.Timeout | null = null;
       // 超时后的「强制收尾」定时器：见 TIMEOUT_FINALIZE_GRACE_MS 的说明。
       // **不 unref**：它必须能把 runner 的事件循环钉住，宽限期内进程不能静默退出。
       let forceFinalizeTimer: NodeJS.Timeout | null = null;
@@ -317,22 +354,48 @@ async function main(): Promise<void> {
       // killTree 只从 child.pid 向下清，不动 runner 所在的组根。
       const timeoutTimer = setTimeout(() => {
         timedOut = true;
+        // 全局超时接管 ⇒ 首步看门狗不必再管（两条路径的收尾方式一样，但错误文案不同）。
+        if (firstOutputTimer) { clearTimeout(firstOutputTimer); firstOutputTimer = null; }
         if (child.pid !== undefined) killTree(child.pid);
         // 兜底：agent 若在宽限期内不退出（逃逸孙进程持有 stdout / 进程卡在不可中断 IO），
         // 'close' 永不触发 ⇒ 靠 close 落终态会永远落不了 ⇒ 宽限一过就自己落终态，不等 close。
         forceFinalizeTimer = setTimeout(() => {
-          timeoutFinalized = true;
+          forceFinalized = true;
           const text = (resultText ?? lastAssistantText ?? "").trim();
           finalize(store, task, "failed", { error: timeoutError, result: trunc(text) }, cfg);
-          resolve({ timedOut: true, question: null, resultText, resultIsError, stderrTail, lastAssistantText, code: null });
+          resolve({ timedOut: true, stalled: false, question: null, resultText, resultIsError, stderrTail, lastAssistantText, code: null });
           // 通知是「任务已失败」唯一的对外信号 ⇒ 等它落地再退出，别让进程先走把回执带跑。
           void exitAfterNotify(store, task);
         }, TIMEOUT_FINALIZE_GRACE_MS);
       }, task.timeout_sec * 1000);
       timeoutTimer.unref();
 
+      // 首步看门狗：spawn 之后 firstOutputMs 内 stdout 一行都没有 ⇒ 判定 worker 没开工。
+      // 到点动作与超时路径同构（killTree → 8s 强制收尾宽限），差别只在错误文案与「不重试」。
+      firstOutputTimer = setTimeout(() => {
+        if (gotOutput || timedOut) return; // 已经出过第一行 / 已被全局超时接管
+        stalled = true;
+        stallMessage = buildStallError(Math.round(firstOutputMs / 1000), task.rounds, stderrTail);
+        log.write(JSON.stringify({ type: "_runner", event: "stalled", round: task.rounds, attempt, waited_ms: firstOutputMs }) + "\n");
+        if (timeoutTimer) { clearTimeout(timeoutTimer); } // 看门狗先到 ⇒ 全局超时不参与
+        if (child.pid !== undefined) killTree(child.pid);
+        forceFinalizeTimer = setTimeout(() => {
+          forceFinalized = true;
+          const text = (resultText ?? lastAssistantText ?? "").trim();
+          finalize(store, task, "failed", { error: stallMessage, result: trunc(text) }, cfg);
+          resolve({ timedOut: false, stalled: true, question: null, resultText, resultIsError, stderrTail, lastAssistantText, code: null });
+          void exitAfterNotify(store, task);
+        }, TIMEOUT_FINALIZE_GRACE_MS);
+      }, firstOutputMs);
+      firstOutputTimer.unref();
+
       const rl = createInterface({ input: child.stdout! });
       rl.on("line", (line) => {
+        // 首行 stdout = worker 真的开工了 ⇒ 解除首步看门狗（之后卡住该由全局超时管）。
+        if (!gotOutput) {
+          gotOutput = true;
+          if (firstOutputTimer) { clearTimeout(firstOutputTimer); firstOutputTimer = null; }
+        }
         log.write(line + "\n");
         const ev = executor.parseEvent(line);
         if (!ev) return;
@@ -362,6 +425,7 @@ async function main(): Promise<void> {
 
       child.on("close", (code) => {
         clearTimeout(timeoutTimer);
+        if (firstOutputTimer) { clearTimeout(firstOutputTimer); firstOutputTimer = null; }
         // agent 已经退出 ⇒ 注销它（退出前不该再杀一个已经死掉的 pid）。
         detachAgent();
         // agent 正常退出了 ⇒ 宽限内的强制收尾不再需要（否则会把已完成的活判成超时失败）
@@ -369,7 +433,7 @@ async function main(): Promise<void> {
         log.end();
         const finalText = (resultText ?? lastAssistantText ?? "").trim();
         const question = extractNeedsInput(finalText);
-        resolve({ timedOut, question, resultText, resultIsError, stderrTail, lastAssistantText, code });
+        resolve({ timedOut, stalled, question, resultText, resultIsError, stderrTail, lastAssistantText, code });
       });
     });
   }
@@ -390,6 +454,7 @@ async function main(): Promise<void> {
     }
     outcome = await runAgent(attempt, buildAgentEnv(executorCfg.bin, resolved.env, pathDirs));
     const finalText = (outcome.resultText ?? outcome.lastAssistantText ?? "").trim();
+    if (outcome.stalled) break;           // 首步无输出（多半是额度/限流耗尽）：重试只是白等
     if (outcome.timedOut) break;           // 真超时，不是 API 瞬时错误
     if (outcome.question) break;           // 等人工，交给 dispatcher 代答/续跑
     if (outcome.resultIsError || outcome.code !== 0) {
@@ -408,10 +473,16 @@ async function main(): Promise<void> {
   const o = outcome!;
   const finalText = (o.resultText ?? o.lastAssistantText ?? "").trim();
   const question = o.question;
-  if (o.timedOut) {
+  if (o.stalled) {
+    // 首步看门狗判定：worker 压根没开工（多半是模型额度/限流耗尽后 CLI 静默挂死）。
+    // 已被「强制收尾」路径落过终态就别再落一次（与 timeout 分支同理）。
+    if (!forceFinalized) {
+      finalize(store, task, "failed", { error: stallMessage, result: trunc(finalText) }, cfg);
+    }
+  } else if (o.timedOut) {
     // 已被「强制收尾」路径落过终态就别再落一次（transition 只认 running，重复调用会打出
     // "lost race" 噪音，且对人对日志都是误导——任务本来就是超时失败，不是别处改的）。
-    if (!timeoutFinalized) {
+    if (!forceFinalized) {
       finalize(store, task, "failed", { error: timeoutError, result: trunc(finalText) }, cfg);
     }
   } else if (shuttingDown) {
@@ -479,6 +550,17 @@ function readRoundInput(logPath: string, round: number): string | null {
 
 function trunc(s: string, max = MAX_RESULT_LEN): string {
   return s.length > max ? s.slice(0, max) + "…(truncated)" : s;
+}
+
+/**
+ * 首步无输出的错误文案：点名最常见的成因（模型额度/限流耗尽后 CLI 静默挂死），
+ * 并带上 worker 的 stderr 尾巴——opencode 的真实报错只在它自己的日志里，
+ * stderr 能捞到就带上（捞不到也不影响判断）。
+ */
+function buildStallError(seconds: number, round: number, stderrTail: string): string {
+  const tail = stderrTail.trim();
+  const hint = tail ? `; worker stderr: ${trunc(tail, 300)}` : "";
+  return `worker produced no output for ${seconds}s (round ${round}) — most likely the model hit its quota/rate limit and the CLI hangs instead of failing${hint}`;
 }
 
 /**
