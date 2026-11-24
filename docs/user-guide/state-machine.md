@@ -56,6 +56,19 @@
 
 ⇒ 任务最迟在 `timeout_sec + 8s` 进入终态，**不会永远停在 `running`**。
 
+### 首步看门狗：worker 一句话不说就快速失败
+
+除了单轮超时，runner 还有一道更早的闸门：**spawn 之后 10 分钟内 stdout 一行都没有 ⇒ 判定挂死**，
+杀掉进程树、8s 宽限后落 `failed`，`error` 形如
+`worker produced no output for 600s (round 1) — most likely the model hit its quota/rate limit …`。
+
+- **为什么需要它**：某些故障形态里 worker 进程活着、却既不输出也不退出（实测：opencode 撞上
+  免费档额度耗尽时报 `AI_APICallError: Free usage limit reached.`，然后就那么睡着）。没有这道闸门，
+  只能等 `timeout_sec`（默认 3600s）才落终态——任务在 `running` 上白躺一小时。
+- **判据是「首行 stdout」**：worker 只要吐出第一行事件就说明它开工了，之后卡住该由单轮超时管。
+- **不重试**：额度是**账号级共享**的，立即重试只是再白等一轮（换 free 模型同样无效）。
+- 阈值可用 `AGENT_EX_FIRST_OUTPUT_TIMEOUT_MS` 覆盖（毫秒，默认 600000）。
+
 > 2026-11-16 修：旧实现把「落终态」挂在 agent 的 `close` 事件上（进程退出**且** stdio 全关），
 > 管道被逃逸孙进程占住时该事件永不触发 —— 真实任务 `task_mwhlwihp_29b736` 因此在 `running`
 > 挂了 16.5 小时，最后靠人工 `cancel` 收场。
@@ -80,9 +93,12 @@
 
 ### 状态查询
 
-`status({ task_id })` 返回字段含 `status / rounds / profile / project_path / started_at / created_at /
+`status({ task_id })` 返回字段含 `status / rounds / profile / cost / project_path / started_at / created_at /
 elapsed_sec / progress / files_changed`，终态时含 `result` / `error`，`needs_input` 时含 `question`，
 通知失败时含 `notify_failed`。
+
+`cost` 是**派发当时的有效成本**（`free` / `metered`）：升级前的历史任务没有这个记录 ⇒ 回显
+「未记录」（**不是 free**）。它记的是「工具当时依据当时配置作出的判定」，不是「模型是否真收费」的真值。
 
 `include_finished: true`（0.3.1+）会连已结束的任务一起列（按创建时间倒序，默认 20 条）。
 会话重启 / 上下文压缩后用它认回「上次派的那个」——那通常已经终态。
