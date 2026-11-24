@@ -1,4 +1,5 @@
 import type { AgentEvent, Executor } from "./types.js";
+import { isQuotaSignal } from "./quota.js";
 
 export const claudeExecutor: Executor = {
   name: "claude",
@@ -55,9 +56,8 @@ export const claudeExecutor: Executor = {
         : typeof o.message === "string" ? o.message
           : typeof o.error_message === "string" ? o.error_message
             : "";
-      const isHardQuota = errStatus === 429
-        || /token plan|quota|用量上限|rate.?limit|exceeded/i.test(rawMsg);
-      if (isHardQuota) {
+      // 识别规则见 executors/quota.ts（claude / opencode 共用一份，避免两边漂移）。
+      if (isQuotaSignal(errStatus, rawMsg)) {
         return {
           quotaWarning: {
             status: errStatus,

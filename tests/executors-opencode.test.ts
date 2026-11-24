@@ -59,6 +59,21 @@ describe("opencode executor", () => {
     expect(ex.parseEvent("not-json-line")).toBeNull();
   });
 
+  // 2026-11-24 回归：opencode 免费档额度耗尽时的真实措辞是
+  // `AI_APICallError: Free usage limit reached.`——旧正则只认 "rate limit"/"exceeded" ⇒ 匹配不上
+  // ⇒ 连配额告警卡都不推（见 src/executors/quota.ts）。
+  it("opencode 免费档额度耗尽的措辞（usage limit / reached）也映射 quotaWarning", () => {
+    const ev = ex.parseEvent(JSON.stringify({
+      type: "error",
+      error: {
+        name: "AI_APICallError",
+        data: { message: "AI_APICallError: Free usage limit reached. Free models work in OpenCode" },
+      },
+    }));
+    expect(ev?.result?.isError).toBe(true);
+    expect(ev?.quotaWarning?.message).toContain("Free usage limit reached");
+  });
+
   it("builds first-run command: opencode run --format json + extra flags，且不含 --prompt", () => {
     const cmd = ex.buildCommand("/usr/local/bin/opencode", ["--auto"]);
     expect(cmd[0]).toBe("/usr/local/bin/opencode");

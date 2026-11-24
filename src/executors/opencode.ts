@@ -1,4 +1,5 @@
 import type { AgentEvent, Executor } from "./types.js";
+import { isQuotaSignal } from "./quota.js";
 
 /**
  * opencode executor (https://opencode.ai/docs/cli)
@@ -77,7 +78,10 @@ export const opencodeExecutor: Executor = {
       const status = typeof data?.statusCode === "number" ? data.statusCode
         : typeof data?.status === "number" ? data.status : undefined;
       const ev = withSession({ result: { text: message, isError: true, subtype: "error" } });
-      if (status === 429 || /token plan|quota|用量上限|rate.?limit|exceeded/i.test(message)) {
+      // 识别规则见 executors/quota.ts（claude / opencode 共用一份）。
+      // ⚠️ opencode 免费档额度耗尽时的措辞是 "Free usage limit reached."（usage limit / reached），
+      //    旧正则只认 "rate limit"/"exceeded" ⇒ 匹配不上 ⇒ 连告警卡都不推。
+      if (isQuotaSignal(status, message)) {
         ev.quotaWarning = { status, message: message.slice(0, 400) };
       }
       return ev;
