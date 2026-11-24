@@ -1,11 +1,12 @@
 # profile 成本闸门：派发不能自己决定花钱
 
 日期：2026-11-24
-状态：**v5（终稿）**
+状态：**v6（终稿）**
 - v1 →（评审 `task_mwu3ephz_92c7cf`）→ v2：4 P0 / 8 P1 / 8 P2
 - v2 →（评审 `task_mwu49mhx_5cbeb2`，裁决「需补 4 处 P0 后可落地」）→ v3：4 P0 全修
 - v3 →（评审 `task_mwu7xaim_a9debb`，裁决「**可落地**」＝认可的 spec）→ v4：5 P1 / 3 P2 全收
 - v4 →（确认轮 `task_mwu836yl_f3acf6`：8/8 已落到位、**发现 1 处措辞级自相矛盾**）→ **v5**：修掉该矛盾
+- v5 →（**用户当场纠正闸门拦错了对象**）→ **v6**：闸门收窄为「只拦切到别的计费档」（见 §8.8）
 - 修订对照表见 §8。关联：`skills/agent-ex-dispatch/SKILL.md` 铁律 5、
   `src/config.ts` 的 `collectConfigIssues()` / `effectiveProfileCost()`、`src/tools/submit.ts`、
   `src/store.ts` 的 `COLUMNS` / `TaskPatch`、`src/doctor.ts` 的 `FIXABLE_KINDS` / `applyFixes()`
