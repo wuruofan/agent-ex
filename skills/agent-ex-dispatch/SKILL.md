@@ -50,6 +50,13 @@ agent_created: true
 2. **同一 `project_path` 的写任务禁止并发**：裁量对象是**写**，不是目录——多个任务写同一目录会互相踩文件；**只读任务（模板 C，且不执行会写盘的命令）任意数量可并行**。派发前先查活跃任务，按 Step 1 的读写矩阵判定：写 × 写必须串行（等它终态）/ 换目录 / 向用户确认。
 3. **worker 不做会话外动作**：默认在 prompt 中指示 worker **不要 git commit / push / 发通知**，只改文件并汇报变更摘要——除非用户在任务里显式授权。worker 以 `--dangerously-skip-permissions` 运行，没有二次确认。
 4. **不轮询**：任务提交后返回 `task_id` 即结束本轮；终态会推飞书。只在用户主动问进度、或收到飞书/需要续跑时再查 `agent_ex_status`。**唯一豁免**：为「Phase 2」起的后台 `agent-ex wait` 进程，每个新 turn 最多查一次（见该节「[回来先查]」）——那是**接续**，不是盯进度。
+5. **配置只读：写配置只能由用户发起，任务过程不构成授权。**
+   - 「只读」随时可用：`profile list` / `config list` / `agent-ex doctor`（**不带 `--fix`**）。诊断不需要许可。
+   - 「写」= `profile create|set|use`、`config set`、`doctor --fix`、以及任何对 `~/.agent-ex/config.json` 的直接编辑。**只有用户在本轮明确要求时才执行**，并在回报里写清改了哪个字段、从什么改成什么。
+   - **禁的是因果，不是命令**：为了让任务跑下去而写配置——429/额度上限、free 池全挂、模型下线、超时、失败、同目录冲突——一律停、报告、给选项；不得用换 profile / 换默认 / 调超时 / 改密钥把任务"救活"。
+   - **"顺手"同样禁止**：清理旧 profile、补 `path_dirs`、切默认、调 `timeout_sec`，没有用户当轮指令就不做。需要不同超时或模型时用 `submit` 的参数，不要改默认。
+   - **参数口径：`allow_metered` 只在用户本轮明确同意计费时传。** 它是**参数**不是配置，同样能被 agent 自己加上（老 server 上还会被静默剥离 ⇒ 以为闸门在工作）。429 / 额度上限 / free 池全挂 / 模型下线 / 超时 / 失败 / 同目录冲突 **都不构成同意计费**——遇到这些一律停、报告、给选项，**不要加 `allow_metered: true` 重试**。
+   - 判据一句话：**这行命令是用户这轮让我干的吗？** 不是，就只读。
 
 ## 前置检查（Preflight）
 
@@ -57,6 +64,7 @@ agent_created: true
 
 - **包版本门槛 `agent-ex-mcp >= 0.3.1`**：`agent-ex wait` 自 0.3.0 起提供，但 Phase 2「[回来先查]」兜底要用的 `agent_ex_status({ include_finished: true })` 是 **0.3.1 才加的**。0.3.0 的 server 会**静默剥离**这个未知参数、只返回进行中的任务 → 空列表，宿主分不清「不支持」和「真的没有任务」。
 - **MCP server 能力探测**：`agent_ex_version` 报告 < 0.3.1，或 `tools/list` 里 `agent_ex_status` 的 schema 没有 `include_finished` ⇒ 旧 server。此时**不要**把空列表当成结论：让用户升级到 >= 0.3.1，或用手上已知的 task_id 走 `agent-ex wait <id> --once`。`agent-ex wait --help` 只能证明 CLI ≥ 0.3.0，**不能**证明 MCP server 有这个参数（两者可能是不同构建）。
+- **计费闸门能力探测**：`tools/list` 里 `agent_ex_submit` 的 schema 有没有 `allow_metered`。**没有 ⇒ 不能声称"闸门生效"**：metered profile 的派发必须先取得用户明确同意（人工确认，而不是靠参数兜底）。两种旧 server 形态都不能当成"闸门在工作"：≥ 0.3.1 的 `.strict()` 会**响亮拒绝**未知参数（`Unrecognized key(s)`），0.3.0 的非 strict 会**静默剥离**它。
 - **CLI 版本门槛 `agent-ex >= 0.3.0`**：Phase 2 的等待改用 `agent-ex wait`，旧包（0.2.0 及更早）没有这个子命令。探针 `agent-ex wait --help`：新版 **exit 0** 且打印 `usage: agent-ex wait <task_id> …`；旧版 **exit 2**，把 `wait` 当未知子命令并打印 `no command: start the MCP server on stdio`——此时**不要继续调用**，旧版会静默起一个等 stdin 的 MCP server（挂住不返回）。没装全局包时：正式路线 `npm i -g agent-ex-mcp`，源码路线在仓库根 `npm link`；宿主 shell 里找不到命令时可退回 `npx -y agent-ex-mcp@latest wait <task_id>`（每次走 npx，更慢且要联网）。实际等待时**以 stdout 的 `WAIT=` 行为判据**，不要只看退出码（`WAIT=timeout` 也是 exit 2，与旧版撞码）。
 - MCP server 可用：工具名 `agent_ex_submit` / `agent_ex_status` / `agent_ex_cancel`（WorkBuddy 中可能带前缀如 `mcp__agent-ex__*`）。若工具不可用，先检查 `~/.workbuddy/mcp.json` 注册与 `agent-ex/dist/server.js` 是否已 build，**不要**尝试用其他方式派发。
 - 需要 worker 干活的机器上 `project_path` 存在且可写；executor 的 agent CLI 已配置（`$AGENT_EX_HOME/config.json`，默认 `$HOME/.agent-ex/config.json`）。运行时密钥在 `$HOME/.agent-ex/.env`，**不要**在 prompt/参数里写任何密钥。
@@ -79,7 +87,7 @@ agent_created: true
 
 **用户问「能不能一起派 N 个任务 / 让 worker 连续跑」时，先分两类，别混为一谈：**
 
-- **批量连发（N 个任务之间没有复核）→ 不能。** 理由可查：`agent_ex_submit` **没有批量/链式字段**（只有 `prompt` / `project_path` / `profile` / `timeout_sec` / `continue_of`），"一起派"只能是连发 N 个；而同 `project_path` 的写任务又禁止并发 ⇒ 同仓写任务本来就会串行化，**付了批量的代价却拿不到并行收益，只是把中间的 review 闸门拆掉**。闸门正是缺陷的唯一发现点（9/21 实测三例：spec 内部断言数自相矛盾——写工单时才发现、假参数、以及"0 fail"其实是沙箱有 `ps` 的环境依赖），批量派发会把每一条都变成 worker 的自报。另两条：串行时**任务 2 的基线 = 任务 1 未复核的产物**（缺陷在 1 与假回归在 2 无法区分）；待核报告**三份一起核并不比逐个核便宜**，却失去了在下一任务开始前用 `continue_of` 反问的机会。
+- **批量连发（N 个任务之间没有复核）→ 不能。** 理由可查：`agent_ex_submit` **没有批量/链式字段**（只有 `prompt` / `project_path` / `profile` / `timeout_sec` / `continue_of` / `allow_metered`），"一起派"只能是连发 N 个；而同 `project_path` 的写任务又禁止并发 ⇒ 同仓写任务本来就会串行化，**付了批量的代价却拿不到并行收益，只是把中间的 review 闸门拆掉**。闸门正是缺陷的唯一发现点（9/21 实测三例：spec 内部断言数自相矛盾——写工单时才发现、假参数、以及"0 fail"其实是沙箱有 `ps` 的环境依赖），批量派发会把每一条都变成 worker 的自报。另两条：串行时**任务 2 的基线 = 任务 1 未复核的产物**（缺陷在 1 与假回归在 2 无法区分）；待核报告**三份一起核并不比逐个核便宜**，却失去了在下一任务开始前用 `continue_of` 反问的机会。
 - **有人值守的连续推进（等终态 → 复核 → 按置信度决定是否派下一个）→ 可以**，见下面「Phase 2：执行期自主推进 loop」一节。
 - **真正自洽的批量条件**：文件面互不相交 + 无输出依赖 + 各自带可执行判别器，且每个任务之间**必须提交**——按此标准绝大多数"后续任务"不成立，逐个派更省。
 
@@ -171,21 +179,22 @@ agent_created: true
 |---|---|---|
 | `prompt` | ✅ | Step 2 拼好的自包含任务工单 |
 | `project_path` | 建议恒填 | worker 工作目录；缺省是 MCP server 的 cwd，**不要依赖缺省** |
-| `profile` | | 运行 profile 名；缺省 `defaults.profile`（当前为 `default`） |
+| `profile` | | 运行 profile 名。**省略 = 用户设定的 `defaults.profile`**；只有用户本轮点名 profile 时才填（见铁律 5）。 |
 | `timeout_sec` | | 单轮超时秒数；缺省 3600。**按「工单粒度与预算」定档**：实现单 3600；验证/全量回归型单 5400–10800。注意真超时**不重试**（`runner.ts` `if (outcome.timedOut) break`），预算宁可有富余 |
 | `continue_of` | | 仅续跑 `needs_input` 任务时填目标 `task_id`，此时 `prompt` 填对该任务问题的答复 |
+| `allow_metered` | | **计费授权**：目标 profile 是计费档（metered）时必须传 `true` 才能派发；免费档不需要。**只在用户本轮明确同意为这次派发付费时**才传——429 / 额度上限 / free 池全挂 / 超时 / 失败**都不构成同意**（铁律 5 的参数口径）。被拒时的错误文案里会有 profile 名与 `defaults.profile` 的名字，照它判断该改默认还是该传参。 |
 
 返回 `{ task_id, status, rounds }` 或 `{ error }`；成功结果可能带可选 **`warning`** 字段（9/28 加）：同 `project_path` 已有活跃任务时返回——这是铁律 2 的**被检查版本**，但它**不区分读写**。出现时按 Step 1 矩阵判读：本单或在途任务只读 → 记录后继续；任一侧要写 → 停下向用户确认或等前序任务终态。
 
 ### Step 4 — 提交后
 
-派发后立即把 `task_id` 与任务摘要报给用户，结束本轮。**不轮询、不主动 status**——终态会推飞书唤醒。（唯一豁免：若为该任务起了后台 `agent-ex wait` 进程，本 turn 结束前把它登记进「待消费清单」，好让下一个 turn 的「[回来先查]」兜底接上；见「Phase 2：执行期自主推进 loop」。）
+派发后立即把 `task_id`、任务摘要与实际使用的 profile（含是否计费）报给用户，结束本轮。**不轮询、不主动 status**——终态会推飞书唤醒。（唯一豁免：若为该任务起了后台 `agent-ex wait` 进程，本 turn 结束前把它登记进「待消费清单」，好让下一个 turn 的「[回来先查]」兜底接上；见「Phase 2：执行期自主推进 loop」。）
 
 **收到飞书终态卡后的核验流程（防假阳性约定）**：worker 报告**默认不完全采信**。按 `references/confidence-check.md` 走 5 问核对（worker 自报的数字/路径/行号每条能否定位到证据；不能定位即标低置信度）+ 置信度三档（高/中/低）分级。低/中 → 取**完整**报告复核（⚠️ `agent_ex_status` 返回的 `result` **会被截断**，长报告拿不到；全文在 `~/.agent-ex/logs/task_<task_id>.jsonl`，见排错表）；不能闭环 → `agent_ex_submit({ continue_of, prompt: <反问> })` 走 needs_input 反问或 `agent_ex_cancel` 重派。**不要把"看起来完成"的报告直接转给用户**。
 
 **终态是 timeout / 没有报告时**：先看项目根 `HANDOFF.md`（worker 临近预算用尽时会写：已完成的改动、残留部分、下一步、如何验证），再 `git status` + `git diff --stat` + 逐项对照工单，判断是"改完了没验"还是"改到一半"——前者按验收清单自己跑完（**变异必须亲手补跑**，那正是超时时跳过的一步），后者才重派并在工单里写明残留。别因为"没有报告"就当作"没有产出"。另：`error TS` 这类"回到基线"的验收要按**集合**证，不能按计数证（+1 新错误可能被 −1 无关修好抵消）。
 
-`failed` 的第三种成因（9/17 实测）：**不是超时，而是模型侧 429 额度上限**（`"error": "API Error: Request rejected (429) … Token Plan 用量上限"`，`rounds: 1`、`elapsed < timeout`）。额度恢复后 **不要重派**——工作树是完好的，按上面的流程自评一遍即可。三个具体点：
+`failed` 的第三种成因（9/17 实测）：**不是超时，而是模型侧 429 额度上限**（`"error": "API Error: Request rejected (429) … Token Plan 用量上限"`，`rounds: 1`、`elapsed < timeout`）。额度恢复后 **不要重派**，**更不要换到付费档重派**（换档是花钱的决定，只能由用户做，见铁律 5）——**也不要自己加 `allow_metered: true` 重派**（那是同一个花钱决定的另一种写法，见铁律 5 的参数口径）——工作树是完好的，按上面的流程自评一遍即可。三个具体点：
 - `agent_ex_status` 的 `files_changed` **可能比 `git status` 列得多**（worker 做变异测试时 `cp` 改了又还原本，如 `helpers.ts` / 被 scope out 的文件；9/19 实测另一成因：**只是被 Read 过、从未编辑**的文件也进列表 —— 850 报 6 个、实际改 2 个，多出的正是它自己声明"未碰"的 spec 与脚本）→ 以 `git status` 为准，别当成不一致。**"Read 也算"这条成因 9/20 已修**（runner 侧按工具名过滤，只读工具的路径不再进列表）；`cp` 类"改了又还原"仍是真实的过度报告，下一条复算规则也照旧。**同理，报告里的增删行数也不可直接采信**：850 自报 src `+15/-1` / test `+180/-18`，`git diff --numstat` 实为 `+14/-1` / `+166/-17` —— 一律以 `numstat` 复算。
 - 中断点在"源码改完、验收未跑完"时，最容易的残留是**它新写的测试代码自带新 `error TS`**（实测 600→605，5 行 / 3 条唯一，全在新增测试里：类型谓词不可赋值、`toBe` 两侧一边带 `!` 一边是 union、`SessionEntry` 没窄化）。这类修一下就好，但**必须自己修**——那是判"是否回到基线"的分母。
 - 取基线的**首选方法**是 `git worktree add --detach /tmp/<name> <base-sha>` + 软链 `node_modules` → 在 worktree 里跑本地 bin 的 tsc。**完全不碰当前工作树**，比 `stash`/`checkout --` 安全得多（两者都会把未提交的成果置于风险中），用完 `git worktree remove --force` 收尾。归一化时注意 worktree 会改变相对路径前缀（`../packages/…` vs `packages/…`）与内嵌的绝对路径——先按前缀归一，再 `comm`，否则会看到成对假阳性。
@@ -382,7 +391,7 @@ agent-ex wait <task_id> --report-out /tmp/<task_id>.report.md
 - **Loop 一步** = Step 1 并发检查 → Step 3 submit → 后台 `agent-ex wait` → 终态到手走上面 1–4 步 → 回到 Step 1，直到 plan 跑完。
   **唤醒没来也不阻塞**：上面「[回来先查]」兜底保证每个 turn 都能接上没被唤醒的那一支
   —— loop 的**进度由任务状态驱动，不由唤醒驱动**，所以宿主唤醒能力变化不影响协议本身。
-- **放行规则（升级制）**：高置信 → commit（不 push）+ 派下一个；中/低置信、plan 偏离、或 needs_input 中只有用户能答的（选项取舍/方向）→ 停下问；连续 2 次中置信 → 停（见上）。needs_input 中能自己答的，用 `continue_of` 续跑不中断 loop。
+- **放行规则（升级制）**：高置信 → commit（不 push）+ 派下一个；中/低置信、plan 偏离、或 needs_input 中只有用户能答的（选项取舍/方向）→ 停下问；连续 2 次中置信 → 停（见上）。needs_input 中能自己答的，用 `continue_of` 续跑不中断 loop。**授权范围不含配置写入**——profile / `config.json` / `doctor --fix` 一律按铁律 5 停下问用户。**授权范围也不含计费授权**：`allow_metered` 同理——loop 里撞到计费档一律停下问用户，不得自己加参数续跑。
 - **终态**：plan 全部跑完 → 交最终报告（汇总各任务的 commit、验收结果与遗留），loop 结束。
 - **为什么敢自主**：5 问防假阳性协议正是从三类真实缺陷（spec 断言自相矛盾、假参数、"0 fail" 实为沙箱有 `ps`）长出来的；里程碑 commit 让任何一步可回退；submit 同目录 warning 防踩。**代价是复核一步绝不允许为"让 loop 跑下去"而省略**——复核被跳过的 loop 比人工逐个派更危险。
 - **两个边界**：loop 活在本会话里，用户随时可打断（这是特性，不是缺陷）；会话意外结束时，飞书终态卡仍是带外安全网。
@@ -406,8 +415,9 @@ cancelled ← 任意非终态可取消
 | 工具不存在 / MCP 未连 | 检查 `~/.workbuddy/mcp.json` 与 `dist/server.js` 是否 build；重启后重试 |
 | **刚 submit 完，`agent-ex wait` 就报 `WAIT=not_found` / `agent_ex_status` 报 `not found`**（`task_muxhq896_247f77` 这种 14+ 字符 id） | **先怀疑自己打错了 id，不要怀疑任务没提交**。submit 的返回是权威，但它是一串长得像随机的字符，**手抄进 `agent-ex wait` / `agent_ex_status` 极易漏一个字符**（10/07 实测：把 `…hq896…` 抄成 `…h896…`，两个入口都报 `not found`，白白以为派发失败）。处置：**从 submit 的返回里复制粘贴**，别凭记忆敲；已报 not found 时用**不带参数的** `agent_ex_status`（列全部活跃任务）取回真实 id，再用它重起 `agent-ex wait`。 |
 | `agent_ex_submit` 返回带 `warning` 字段 | 同 `project_path` 已有活跃任务（铁律 2 的被检查版，**不区分读写**）——按 Step 1 矩阵判读：只读可继续，任一侧要写就停下等前序终态或向用户确认。 |
+| `agent_ex_submit` 被拒，报 `is a metered profile` | 计费闸门拦下了（口径见铁律 5 的参数口径）。**不要自己加 `allow_metered: true` 重试，也不要换 profile 绕开**——计费授权与换档都只能由用户做。把 profile 名（以及它是不是 `defaults.profile`）连同「这次要花钱」这件事报给用户，等用户明确同意付费再带 `allow_metered: true` 重派；用户不授权就停下报告。 |
 | **`agent-ex wait` 报 `WAIT=db_unreadable`（exit 6）**，或报 `WAIT=not_found` 但 `agent_ex_status` 说任务在 | **这是环境问题，不是任务问题**（10/16 实测定案）。最常见成因：宿主 shell 沙箱禁止写数据目录，SQLite 做 WAL recovery 需写 `-wal`/`-shm` 时被拒。CLI 已内置降级（整组复制 `tasks.db(+wal/+journal)` 到可写目录再读，输出 `DB_SOURCE=copy`）；降级也失败时 `--copy-dir <可写目录>` 指到工作区，或让该命令在沙箱外跑。**判据：`STATUS`/`WAIT` 是权威字段，退出码不是**——沙箱拒绝会让宿主把退出码报成 1，而任务本身可能已经 completed。0.3.0 起任务库默认 `journal_mode=TRUNCATE`，静止态不需要 `-wal`/`-shm`，只读沙箱可直接读；库头仍是 WAL 时才需要降级（转换要求「所有连接都退出」的窗口 ⇒ 重启 MCP server）。背景见 `docs/diagnostics/2026-10-16-readonly-sandbox.md`。 |
-| 任务 `failed`，`error: failed to spawn runner … ENOENT` | executor `bin` 解析失败（裸名 + PATH 找不到）→ 定点改路径：`agent-ex config set executors.<name>.bin <绝对路径>`（不用手改 `config.json`） |
+| 任务 `failed`，`error: failed to spawn runner … ENOENT` | executor `bin` 解析失败（裸名 + PATH 找不到）→ 把这条命令**转给用户执行**：`agent-ex config set executors.<name>.bin <绝对路径>`（写配置须由用户发起，见铁律 5；不要手改 `config.json`） |
 | 飞书不推送 | `notify.dry_run` 还是 `true`；或 `FEISHU_WEBHOOK_URL` 不在 `.env` / server 环境。**先跑 `agent-ex doctor`**（或 MCP 工具 `agent_ex_doctor`）——它一次给出结论 + 病因 + 修复命令，不用自己翻日志猜。 |
 | **飞书不推送，但 `dry_run=false`、URL 也在**（任务照常终态，人什么都没收到） | **先跑 `agent_ex_doctor` / `agent-ex doctor`**：它会扫 `~/.agent-ex/logs/runner-*.log`（runner 的 stdout/stderr 重定向在这里，**排查通知的唯一证据面**；`tasks.db` 只给一个布尔 `notify_failed`，分不清「拒收」和「网络不通」）并按 `code` 聚合，直接告诉你病因与修法。手工排查时读该日志里的 `[notifier] feishu rejected: HTTP 200 code=XXXX msg=...`：**判定用 `code` 不用 `res.ok`**（飞书出错也返 HTTP 200）。**行尾的 `card=<标签>` 说明是哪张卡**：`card=completed|failed|needs_input` = 终态卡（任务通知本身失败，DB 里 `notify_failed` 会被标上）、`card=quota_warning` = 配额告警卡（只是早期提示丢了，`notify_failed` 不受影响）——doctor 按这个标签分桶报，别把两者混成一件事。常见码：`19024` 关键词不匹配（改 `notify.keyword` 与机器人「安全设置 → 自定义关键词」对齐）、`19001` **webhook 地址本身失效**（机器人被删/重建 ⇒ 要换地址，改关键词没用）、`19021` 勾了「加签」（本工具不发 `timestamp`/`sign` ⇒ 取消勾选）、`19022` IP 白名单。改 `config.json` **不需要重启 MCP server**：runner 是独立进程、每次 `loadConfig()` 新读。⚠️ **10/16 实测的坑，比"两边不一致"更隐蔽**：闸门是对**整张卡片**做子串匹配，**worker 的报告正文里只要偶然出现该词，卡就能过**——所以配置错了也可能长期"看起来正常"。10/13→10/15 连续 **23 个任务 0 通知**（旧名 `agent-flow-ex` 一直留在 live config 里没改），直到某张卡的正文恰好提到了新名才被误判为"已恢复"。⇒ **验通知必须用正文不含产品名的自检卡**（`agent-ex doctor --send` 就是），别用真实任务报告当探针。 |
 | `{env:VAR}` 报 not found | 对应密钥缺在 `$HOME/.agent-ex/.env`，补上后重启 MCP server |

@@ -12,6 +12,7 @@
   "profiles": {
     "minimax-3": {
       "executor": "claude",
+      "cost": "metered",
       "env": {
         "ANTHROPIC_BASE_URL": "https://api.minimaxi.com/anthropic",
         "ANTHROPIC_AUTH_TOKEN": "{env:MINIMAX_API_KEY}",
@@ -27,6 +28,7 @@
     },
     "ds-v4": {
       "executor": "claude",
+      "cost": "metered",
       "env": {
         "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
         "ANTHROPIC_AUTH_TOKEN": "{env:DEEPSEEK_API_KEY}",
@@ -40,10 +42,12 @@
     },
     "opencode-minimax-3": {
       "executor": "opencode",
+      "cost": "metered",
       "env": {}
     },
     "opencode-zen-free": {
       "executor": "opencode",
+      "cost": "free",
       "env": {
         "OPENCODE_CONFIG_CONTENT": "{\"model\":\"{model:zen-free}\",\"small_model\":\"{model:zen-free}\"}",
         "ZEN_FREE_PREFER": "deepseek,glm,mimo"

@@ -40,6 +40,7 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
   "profiles": {
     "minimax-3": {
       "executor": "claude",
+      "cost": "metered",
       "env": {
         "ANTHROPIC_BASE_URL": "https://api.minimaxi.com/anthropic",
         "ANTHROPIC_AUTH_TOKEN": "{env:MINIMAX_API_KEY}",
@@ -64,6 +65,7 @@ export AGENT_EX_HOME="$HOME/.agent-ex"   # 缺省即此；也可指向任意目�
 | `profiles.<name>.executor` | 引用 `executors` 里的某个 executor。 |
 | `profiles.<name>.env` | 传给 agent 子进程的环境变量；支持 `{env:VAR}` 占位符（见 §5）。**opencode 一般留空**（provider 由 opencode 自己的 `auth.json`/`opencode.json` 管理）；要给某个 profile 单独指定模型，写 `OPENCODE_CONFIG_CONTENT: "{\"model\":\"provider/model\"}"`——`extra_flags` 是 executor 级，多 profile 无法用它区分模型。**不要在此写 `PATH`**（会被拒绝）；要给 worker 补 PATH 目录用 `profiles.<name>.path_dirs`（见 §4）。 |
 | `profiles.<name>.path_dirs` | 插进 worker `PATH` 的额外**绝对路径目录**列表（位于 executor 的 bin 目录之后、系统目录之前）。典型用途：让 worker 用 nvm 的 `node`。 |
+| `profiles.<name>.cost` | `"free"` 或 `"metered"`——这个 profile 会不会花钱。**不声明按 `metered` 处理**（fail-safe）；声明了 `"free"` 则按声明走（见 §3.1）。 |
 | `notify.feishu_webhook_url` | 飞书机器人 webhook；支持 `{env:FEISHU_WEBHOOK_URL}` 占位符。 |
 | `notify.dry_run` | `true`（缺省）→ 只打印通知内容不真发；`false` → 真发。 |
 | `notify.keyword` | 附加在卡片末尾的「关键词」安全闸门。**缺省 = `agent-ex`**（`src/brand.ts` 的 `BRAND`，`loadConfig` 自动填入），一般无需手写。同一行还会标出这次用的 profile 与模型。详见《[飞书通知详解](notifications.md)》。 |
@@ -81,10 +83,41 @@ agent-ex config set defaults.timeout_sec 1800
 agent-ex config set executors.claude.bin /abs/path/to/claude
 agent-ex profile set minimax-3 executor claude
 agent-ex profile set minimax-3 path_dirs /Users/you/.nvm/versions/node/v24.14.0/bin
+agent-ex profile set minimax-3 cost metered
 ```
 
-`profile set` 的保留字：`executor`（换 executor）、`path_dirs`（worker PATH 目录，逗号分隔，空值清空），
-其余 key 视为 env 变量名。
+`profile set` 的保留字：`executor`（换 executor）、`path_dirs`（worker PATH 目录，逗号分隔，空值清空）、
+`cost`（计费档，取值 `free` / `metered`），其余 key 视为 env 变量名。
+
+### 3.1 `profiles.<name>.cost`：计费档与派发闸门
+
+`cost` 决定「派发到这个 profile 会不会花钱」，取值只有 `free` / `metered`：
+
+- **不声明 ⇒ 按 `metered` 处理**（fail-safe）。老配置升级上来都是这个形状 ⇒ 派发会被拦。
+- **声明了 ⇒ 按声明走**（声明优先）。`agent-ex profile set <name> cost free` 就是声明入口。
+  ⚠️ 声明只是一个词，系统**无法独立验证**它真不花钱（executor 不是 opencode，或
+  `model` / `small_model` 不是 `{model:zen-free}` 占位符时）⇒ `doctor` 会报一条 warn 提示复核，
+  但**不会**替你改判（改判 = 替你表态）。
+
+派发到 `metered` 档时，`agent_ex_submit` 必须带 `allow_metered: true`，否则直接拒绝：
+
+```
+profile "minimax-3" (it is the current defaults.profile) is a metered profile — dispatching to it may cost money. …
+```
+
+- 这个开关是**按次**的：429 / 额度上限 / free 池全挂 / 超时 / 失败**都不构成**同意计费，
+  不能靠加这个参数把任务"救活"。
+- 续跑（`continue_of`）同样要授权，且**按任务行里的 executor 判定**（不是 profile 的）——
+  runner 起的是任务行的 executor。续跑时传 `profile` 无效（用任务行里那个）。
+- 每次派发的有效成本会记在任务行的 `cost` 列上（`agent_ex_status` 回显，终态卡页脚标注
+  `计费档` / `免费档` / `未记录`）。
+
+**两类「确实免费却被判 metered」的形态**（结构化判定要求 `model` 与 `small_model` **都**是占位符）：
+
+| 形态 | 为什么确实免费 | 修法 |
+|---|---|---|
+| 只写 `model` 占位符、**不写** `small_model` | 主模型免费；辅助模型由 opencode 自己的默认值决定 | `agent-ex profile set <name> cost free`，或把 `small_model` 也写成 `{model:zen-free}` |
+| `model` 是占位符、`small_model` 是**硬编码的 free 模型 id** | 两个模型都免费 | 同上 |
 
 ## 3. `executors.<name>.bin`：绝对路径或裸命令名皆可
 

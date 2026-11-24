@@ -54,7 +54,7 @@
 ## 硬约束（改代码前必读）
 
 1. **init 的用户可见输出必须全英文。** `tests/init.test.ts` 会扫 `src/init.ts` 里所有 `console.log/error`、`ask()`、`rl.question()` 行，出现中文字符就红。代码注释用中文没关系。
-2. **`config` / `profile` 的写入口是白名单**（`src/config-cmd.ts` 的 `WRITABLE` + `executors.<name>.bin`）。不要为了方便加通用点路径写入。
+2. **`config` / `profile` 的写入口是白名单**（`src/config-cmd.ts` 的 `WRITABLE` + `executors.<name>.bin`；`profile set` 的保留字是 `executor` / `path_dirs` / `cost`，其余 key 当 env 变量名）。不要为了方便加通用点路径写入。
 3. **profile env 禁写 `NODE_OPTIONS` / `PATH` / `LD_*` / `DYLD_*`**——它们是 worker 进程的启动/加载面（等价于任意代码执行）。受控的 PATH 来源是 `profile.path_dirs`（绝对目录列表，只能走 `profile set`）。
 4. **`{model:zen-free}` 占位符不能被换成硬编码模型名**（`setProfileValue` 会拦）。free 模型集会轮换，配置里必须零硬引用。
 5. **`init` 是全量覆盖式**：重跑会重写 `config.json`、丢掉其它 profile 与 `dry_run`。改单个字段一律走 `agent-ex config set` / `profile set`。
@@ -71,6 +71,7 @@
 | MCP 工具（增/删/改名） | `tests/server-tools.test.ts` 的 6 工具断言、`scripts/smoke-stdio.mjs` 的 `PRODUCTION_TOOLS`、README「MCP tools」表、`docs/README.zh-CN.md` 同表 |
 | CLI 子命令 | `src/server.ts` 的 `USAGE`、`src/cli.ts` 的 usage 文案、README「CLI commands」表、`docs/README.zh-CN.md` 同表 |
 | 内置 profile / `ZEN_FREE_PREFER` | `src/config-cmd.ts` 的 `BUILTIN_PROFILES`、`config.example.json` |
+| profile 的 `cost` 字段（计费档） | `config.example.json` 的每个 profile、`docs/user-guide/configuration.md` 的字段表、README×2 的配置字段表 |
 | 品牌名（`BRAND`） | `config.example.json`、README（`tests/config.test.ts` 会钉住这两处——README 里必须出现 `"keyword": "agent-ex"`） |
 | 用户可见文案 | README 对应章节 + `docs/README.zh-CN.md` 对应章节 + `docs/user-guide/` 相关篇 |
 | README（英文） | `docs/README.zh-CN.md` 保持**章节一一对应**；深度内容只写在 `docs/user-guide/`，README 只给摘要 + 链接 |

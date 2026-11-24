@@ -43,10 +43,12 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
 （`notifier.ts` 的 `buildFeishuCard`，`text_size: "notation"`），因此机器人侧的关键词填 `agent-ex` 即可。
 若你在 `config.json` 里自定义了 `notify.keyword`，**两边都要跟着改**。
 
-这行小字同时标出这张卡是**哪个 profile、哪个模型**跑出来的，形如
+这行小字同时标出这张卡是**哪个 profile、哪个模型、哪一档成本**跑出来的，形如
 `agent-ex  ·  opencode-zen-free  ·  opencode/mimo-v2.6-flash-free`（关键词在前，值之间用 `·` 分隔，
 不加字段名）。模型取「真的跑起来的那个」：`{model:zen-free}` 这种动态占位符会显示 spawn 前解析出的真实模型 id；
 profile 里压根没声明模型时（opencode 可以走它自己的全局配置）这一格直接省略，不编一个假模型名。
+成本档取任务行记下的**有效成本**（`free` ⇒ 免费档、`metered` ⇒ 计费档）；升级前的历史任务没有这个记录 ⇒ 显示
+「未记录」（**不落成 free**——「未记录」本身就是"当时判不了"这条信息）。
 一张群里几张同样格式的卡靠这行才能区分，排查「同一份 prompt 为什么这次结果差」时先看它。
 
 ## 3. 打开真实发送

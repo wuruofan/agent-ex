@@ -157,7 +157,7 @@ Inspect with `agent-ex skill status` (read-only), uninstall with `agent-ex skill
 | `agent-ex profile list` | Lists all profiles (marks the default one). |
 | `agent-ex profile use <profile>` | Switches the default profile. |
 | `agent-ex profile create <built-in> [--bin <path>]` | Materialises a built-in preset (`opencode-zen-free` — a zero-key opencode free-model profile). Creates only; does not switch. |
-| `agent-ex profile set <profile> <KEY> <value>` | Changes a profile's env, or `executor` (which executor it uses), or `path_dirs` (extra absolute PATH directories for the worker). |
+| `agent-ex profile set <profile> <KEY> <value>` | Changes a profile's env, or `executor` (which executor it uses), `path_dirs` (extra absolute PATH directories for the worker), or `cost` (`free` / `metered` — whether dispatching to this profile may cost money). |
 | `agent-ex wait <task_id>` | Blocks until the task is terminal (or needs input) and prints the worker's final report. |
 | `agent-ex skill install` | Installs the dispatch skill from the package and links it into the hosts that should have it. `--agent <name>` restricts it to the hosts you name. |
 | `agent-ex skill remove` | Uninstalls: removes the host symlinks and the installed copy. **Only symlinks** — a real directory is never touched; the exit code is non-zero if anything was left behind. |
@@ -184,7 +184,7 @@ stdout is machine-readable `KEY=VALUE`; the **exit code is the contract**:
 
 | Tool | Arguments | Returns |
 | :--- | :--- | :--- |
-| `agent_ex_submit` | `prompt` (required), `project_path`, `profile`, `continue_of`, `timeout_sec` | `{ task_id, status, rounds }` |
+| `agent_ex_submit` | `prompt` (required), `project_path`, `profile`, `continue_of`, `timeout_sec`, `allow_metered` | `{ task_id, status, rounds }` |
 | `agent_ex_status` | `task_id`, `include_finished` (0.3.1+), `limit` | task fields; `question` when `needs_input` |
 | `agent_ex_cancel` | `task_id` (required) | current state (idempotent on terminal tasks) |
 | `agent_ex_version` | — | `{ version, gitSha, buildTime }` |
@@ -207,6 +207,7 @@ The server is stateless — everything lives in `tasks.db`. `restart` does not a
   "profiles": {
     "minimax-3": {
       "executor": "claude",
+      "cost": "metered",
       "env": {
         "ANTHROPIC_BASE_URL": "https://api.minimaxi.com/anthropic",
         "ANTHROPIC_AUTH_TOKEN": "{env:MINIMAX_API_KEY}",
@@ -228,12 +229,20 @@ The server is stateless — everything lives in `tasks.db`. `restart` does not a
 | `executors.<name>.bin` | Where the agent CLI lives — **a bare command name or an absolute path both work**. |
 | `profiles.<name>.env` | Environment for the agent process. `{env:VAR}` placeholders are resolved at task runtime. **Never put `PATH` / `NODE_OPTIONS` / `LD_*` / `DYLD_*` here** — that is the worker's process-loading surface, i.e. arbitrary code execution. |
 | `profiles.<name>.path_dirs` | Extra **absolute** directories appended to the worker's `PATH`. This is the only supported way to extend the worker's PATH. `"path_dirs": []` means "no extras, deliberately" (doctor stops suggesting dirs); an absent field means "never configured" (doctor suggests them). |
+| `profiles.<name>.cost` | `"free"` or `"metered"` — whether dispatching to this profile may cost money. **Undeclared means `metered`**, so a metered profile needs `allow_metered: true` on `agent_ex_submit`. Declare `"free"` only when you are sure it costs nothing — doctor warns when it cannot verify that for you. |
 | `notify.dry_run` | `true` (default) prints the card to stderr instead of sending it. |
 | `notify.keyword` | The keyword appended to every card. Defaults to `agent-ex`; it must match the keyword registered on the bot side. |
 | `defaults.profile` / `defaults.timeout_sec` | Default profile, and the per-round timeout in seconds. |
 
 Secrets never live in `config.json`: write `{env:VAR}` placeholders there and the real values into
 `$AGENT_EX_HOME/.env` (mode 600, auto-loaded by the server at startup).
+
+**Cost gate.** A dispatch to a `metered` profile is refused unless the caller passes
+`allow_metered: true` — the tool cannot know that the user agreed to pay. The flag is **per
+dispatch**: a quota error, an exhausted free pool, a timeout or a failed run is *not* an agreement
+to pay, so a failed run must not be retried with the flag added. The effective cost of every
+dispatch is recorded on the task row and shown by `agent_ex_status` and in the terminal card footer
+(`计费档` / `免费档` / `未记录`).
 
 Full reference — every field, `{model:zen-free}`, the `[1m]` context-window trick, `path_dirs`,
 the write whitelist:

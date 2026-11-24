@@ -147,7 +147,7 @@ agent-ex skill install
 | `agent-ex profile list` | 列出所有 profile（标出默认的那个）。 |
 | `agent-ex profile use <profile>` | **切**默认 profile。 |
 | `agent-ex profile create <built-in> [--bin <path>]` | **物化**一个内置预设（当前：`opencode-zen-free`，零密钥的 opencode 免费模型）。只创建，不切默认。 |
-| `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段，或用保留字 `executor` 改它用哪个 executor、用 `path_dirs` 声明 worker PATH 的额外目录。 |
+| `agent-ex profile set <profile> <KEY> <value>` | 改 profile 的 env 字段，或用保留字 `executor` 改它用哪个 executor、用 `path_dirs` 声明 worker PATH 的额外目录、用 `cost` 声明计费档（`free` / `metered`）。 |
 | `agent-ex wait <task_id>` | **阻塞等一个任务到终态**（或到 `needs_input`），并把 worker 的最终报告提出来。 |
 | `agent-ex skill install` | 把 dispatch skill 装到 `~/.agents/skills`（**随 npm 包分发**），并给本机存在的宿主各建一条软链。`--agent <名字>` 限定只装你点名的宿主。 |
 | `agent-ex skill remove` | 卸载：删掉宿主软链与安装的拷贝。**只删软链**，实体目录一律不碰；只要还有东西留在原地，退出码就是非 0。 |
@@ -171,7 +171,7 @@ stdout 是机器可读的 `KEY=VALUE`，**退出码就是判据**：`0` 终态�
 
 | 工具 | 参数 | 返回 |
 | :--- | :--- | :--- |
-| `agent_ex_submit` | `prompt`（必填）、`project_path`、`profile`、`continue_of`、`timeout_sec` | `{ task_id, status, rounds }` |
+| `agent_ex_submit` | `prompt`（必填）、`project_path`、`profile`、`continue_of`、`timeout_sec`、`allow_metered` | `{ task_id, status, rounds }` |
 | `agent_ex_status` | `task_id`、`include_finished`（0.3.1+）、`limit` | 任务字段；`needs_input` 时含 `question` |
 | `agent_ex_cancel` | `task_id`（必填） | 当前状态（对终态任务幂等） |
 | `agent_ex_version` | — | `{ version, gitSha, buildTime }` |
@@ -194,6 +194,7 @@ server 是无状态的——状态全在 `tasks.db`。`restart` 不影响在跑�
   "profiles": {
     "minimax-3": {
       "executor": "claude",
+      "cost": "metered",
       "env": {
         "ANTHROPIC_BASE_URL": "https://api.minimaxi.com/anthropic",
         "ANTHROPIC_AUTH_TOKEN": "{env:MINIMAX_API_KEY}",
@@ -215,12 +216,18 @@ server 是无状态的——状态全在 `tasks.db`。`restart` 不影响在跑�
 | `executors.<name>.bin` | agent CLI 的位置——**裸命令名或绝对路径皆可**。 |
 | `profiles.<name>.env` | 传给 agent 子进程的环境变量，`{env:VAR}` 占位符在任务运行时解析。**绝不要在这里写 `PATH` / `NODE_OPTIONS` / `LD_*` / `DYLD_*`**——那是 worker 的进程启动/加载面，等价于任意代码执行。 |
 | `profiles.<name>.path_dirs` | 追加给 worker `PATH` 的**绝对**目录列表。这是扩展 worker PATH 唯一受支持的方式。`"path_dirs": []` 表示「我明确不要额外目录」（doctor 不再建议）；字段不存在表示「从未配过」（doctor 会建议补全）。 |
+| `profiles.<name>.cost` | `"free"` 或 `"metered"`——派发到这个 profile 会不会花钱。**不声明按 `metered` 处理**，所以计费档的派发必须带 `allow_metered: true`。只有你确定它真不花钱时才声明 `"free"`——doctor 会为「无法独立验证」的情况报 warn。 |
 | `notify.dry_run` | `true`（缺省）只把卡片打到 stderr，不真发。 |
 | `notify.keyword` | 追加在卡片末尾的关键词。缺省 `agent-ex`；必须与机器人侧登记的词一致。 |
 | `defaults.profile` / `defaults.timeout_sec` | 默认 profile 与单轮超时秒数。 |
 
 真实密钥永不进 `config.json`：那里只写 `{env:VAR}` 占位符，真实值放 `$AGENT_EX_HOME/.env`
 （chmod 600，server 启动时自动加载）。
+
+**计费闸门**：派发到 `metered` 档的 profile 会被拒，除非调用方传 `allow_metered: true`——
+工具无从得知用户是否同意付费。这个开关是**按次**的：429 / 额度耗尽 / free 池全挂 / 超时 / 失败
+**都不是**同意付费，所以失败后不能加这个参数重试。每次派发的有效成本都会记在任务行上，
+由 `agent_ex_status` 回显、终态卡页脚标注（`计费档` / `免费档` / `未记录`）。
 
 完整参考——全部字段、`{model:zen-free}`、`[1m]` 上下文窗口、`path_dirs`、写入口白名单：
 《[配置详解](user-guide/configuration.md)》。
