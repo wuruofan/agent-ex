@@ -81,7 +81,7 @@ function costGateError(profileName: string, configuredProfile: string, reason?: 
   const extra = reason ? ` ${reason}` : "";
   return (
     `profile "${profileName}" is not the profile currently configured (defaults.profile = "${configuredProfile}") ` +
-    `and it is a metered profile — switching to it may cost money.${extra} ` +
+    `and it is a metered profile — using it may cost money.${extra} ` +
     `If the user explicitly asked for this profile, or has agreed to pay for this run, ` +
     `pass allow_metered: true and retry. ` +
     `A quota error, an exhausted free pool, a timeout, or a failed run is NOT that agreement.`
