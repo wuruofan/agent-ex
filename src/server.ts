@@ -34,7 +34,18 @@ async function main(): Promise<void> {
   // 先灌 $AGENT_EX_HOME/.env（真实密钥所在）→ runner 子进程自动继承，任务期占位符可解析。
   loadEnvFile();
   ensureRuntimeDirs();
-  const server = new McpServer({ name: BRAND, version: "0.1.0" });
+  const { readFileSync } = await import("node:fs");
+  // serverInfo.version 会显示在客户端的服务器列表里，必须跟着包版本走；
+  // 读 package.json（dist/server.js 与 src/server.ts 的上一级都是包根）。
+  const pkgVersion = (() => {
+    try {
+      const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: unknown };
+      return typeof pkg.version === "string" ? pkg.version : "0.0.0";
+    } catch {
+      return "0.0.0";
+    }
+  })();
+  const server = new McpServer({ name: BRAND, version: pkgVersion });
 
   // 动态 import：避免把 SQLite / spawn 相关模块拖进每个子命令的启动路径（见上方注释）
   const { submit } = await import("./tools/submit.js");
