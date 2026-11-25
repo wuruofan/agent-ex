@@ -60,6 +60,10 @@ const TIMEOUT_FINALIZE_GRACE_MS = 8000;
  * 取 10 分钟：本地慢模型 / 冷启动可能要几十秒才出第一行，10 分钟足够宽松；
  * 又远小于默认的 3600s 全局超时 ⇒ 看门狗先到，给出**可诊断**的失败而不是一句 timeout。
  * 可用 AGENT_EX_FIRST_OUTPUT_TIMEOUT_MS 覆盖（毫秒）——集成测试走短阈值。
+ *
+ * ⚠️ 前提：现有两个 executor 都是「启动即出首行」（claude 的 `stream-json` init 事件、
+ * opencode 的 `step_start`）。将来若接入一个「攒到跑完才输出」的 executor，这条判据会把
+ * 合法的长任务误判成 stall ⇒ 接新 executor 时先确认它会不会立刻吐第一行。
  */
 const FIRST_OUTPUT_TIMEOUT_MS = (() => {
   const v = Number(process.env.AGENT_EX_FIRST_OUTPUT_TIMEOUT_MS);
