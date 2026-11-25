@@ -242,6 +242,10 @@ v5 的「不放行」有两个问题：
 所以这一层保证的是「派发**不会换**到别的付费档」，不是「钱只花在你亲自选过的档上」。
 补上这一层的正是 D1 的铁律 5（配置只读：写配置只能由用户发起）——那是**纪律层**的闸门。
 
+同理，`allow_metered` 是**调用方自己填的参数**：agent 想绕过随时可以传 `true`。
+所以这道闸门是**行为提示**（把「自主换付费档」变成一次显式的、可被追问的动作），
+**不是权限边界**——别把它当安全机制来依赖。
+
 代价与逃生口：用户想长期用另一个付费档 ⇒ 他自己切默认
 （`agent-ex profile use <name>`，写配置要他点头）；只想这一次 ⇒ 带 `allow_metered: true`
 （且必须是用户本轮明确指定了那个 profile）。没有免费档的用户想换成免费档，先建：
@@ -668,18 +672,19 @@ v5 的修法（落在 D10）：不变量改成
 
 | 文件 | 并行改动 |
 | :--- | :--- |
-| `package.json` | 版本 `0.5.1` → `0.5.2`，新增 `mcpName: "io.github.wuruofan/agent-ex"` |
+| `package.json` | 版本 `0.5.1` → `0.6.0`，新增 `mcpName: "io.github.wuruofan/agent-ex"` |
 | `package-lock.json` | 随之更新 |
 | `src/server.ts` | `serverInfo.version` 改为读 `package.json`（原先硬编码 `"0.1.0"`） |
-| `CHANGELOG.md` | 新增 10 行（该版本的发布说明） |
-| `glama.json` / `server.json` | 新增（未跟踪，MCP 注册相关） |
+| `CHANGELOG.md` | 新增 0.6.0 条目（原计划的 0.5.2 从未发布，已折进 0.6.0） |
+| `glama.json` / `server.json` | 新增（MCP Registry 收录元数据） |
 
 ⇒ 两条提示：
 
 1. **§5 的 `src/server.ts` 行（加 `allow_metered` schema）会与上述并行改动落在同一个文件**——
    合流时注意两处都改到了 `main()` 附近的同一段。
-2. **D8 要求"发布时 bump 版本"**：包版本已经是 0.5.2，但 `allow_metered` 尚未进包 ⇒ 真正带
-   `allow_metered` 的版本号要等实现落地后才确定，SKILL 的前置检查门槛文案按**实际发版版本**写。
+2. **D8 要求"发布时 bump 版本"**：包版本最终定为 `0.6.0`（就是带入 `allow_metered` 的版本），
+   SKILL 的前置检查门槛文案按**实际发版版本**写；`server.json` 的两个版本字段不会跟着
+   `npm version` 走，发版时必须手动同步（见 AGENTS.md 发布步骤 ③）。
 
 ### 8.8 v5 → v6（用户纠正后的闸门收窄）
 

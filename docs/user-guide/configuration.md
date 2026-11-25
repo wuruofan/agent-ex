@@ -111,7 +111,7 @@ agent-ex profile set minimax-3 cost metered
 
 ```
 profile "minimax-3" is not the profile currently configured (defaults.profile = "opencode-zen-free")
-and it is a metered profile — switching to it may cost money. …
+and it is a metered profile — using it may cost money. …
 ```
 
 - 这个开关是**按次**的：429 / 额度上限 / free 池全挂 / 超时 / 失败**都不构成**同意计费，
