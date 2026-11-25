@@ -16,6 +16,7 @@
     "dist",
     "skills/agent-ex-dispatch",
     "config.example.json",
+    "server.json",
     "README.md"
   ],
   "publishConfig": {

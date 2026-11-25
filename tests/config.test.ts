@@ -132,13 +132,14 @@ describe("brand consistency", () => {
 describe("registry manifest consistency", () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+    name: string;
     version: string;
     mcpName?: string;
   };
   const server = JSON.parse(readFileSync(join(repoRoot, "server.json"), "utf8")) as {
     name: string;
     version: string;
-    packages: Array<{ version: string }>;
+    packages: Array<{ registryType: string; identifier: string; version: string }>;
   };
 
   it("server.json version matches package.json (top level and packages entry)", () => {
@@ -146,7 +147,17 @@ describe("registry manifest consistency", () => {
     expect(server.packages[0]?.version).toBe(pkg.version);
   });
   it("mcpName points at the same server name the registry manifest declares", () => {
+    // registry 的归属校验就是比对这两个字段：不一致直接拒收
     expect(pkg.mcpName).toBe(server.name);
+  });
+  it("packages[0] points at this very npm package", () => {
+    // identifier 写错 ⇒ registry 收录成功但客户端装的是别的包（登记与产物脱节）
+    expect(server.packages[0]?.registryType).toBe("npm");
+    expect(server.packages[0]?.identifier).toBe(pkg.name);
+  });
+  it("the manifest ships inside the npm package (self-describing)", () => {
+    const files = pkg.files as string[] | undefined;
+    expect(Array.isArray(files) ? files.includes("server.json") : false).toBe(true);
   });
 });
 

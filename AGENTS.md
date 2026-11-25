@@ -73,7 +73,7 @@
 | 内置 profile / `ZEN_FREE_PREFER` | `src/config-cmd.ts` 的 `BUILTIN_PROFILES`、`config.example.json` |
 | profile 的 `cost` 字段（计费档） | `config.example.json` 的每个 profile、`docs/user-guide/configuration.md` 的字段表、README×2 的配置字段表 |
 | 品牌名（`BRAND`） | `config.example.json`、README（`tests/config.test.ts` 会钉住这两处——README 里必须出现 `"keyword": "agent-ex"`） |
-| MCP Registry 元数据（`server.json` / `glama.json` / `mcpName`） | `server.json` 的 `version`（顶层与 `packages[].version`）必须与 `package.json` 同版本；`server.json` 的 `name` 必须与 `package.json` 的 `mcpName` 逐字一致；发版时手动 bump（见发布步骤 ③，`tests/config.test.ts` 钉住一致性） |
+| MCP Registry 元数据（`server.json` / `glama.json` / `mcpName`） | `server.json` 的 `version`（顶层与 `packages[].version`）必须与 `package.json` 同版本；`server.json` 的 `name` 必须与 `package.json` 的 `mcpName` 逐字一致（registry 的归属校验就是比对这两个）；`packages[0].identifier` 必须是 npm 包名；发版时手动 bump（见发布步骤 ③）并走**发布步骤 ⑩**（`mcp-publisher publish`）；`tests/config.test.ts` 钉住一致性 |
 | 用户可见文案 | README 对应章节 + `docs/README.zh-CN.md` 对应章节 + `docs/user-guide/` 相关篇 |
 | README（英文） | `docs/README.zh-CN.md` 保持**章节一一对应**；深度内容只写在 `docs/user-guide/`，README 只给摘要 + 链接 |
 | 宿主表（`src/skill.ts` 的 `SKILL_HOSTS`） | README「install the dispatch skill」一节列的宿主名 + `docs/README.zh-CN.md` 同节；`src/skill-cmd.ts` 的 `USAGE` 宿主清单（自动生成，别手抄）。**目录与"在场判据"对着 `npx skills`（vercel-labs/skills）的宿主表核**，别凭印象写 |
@@ -118,7 +118,7 @@ npm run init         # 开发模式跑 init（tsx）
 | :--- | :--- | :--- |
 | `name` | `agent-ex-mcp` | 带 `-mcp` 规避 registry 包名相似度保护（`agent-ex` 撞已占用的 `agentex`） |
 | `bin` | `agent-ex` → `dist/server.js` | **命令名不带 `-mcp`**：全局安装后 `agent-ex` 可直接跑 server |
-| `files` | `dist` / `skills/agent-ex-dispatch` / `config.example.json` / `README.md` | 源码、`tests/`、`docs/` 不进包；**dispatch skill 进包**；**`README.md` 就是 npm 页面显示的那份**（英文） |
+| `files` | `dist` / `skills/agent-ex-dispatch` / `config.example.json` / `server.json` / `README.md` | 源码、`tests/`、`docs/` 不进包；**dispatch skill 进包**；**`README.md` 就是 npm 页面显示的那份**（英文）；**`server.json` 进包**（官方 registry 的收录清单，随包走 ⇒ 包自描述） |
 | `publishConfig.registry` | `https://registry.npmjs.org` | 锁定发布目标为官方源（见下） |
 | `prepublishOnly` | `build` + `test` | 发布前自动构建并跑全量测试，测试红则发布中止 |
 | `engines.node` | `>=22.5` | 依赖 `node:sqlite`（server 与 runner 都要用） |
@@ -163,6 +163,12 @@ Registry 里同一个版本号不可重发，漏改会让 `mcp-publisher publish
 git add -A && git commit -m "chore(release): 0.3.0" && git push origin main
 git tag -a v0.3.0 -m "0.3.0" && git push origin v0.3.0
 ```
+
+> ⚠️ **④ 之后不能再有 commit**：`chore(release)` 必须留在**分支顶端**。
+> tag 打在这个 commit 上，而 ⑤⑥ 打包与 ⑧ publish 用的都是工作区当前状态 ⇒
+> 一旦 ④ 之后又提交了东西，标签就指向一棵**比实际发布物旧**的树，
+> `gh release create --verify-tag` 绑定的也是那个旧树。
+> 想再改东西？**改在 ④ 之前**（并进 ④ 那次提交），别在 release commit 后面加。
 
 **⑤ 构建 + 全量测试**（`prepublishOnly` 也会跑，但先手动确认，别让发布当试验田）
 
@@ -218,7 +224,31 @@ shasum -a 1 /tmp/reg.tgz                          # 应等于 registry 的 dist.
 cmp /tmp/reg.tgz ./agent-ex-mcp-0.3.0.tgz          # 应完全一致
 ```
 
-**⑩ 从 registry 装回来再冒烟一次**（确认用户真正装到的那一份是对的）
+**⑩ 发布到 MCP Registry**（官方收录：`registry.modelcontextprotocol.io`）
+
+0.6.0 起本包带了 `server.json` + `package.json` 的 `mcpName` ⇒ 可以被官方 registry 收录
+（registry 只存元数据，不托管代码；客户端从 registry 查到后去 npm 装包）。
+
+> ⚠️ **顺序不能反**：registry 的归属校验是去 npm 上抓**已发布**的包、读它 `package.json` 里的
+> `mcpName`，再与 `server.json` 的 `name` 逐字比对 ⇒ 必须先完成 ⑧（npm publish）。
+> 0.5.1 及以前没带 `mcpName`，所以那批版本无论怎么发布都过不了这一关。
+
+```bash
+mcp-publisher validate server.json      # 离线结构校验（不需要登录；改完清单先跑这个）
+mcp-publisher login github              # device flow：授权 io.github.wuruofan/* 这个**个人**命名空间
+mcp-publisher publish server.json       # 提交清单（默认读 ./server.json）
+curl -sS "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.wuruofan/agent-ex"
+```
+
+> ⚠️ `mcp-publisher login github` 的 device flow **只能授权个人命名空间**
+> （`io.github.<你的用户名>/*`）——组织命名空间要 PAT 或 GitHub Actions OIDC
+> （见官方 authentication 文档）。本仓库用的是个人命名空间，device flow 够用。
+>
+> ⚠️ **已发布的版本不可改**：要撤下某一版用
+> `mcp-publisher status --status deprecated --message "…" io.github.wuruofan/agent-ex 0.6.0`
+> （可加 `--all-versions`）。清单改了就得**发新版本号**，不能拿同一个号重发。
+
+**⑪ 从 registry 装回来再冒烟一次**（确认用户真正装到的那一份是对的）
 
 ```bash
 REPO=$(pwd)
@@ -229,7 +259,7 @@ D=$(mktemp -d)
   && node "$REPO/scripts/smoke-stdio.mjs" "$D/node_modules/agent-ex-mcp/dist/server.js" )
 ```
 
-**⑪ 发 GitHub Release**（核验全绿之后做；失败不影响已发布的 npm 包，可安全重试）
+**⑫ 发 GitHub Release**（核验全绿之后做；失败不影响已发布的 npm 包，可安全重试）
 
 ```bash
 V=0.3.0
