@@ -3,7 +3,7 @@
   "name": "io.github.wuruofan/agent-ex",
   "title": "Agent Ex",
   "description": "Dispatch coding tasks to detached Claude Code / OpenCode agents and collect results.",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "repository": {
     "url": "https://github.com/wuruofan/agent-ex",
     "source": "github"
@@ -13,7 +13,7 @@
     {
       "registryType": "npm",
       "identifier": "agent-ex-mcp",
-      "version": "0.5.1",
+      "version": "0.6.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

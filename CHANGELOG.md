@@ -3,80 +3,31 @@
 本文件记录 `agent-ex-mcp` 的版本历史。**每个版本号只发布一次**（npm 上已发布的版本不可变）。
 发布流程见 [`AGENTS.md`](AGENTS.md#发布npm)。
 
-> ⚠️ **0.3.2 从未发布**：它只存在于 git（`chore(release): 0.3.2`），npm 上最高曾停留在 0.3.1。
-> 0.4.0 包含了 0.3.2 的全部内容，并新增了用户可见子命令 ⇒ 按 semver 走 minor，直接发 0.4.0。
+## 0.6.0（2026-11-25）
 
-## 0.6.0（未发布）
+**破坏性变化：派发到计费档 profile 需要显式授权。** 另修正 doctor 的两处判据，补上 MCP 市场收录。
 
-**派发到计费档 profile 现在需要显式授权：这是用户可见的破坏性行为变化。**
-
-- **profile 新增 `cost` 字段**（`"free"` / `"metered"`），声明这个 profile 会不会花钱。
-  **不声明按 `metered` 处理**（fail-safe）；声明了 `"free"` 就按声明走（doctor 会为
-  「声明了 free、但系统无法独立验证」报一条 warn，**不替你改判**）。
-  `agent-ex init` 产出的配置会**显式**写好 `cost`，新装用户的 `doctor` 一开始就是干净的。
-- **`agent_ex_submit` 新增 `allow_metered`：闸门只拦「切到付费档」这一种形状。**
-  派发到**当前配置的那个** profile（`defaults.profile`）**永远放行**——用户自己的选择，收费与否都一样；
-  切到免费档也放行。被拦的只有「切到**别的**、且会花钱的 profile」（且**不留下任务行**），
-  这正是事故的成因（agent 自主换到付费档）。这个开关**按次**生效——429、额度上限、free 池全挂、
-  超时、失败**都不是**同意计费，不能靠加这个参数把任务"救活"。
-- **留痕**：每次派发的有效成本记在任务行的 `cost` 列，由 `agent_ex_status` 回显、
-  飞书终态卡页脚标注「计费档」/「免费档」/「未记录」。写入口只有 `store.setCost()`
-  （submit 的闸门路径调用它）⇒ 「任务行的 cost 只能由工具在派发当时写入」是结构保证，不是约定。
-- **doctor**：未声明 `cost` 的 profile 报一条 info（**不阻断启动**，老配置照样能用）；
-  `cost` 值非法报 error；声明 `free` 但系统无法独立验证时报 warn（只提示，**不自动改判**）。
-- **首步看门狗**：worker 起进程后 10 分钟内 stdout 一行都没出 ⇒ 判定挂死并快速失败，
-  错误文案点名「模型额度/限流」。此前这种形态（opencode 撞上限额后既不输出也不退出）
-  只能等全局超时（默认一小时）才落终态，实测挂过一次 40 分钟。
-  阈值可用 `AGENT_EX_FIRST_OUTPUT_TIMEOUT_MS` 调整。
-- **配额识别**：opencode 免费档额度耗尽的真实措辞（`Free usage limit reached.`）现在能被识别 ⇒
-  会推那张 ⚠️ 配额告警卡，而不是静默到终态。
+- **`profile.cost`**（`"free"` / `"metered"`）：不声明按 `metered` 处理；声明 `free` 但系统无法独立验证时只 warn。`init` 会显式写好该字段。
+- **`agent_ex_submit` 新增 `allow_metered`**：派发到默认 profile 或免费档永远放行；只有「切到别的、且计费的 profile」会被拒（不落任务行），除非显式传 `allow_metered: true`。按次生效——429、额度耗尽、超时、失败都不算同意计费。
+- **留痕**：任务行记录本次派发的有效成本，`agent_ex_status` 回显，飞书终态卡页脚标注。
+- **doctor**：worker PATH 缺口改为「worker 自己能否解析 node/npm/bun/git」（换工具链版本后需自己更新 `path_dirs`）；历史拒收证据只回看 7 天。
+- **首步看门狗**：worker 10 分钟无 stdout 即判定挂死并失败（`AGENT_EX_FIRST_OUTPUT_TIMEOUT_MS` 可调）。
+- **配额识别**：识别 opencode 免费档的 `Free usage limit reached.`，会推配额告警卡。
+- **MCP 市场收录**：新增 `mcpName` / `server.json` / `glama.json`；`serverInfo.version` 不再硬编码。
 
 ## 0.5.1（2026-11-17）
 
-**六个「任务卡死 / 通知丢失 / 进程残留」的老毛病一起修掉，外加 doctor 的两处口径修正。**
+**修掉六个「任务卡死 / 通知丢失 / 进程残留」的老毛病，外加 doctor 的两处口径修正。**
 
-- **超时不再挂死**：agent 自己退出、但有个逃逸孙进程一直占着 stdout（被 init 收养 ⇒ 杀不掉、管道不关）
-  ⇒ 旧实现把「落终态」挂在 child 的 `close` 事件上，那个事件永不触发 ⇒ 任务永远停在 `running`。
-  实测有一次挂了 **16.5 小时**，最后靠人工 cancel 收场。现在超时后有 **8s 宽限**：agent 不退出就自己落
-  `failed(timeout)` 并推卡 ⇒ agent 卡死不会让任务永远停在 `running`。
-- **SIGTERM 时真等通知回执**：旧 handler 只是「启动」了等待就 `process.exit(0)`，回执随进程一起消失
-  ⇒ 飞书拒收时 `notify_failed` 标不上、日志里也不会有 `[notifier] feishu rejected` ⇒ doctor 扫不到，
-  正是它本该抓的那类静默失败。现在会真等到回执落地（最多 `AGENT_EX_NOTIFY_GRACE_MS`，默认 40s，
-  盖住 notifier 自己最坏的 ~35s）；等不到就把「没送达」标进 DB 再走。
-- **配额告警卡也会被等到**：它原先是 fire-and-forget（不进等待集合）⇒ SIGTERM / 超时兜底退出时它被掐断，
-  「这个任务正在配额上要挂了」的早期告警**静默丢失**。现在它在飞也会被等。
-  但它被掐断**不**标 `notify_failed`——那笔账只记「任务终态那张卡」。
-- **webhook 解析失败不再崩 runner**：`{env:VAR}` 变量缺失时 `resolveEnvPlaceholders` 会抛错，旧代码两处都没接：
-  终态卡那条异常穿出 `main`（任务已终态、runner 却 exit(1) ⇒ `notify_failed` 标不上、也没卡发出），
-  配额卡那条抛在 `rl.on("line")` 里（uncaughtException ⇒ runner 当场死 ⇒ 任务永远停在 `running`）。
-  现在解析失败 = 通知失败（终态卡标 `notify_failed`），不是崩溃。
-- **`cancel` 不再硬杀正在排空通知的 runner**：`cancel` 走 `killTree`，默认 3s 后对整个进程组补 SIGKILL，
-  而 runner 要等在飞的飞书通知（最多 40s）⇒ 排空中被砍，回执丢失（卡早 flush 给飞书了，丢的是「飞书收没收」）。
-  现在 runner 排空期间会写一个 drain 标记，宿主据此放过它——它排空后自己退出。
-- **不再留孤儿 agent**：runner 退出时 agent 还活着（宿主只杀 runner 本身、agent 在同组里活了下来；
-  或 runner 崩了、Node 默认直接退出）⇒ 没人杀它、没人读它的 stdout，它一直烧 token。
-  新增 `src/agent-guard.ts` 持有这条不变式：「runner 不许在 agent 还活着时退出」。
-- **doctor 的历史失败分两桶**：runner 对终态卡和配额告警卡写的是同一行拒收日志 ⇒ doctor 把配额卡的拒收
-  也算成「任务通知被拒收」，而 DB 里那些任务的 `notify_failed` 仍是 0 ⇒ 两处口径矛盾。
-  现在拒收日志行末尾带 `card=<标签>`，doctor 据此分桶：任务级（终态卡，与 `notify_failed` 同一口径）
-  与提示级（配额告警卡，明说不影响 `notify_failed`）。老日志没有标签 ⇒ 一律算任务级（保守）。
-- **`doctor` 会指出 worker PATH 的工具链缺口，并给出补全命令**：
-  - 从旧版本升级上来的 config 没有 `profile.path_dirs`，而 worker 的 PATH 是自建的
-    （`dirname(bin)` → `path_dirs` → 系统目录，不继承 shell）⇒ node/npm/bun/git 要等到
-    任务里第一次调用才以 `command not found` 炸出来。`agent-ex doctor` 现在会探测你 shell 里的
-    这几个命令，把**没被 worker PATH 覆盖**的目录报成 warn，并给出
-    `agent-ex profile set <profile> path_dirs …`（已有目录保留在前）。
-  - 判据是**缺口**不是「字段缺失」：目录已被 `dirname(bin)` / `path_dirs` / 系统目录覆盖时不报；
-    `bin` 本身不可用时也不报（病灶在 bin）。doctor 仍然只读，`--fix` 的范围不变。
-  - **`profile set <p> path_dirs ""` 由「删掉键」改为「写 `[]`」**。两者从此是两种状态：
-    `[]` = 你明确表态不要额外目录（doctor 不再提示补全），缺席 = 从未配过（doctor 会提示）。
-    删键的话这两种状态在文件里长得一样，doctor 只能对主动清空过的用户反复唠叨。
-  - 工具链探测与其依赖的 worker PATH 目录列表移到 `src/agent-env.ts`：`init` 与 `doctor` 共用同一份。
-- **通知表与代码对齐**：`docs/user-guide/notifications.md` 的「什么时候发通知」此前与代码不符两处——
-  `needs_input` 实际**会**发卡（❓「需要输入」卡，不发的话没人知道要去答复）、
-  `cancelled` 实际**不发**卡（cancel 是主动叫停：server 先把任务置为 `cancelled`，
-  runner 随后收尾时那张终态卡也就落不下来）。两处都已按实际行为改写。
-- 另附两份设计文档：超时归因设计（`docs/specs/`）与它的「悬空步」判据。
+- **超时不再挂死**：agent 退出但逃逸孙进程占着 stdout 时，旧实现等不到 `close` 事件 ⇒ 任务永远停在 `running`。现在超时后 8s 宽限，agent 不退出就落 `failed(timeout)` 并推卡。
+- **SIGTERM 时真等通知回执**：旧实现启动等待后立即 `exit(0)` ⇒ 拒收回执丢失、`notify_failed` 标不上。现在最多等 `AGENT_EX_NOTIFY_GRACE_MS`（默认 40s）。
+- **配额告警卡也会被等到**：原先是 fire-and-forget，进程退出时被掐断；现在会被等，但不标 `notify_failed`。
+- **webhook 解析失败不再崩 runner**：`{env:VAR}` 缺失时按通知失败处理（终态卡标 `notify_failed`）。
+- **`cancel` 不再硬杀排空中的 runner**：runner 排空通知期间写 drain 标记，宿主放过它。
+- **不再留孤儿 agent**：新增 `src/agent-guard.ts`，runner 不许在 agent 还活着时退出。
+- **doctor 历史失败分两桶**：拒收日志行尾带 `card=<标签>`，任务级（对应 `notify_failed`）与提示级分开统计；老日志一律算任务级。
+- **doctor 指出 worker PATH 工具链缺口**并给出补全命令；`profile set <p> path_dirs ""` 改为写 `[]`（明确表态不要额外目录，与「从未配过」区分）。
+- **通知表与代码对齐**：`needs_input` 会发卡，`cancelled` 不发卡。
 
 ## 0.5.0（2026-11-12）
 

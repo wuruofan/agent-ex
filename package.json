@@ -1,6 +1,6 @@
 {
   "name": "agent-ex-mcp",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "mcpName": "io.github.wuruofan/agent-ex",
   "description": "Schedule AI coding agents (Claude Code / OpenCode) as background tasks via MCP: detached runners, SQLite state machine, needs_input resume, Feishu notifications.",
   "license": "MIT",
