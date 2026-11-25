@@ -13,7 +13,7 @@
  * ⚠️ 关键词闸门匹配的是**整张卡片**（不是那行小字），所以 worker 报告正文里偶然出现产品名
  * 就能过闸 —— 配置错了也可能长期"看起来正常"。因此验证必须用正文干净的自检卡（--send）。
  */
-import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { agentExHome, logsDir } from "./paths.js";
@@ -69,13 +69,13 @@ export interface DoctorReport {
  * **老日志没有标签 ⇒ 一律算任务级**（保守：宁可多报，也不把没标过的证据悄悄降级）。
  */
 export interface NotifyFailureStats {
-  /** 含**任务级** reject 记录的 runner 日志数（终态卡被拒收）。 */
+  /** 含**任务级** reject 记录的 runner 日志数（终态卡被拒收）。只统计近 `NOTIFY_HISTORY_DAYS` 天。 */
   logs_with_rejects: number;
   /** 任务级：按 code 聚合的次数。 */
   by_code: Record<string, number>;
   /** 任务级：最近的失败样本（task id + code + msg）。 */
   recent: Array<{ task_id: string; code: string; msg: string }>;
-  /** 含**提示级** reject 记录的 runner 日志数（配额告警卡被拒收）。 */
+  /** 含**提示级** reject 记录的 runner 日志数（配额告警卡被拒收）。只统计近 `NOTIFY_HISTORY_DAYS` 天。 */
   advisory_logs: number;
   /** 提示级：按 code 聚合的次数。 */
   advisory_by_code: Record<string, number>;
@@ -166,8 +166,30 @@ export function classifyWebhook(url: string | undefined): WebhookState {
   return "malformed";
 }
 
-/** 从 runner 日志里聚合通知失败证据。 */
-export function scanNotifyFailures(home: string = agentExHome()): NotifyFailureStats {
+/**
+ * 「历史拒收证据」的回看窗口（天）。
+ *
+ * 为什么必须有窗口：这些证据来自**过去**的 runner 日志，一旦产生就永不消失。没有窗口时，
+ * 2026-10-13 那次事故会被当成永久 warn —— 用户修好配置、之后每张卡都送达，doctor 依然红着，
+ * 久而久之就学会无视体检（与「severity 用 warn 而不是 error」同一条理由）。
+ * 7 天：覆盖「周末/假期没跑任务」的间隔；更早的证据仍留在日志里，需要时自己 grep。
+ */
+export const NOTIFY_HISTORY_DAYS = 7;
+
+/**
+ * 从 task id 还原创建时间。id 形如 `task_<base36 毫秒时间戳>_<hex>`（tools/submit.ts），
+ * 所以不需要 stat，id 本身就是时间戳。解析不出（老日志/手写文件名）返回 null，由调用方退回 mtime。
+ */
+export function taskIdTimeMs(id: string): number | null {
+  const m = /^task_([0-9a-z]+)_[0-9a-f]+$/.exec(id);
+  if (!m) return null;
+  const ms = parseInt(m[1], 36);
+  // 下界 1e12 ≈ 2001-09，上界 4e12 ≈ 2096：挡掉「不是时间戳、但恰好是 base36」的怪 id
+  return Number.isSafeInteger(ms) && ms >= 1e12 && ms <= 4e12 ? ms : null;
+}
+
+/** 从 runner 日志里聚合通知失败证据（只回看 `NOTIFY_HISTORY_DAYS` 天）。 */
+export function scanNotifyFailures(home: string = agentExHome(), now: number = Date.now()): NotifyFailureStats {
   const dir = join(home, "logs");
   const stats: NotifyFailureStats = {
     logs_with_rejects: 0, by_code: {}, recent: [], advisory_logs: 0, advisory_by_code: {},
@@ -179,7 +201,19 @@ export function scanNotifyFailures(home: string = agentExHome()): NotifyFailureS
   } catch {
     return stats;
   }
+  const cutoff = now - NOTIFY_HISTORY_DAYS * 24 * 3600 * 1000;
   for (const f of files) {
+    const id = f.replace(/^runner-/, "").replace(/\.log$/, "");
+    // 文件名解析不出来就退回 mtime（日志最后一次写入 ≈ 任务收尾，足够近似）
+    let at = taskIdTimeMs(id);
+    if (at === null) {
+      try {
+        at = statSync(join(dir, f)).mtimeMs;
+      } catch {
+        continue;
+      }
+    }
+    if (at < cutoff) continue;
     let text: string;
     try {
       text = readFileSync(join(dir, f), "utf8");
@@ -206,7 +240,7 @@ export function scanNotifyFailures(home: string = agentExHome()): NotifyFailureS
       }
       // 每个日志只记一条（同一任务重试 3 次算一次失败，但计数保留全部尝试数）
       const first = taskLevel[0];
-      stats.recent.push({ task_id: f.replace(/^runner-/, "").replace(/\.log$/, ""), code: first.code, msg: first.msg });
+      stats.recent.push({ task_id: id, code: first.code, msg: first.msg });
     }
     if (advisory.length > 0) {
       stats.advisory_logs += 1;
@@ -215,6 +249,9 @@ export function scanNotifyFailures(home: string = agentExHome()): NotifyFailureS
       }
     }
   }
+  // 「Most recent」要真的是最近的：按 task id 倒序（id 里的 base36 时间戳定序）。
+  // 比较器必须满足 sort 契约：相等返回 0，不是 -1（否则同毫秒的两个任务顺序未定义）。
+  stats.recent.sort((a, b) => (a.task_id < b.task_id ? 1 : a.task_id > b.task_id ? -1 : 0));
   return stats;
 }
 
@@ -729,12 +766,14 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
     }
   }
 
-  // ---- 7. 历史失败证据（runner 日志）----
+  // ---- 7. 历史失败证据（runner 日志，只回看 NOTIFY_HISTORY_DAYS 天）----
   // 注意 severity 是 **warn 而不是 error**：这是**过去**发生的失败，不是当前配置的问题。
   // 2026-10-13→10-15 的 23 个零通知正是"历史早已在日志里、但没人看"——
   // 若把它算成 error，doctor 会永远红着，而修好配置后它依然红着（历史不会消失），
   // 久而久之用户就学会无视 doctor 的报错 ⇒ 体检工具本身失效。
-  // 它要表达的是"这里有线索"，而不是"现在坏了"。
+  // 同理，warn 也必须有时间窗（见 NOTIFY_HISTORY_DAYS）：否则同一次旧事故会让 doctor
+  // 永久黄着。窗口外的旧证据仍留在日志里，需要时自己 grep。
+  // 它要表达的是"最近这里有线索"，而不是"现在坏了"。
   const stats = scanNotifyFailures(home);
   if (stats.logs_with_rejects > 0) {
     // 两个单位不能混着说：logs_with_rejects 是**受影响的任务数**（一个 runner 日志 = 一个任务），
@@ -750,7 +789,7 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
       .filter((f): f is string => Boolean(f));
     findings.push({
       severity: "warn",
-      title: `${stats.logs_with_rejects} task(s) had notifications rejected in the past (${attempts} attempt(s) total)`,
+      title: `${stats.logs_with_rejects} task(s) had notifications rejected in the last ${NOTIFY_HISTORY_DAYS} days (${attempts} attempt(s) total)`,
       detail: `${parts}. Most recent: ${stats.recent[0]?.task_id}.`,
       fix: fixes.length > 0 ? fixes.join("; ") : undefined,
     });
@@ -769,7 +808,7 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
       .filter((f): f is string => Boolean(f));
     findings.push({
       severity: "warn",
-      title: `${stats.advisory_logs} task(s) had quota warning cards rejected (${attempts} attempt(s) total)`,
+      title: `${stats.advisory_logs} task(s) had quota warning cards rejected in the last ${NOTIFY_HISTORY_DAYS} days (${attempts} attempt(s) total)`,
       detail: `${parts}. These are advisory quota-warning cards: the task still reached a terminal state, and notify_failed is NOT affected — it only tracks the terminal card. The same cause usually hits the terminal card too; the task-level entry above says whether it did.`,
       fix: fixes.length > 0 ? fixes.join("; ") : undefined,
     });

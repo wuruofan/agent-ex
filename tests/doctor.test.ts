@@ -1,8 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, statSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, statSync, chmodSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { doctor, applyFixes, scanNotifyFailures, classifyKeyword, FEISHU_ERRORS } from "../src/doctor.js";
+import { doctor, applyFixes, scanNotifyFailures, taskIdTimeMs, NOTIFY_HISTORY_DAYS, classifyKeyword, FEISHU_ERRORS } from "../src/doctor.js";
 import { TOOLCHAIN_BINS, WORKER_SYSTEM_PATH_DIRS } from "../src/agent-env.js";
 import { BRAND } from "../src/brand.js";
 
@@ -267,7 +267,7 @@ describe("doctor —— 把证据聚合成结论", () => {
     expect(r.summary).not.toContain("the rest could not be checked");
   });
 
-  it("历史拒收记录是 warn 不是 error（过去的事，不该让 doctor 永远红）", async () => {
+  it("历史拒收记录是 warn 不是 error（且只报最近 7 天，不让 doctor 永远黄）", async () => {
     writeHealthy();
     mkdirSync(join(home, "logs"), { recursive: true });
     writeFileSync(
@@ -275,7 +275,7 @@ describe("doctor —— 把证据聚合成结论", () => {
       "[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found (attempt 1/3)\n",
     );
     const r = await doctor({ home, userHome, which: NO_TOOLCHAIN });
-    const f = r.findings.find((x) => x.title.includes("in the past"));
+    const f = r.findings.find((x) => x.title.includes("in the last"));
     expect(f?.severity).toBe("warn");
     // 当前配置没问题 ⇒ 整体仍算 ok
     expect(r.ok).toBe(true);
@@ -296,7 +296,7 @@ describe("doctor —— 把证据聚合成结论", () => {
       "[notifier] feishu rejected: HTTP 200 code=19001 msg=param invalid (attempt 1/3)\n",
     );
     const r = await doctor({ home, userHome, which: NO_TOOLCHAIN });
-    const f = r.findings.find((x) => x.title.includes("in the past"));
+    const f = r.findings.find((x) => x.title.includes("in the last"));
     expect(f?.title).toContain("2 task(s)");       // 受影响任务数
     expect(f?.title).toContain("4 attempt(s)");    // 拒收尝试次数
     expect(f?.detail).toContain("code=19024 ×3 attempt(s)");
@@ -539,13 +539,53 @@ describe("scanNotifyFailures —— 从 runner 日志里挖证据", () => {
     writeFileSync(join(home, "logs", "runner-task_b.log"),
       "[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found (attempt 1/3) card=quota_warning\n");
     const r = await doctor({ home, userHome, which: NO_TOOLCHAIN });
-    const taskLevel = r.findings.find((x) => x.title.includes("in the past"));
+    const taskLevel = r.findings.find((x) => x.title.includes("in the last"));
     expect(taskLevel?.title).toContain("1 task(s)");
     const advisory = r.findings.find((x) => x.title.includes("quota warning"));
     expect(advisory).toBeDefined();
     expect(advisory?.title).toContain("1 task(s)");
     // 提示级那条必须说清「不影响任务状态」，否则人会以为 DB 里 notify_failed 也是 1
     expect(advisory?.detail).toContain("notify_failed");
+  });
+
+  // 2026-11-25：证据只看最近 NOTIFY_HISTORY_DAYS 天。此前一次旧事故（24 个任务被拒收）
+  // 会让 doctor 永久 warn —— 配置早已修好、之后每张卡都送达，体检却始终黄着。
+  it("只回看最近 7 天：旧事故不再让 doctor 永久 warn", async () => {
+    writeHealthy();
+    mkdirSync(join(home, "logs"), { recursive: true });
+    const line = "[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found (attempt 1/3) card=failed\n";
+    const oldId = `task_${(Date.now() - 40 * 24 * 3600 * 1000).toString(36)}_ab12cd`;
+    const newId = `task_${(Date.now() - 2 * 24 * 3600 * 1000).toString(36)}_ab12cd`;
+    writeFileSync(join(home, "logs", `runner-${oldId}.log`), line);
+    expect(scanNotifyFailures(home).logs_with_rejects).toBe(0);
+    // 报告层：只剩旧证据时不出这条 warn
+    const r = await doctor({ home, userHome, which: NO_TOOLCHAIN });
+    expect(r.findings.some((x) => x.title.includes("notifications rejected"))).toBe(false);
+
+    writeFileSync(join(home, "logs", `runner-${newId}.log`), line);
+    const s = scanNotifyFailures(home);
+    expect(s.logs_with_rejects).toBe(1);
+    expect(s.recent[0].task_id).toBe(newId);
+  });
+
+  it("文件名解析不出时间时退回 mtime", () => {
+    mkdirSync(join(home, "logs"), { recursive: true });
+    const p = join(home, "logs", "runner-task_a.log");
+    writeFileSync(p, "[notifier] feishu rejected: HTTP 200 code=19024 msg=Key Words Not Found (attempt 1/3)\n");
+    const old = new Date(Date.now() - 40 * 24 * 3600 * 1000);
+    utimesSync(p, old, old);
+    expect(scanNotifyFailures(home).logs_with_rejects).toBe(0);
+    const fresh = new Date();
+    utimesSync(p, fresh, fresh);
+    expect(scanNotifyFailures(home).logs_with_rejects).toBe(1);
+  });
+
+  it("task id 里的 base36 时间戳可还原；解析不出的 id 返回 null", () => {
+    const ms = Date.now();
+    expect(taskIdTimeMs(`task_${ms.toString(36)}_0a1b2c`)).toBe(ms);
+    expect(taskIdTimeMs("task_a")).toBeNull();
+    expect(taskIdTimeMs("20261125-abcdef")).toBeNull();
+    expect(NOTIFY_HISTORY_DAYS).toBe(7);
   });
 });
 

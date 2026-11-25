@@ -5,7 +5,7 @@
  * 其余情况走 MCP server。两者共用同一套纯函数（src/doctor.ts、src/config-cmd.ts），
  * 所以 CLI 与 MCP 工具的行为必然一致——不会出现"命令行说通了、agent 查出来不通"。
  */
-import { doctor, applyFixes } from "./doctor.js";
+import { doctor, applyFixes, NOTIFY_HISTORY_DAYS } from "./doctor.js";
 import {
   configPath,
   listConfig,
@@ -38,13 +38,13 @@ function renderDoctor(report: Awaited<ReturnType<typeof doctor>>): void {
   }
   if (report.notify_failures && report.notify_failures.logs_with_rejects > 0) {
     const s = report.notify_failures;
-    console.log(`\n${ansi.yellow(`${s.logs_with_rejects} task log(s) contain rejected notifications`)}`);
+    console.log(`\n${ansi.yellow(`${s.logs_with_rejects} task log(s) in the last ${NOTIFY_HISTORY_DAYS} days contain rejected notifications`)}`);
     for (const [code, n] of Object.entries(s.by_code)) console.log(`  code=${code} × ${n}`);
   }
   // 提示级（配额告警卡）单列：它不写 notify_failed ⇒ 不能与上面那条混着说。
   if (report.notify_failures && report.notify_failures.advisory_logs > 0) {
     const s = report.notify_failures;
-    console.log(`\n${ansi.yellow(`${s.advisory_logs} task log(s) contain rejected quota warning cards (advisory — notify_failed is unaffected)`)}`);
+    console.log(`\n${ansi.yellow(`${s.advisory_logs} task log(s) in the last ${NOTIFY_HISTORY_DAYS} days contain rejected quota warning cards (advisory — notify_failed is unaffected)`)}`);
     for (const [code, n] of Object.entries(s.advisory_by_code)) console.log(`  code=${code} × ${n}`);
   }
   console.log("");
