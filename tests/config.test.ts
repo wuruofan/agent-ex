@@ -124,6 +124,32 @@ describe("brand consistency", () => {
   });
 });
 
+/**
+ * 防漂移：Registry 元数据的三份副本（package.json / server.json / mcpName）必须同步。
+ * `npm version` 只改 package.json 与 package-lock.json，不会碰 server.json；而 Registry 里
+ * 同一版本号不可重发 ⇒ 漏 bump 时 publish 会直接失败。这里把一致性钉在测试阶段。
+ */
+describe("registry manifest consistency", () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+    version: string;
+    mcpName?: string;
+  };
+  const server = JSON.parse(readFileSync(join(repoRoot, "server.json"), "utf8")) as {
+    name: string;
+    version: string;
+    packages: Array<{ version: string }>;
+  };
+
+  it("server.json version matches package.json (top level and packages entry)", () => {
+    expect(server.version).toBe(pkg.version);
+    expect(server.packages[0]?.version).toBe(pkg.version);
+  });
+  it("mcpName points at the same server name the registry manifest declares", () => {
+    expect(pkg.mcpName).toBe(server.name);
+  });
+});
+
 describe("resolveEnvPlaceholders", () => {
   it("resolves {env:VAR} placeholders from process.env", () => {
     process.env.MINIMAX_API_KEY = "sk-test";

@@ -73,6 +73,7 @@
 | 内置 profile / `ZEN_FREE_PREFER` | `src/config-cmd.ts` 的 `BUILTIN_PROFILES`、`config.example.json` |
 | profile 的 `cost` 字段（计费档） | `config.example.json` 的每个 profile、`docs/user-guide/configuration.md` 的字段表、README×2 的配置字段表 |
 | 品牌名（`BRAND`） | `config.example.json`、README（`tests/config.test.ts` 会钉住这两处——README 里必须出现 `"keyword": "agent-ex"`） |
+| MCP Registry 元数据（`server.json` / `glama.json` / `mcpName`） | `server.json` 的 `version`（顶层与 `packages[].version`）必须与 `package.json` 同版本；`server.json` 的 `name` 必须与 `package.json` 的 `mcpName` 逐字一致；发版时手动 bump（见发布步骤 ③，`tests/config.test.ts` 钉住一致性） |
 | 用户可见文案 | README 对应章节 + `docs/README.zh-CN.md` 对应章节 + `docs/user-guide/` 相关篇 |
 | README（英文） | `docs/README.zh-CN.md` 保持**章节一一对应**；深度内容只写在 `docs/user-guide/`，README 只给摘要 + 链接 |
 | 宿主表（`src/skill.ts` 的 `SKILL_HOSTS`） | README「install the dispatch skill」一节列的宿主名 + `docs/README.zh-CN.md` 同节；`src/skill-cmd.ts` 的 `USAGE` 宿主清单（自动生成，别手抄）。**目录与"在场判据"对着 `npx skills`（vercel-labs/skills）的宿主表核**，别凭印象写 |
@@ -151,6 +152,10 @@ npm whoami --registry https://registry.npmjs.org     # 期望输出你的 npm �
 ```bash
 npm version 0.3.0 --no-git-tag-version    # package.json 与 package-lock.json 一起改
 ```
+
+⚠️ `npm version` **不会**碰 `server.json`。它的 `version` 与 `packages[].version` 必须手动改成同一版本——
+Registry 里同一个版本号不可重发，漏改会让 `mcp-publisher publish` 直接失败；
+`tests/config.test.ts` 的版本一致性断言会先把它拦在测试阶段。
 
 **④ 提交 + 推送 + 打 tag**（CHANGELOG 与版本号必须在这同一次提交里）
 
