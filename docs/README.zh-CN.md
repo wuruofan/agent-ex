@@ -139,7 +139,7 @@ agent-ex skill install
 | 命令 | 作用 |
 | :--- | :--- |
 | `agent-ex init` | 首次安装向导（探测 CLI、生成 `config.json` + `.env`）。**重跑会重写 `config.json`**；覆盖前逐项列出差异并要求确认，旧文件自动备份。 |
-| `agent-ex doctor` | 体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。还会指出 **worker PATH 缺口**（node/npm/bun/git 在你的 shell PATH 里、却不在 worker 的 PATH 里）并给出可直接执行的 `profile set ... path_dirs` 补全命令。**只读**。 |
+| `agent-ex doctor` | 体检：把「通知到底通不通」的证据聚合成结论 + 病因 + 修复命令。还会指出 **worker PATH 缺口**（worker 自己的 PATH 解析不到 node/npm/bun/git，尽管你的 shell 里能跑）并给出可直接执行的 `profile set ... path_dirs` 补全命令。**只读**。 |
 | `agent-ex doctor --fix` | 自动修**确定性缺陷**（显式空串关键词、改名前的旧产品名、明文 webhook 落在 config.json）。**不动 `dry_run`**（那是你的偏好）；**不动自定义关键词**（机器人登记什么词是用户的界面）。 |
 | `agent-ex doctor --send` | 额外实发一张**正文不含产品名**的自检卡，验证真实投递。 |
 | `agent-ex config list` | 列出 profiles / executors / notify / defaults 现状。 |

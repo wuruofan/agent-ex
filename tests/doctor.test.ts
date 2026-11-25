@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { doctor, applyFixes, scanNotifyFailures, classifyKeyword, FEISHU_ERRORS } from "../src/doctor.js";
+import { TOOLCHAIN_BINS, WORKER_SYSTEM_PATH_DIRS } from "../src/agent-env.js";
 import { BRAND } from "../src/brand.js";
 
 let home: string;
@@ -308,10 +309,15 @@ describe("doctor —— 把证据聚合成结论", () => {
 describe("doctor —— worker PATH 的工具链缺口（path_dirs）", () => {
   /** 只让 node 与 bun 出现在"用户的 shell PATH"里。 */
   const shellWith = (map: Record<string, string>) => (n: string): string | null => map[n] ?? null;
+  /**
+   * 「worker 的 PATH 下解析不到」—— 默认一律解析不到，让断言不依赖开发机装了什么。
+   * 判据本身要起子进程，与 `which` 同理必须注入。
+   */
+  const notInWorker = (): null => null;
 
   it("缺 path_dirs 且工具链不在 worker PATH 里时报 warn，并给出可直接执行的补全命令", async () => {
     writeHealthy();
-    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }) });
+    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }), resolveInPath: notInWorker });
     const f = r.findings.find((x) => x.title.includes("missing the local toolchain"));
     expect(f?.severity).toBe("warn");
     // 缺口（而不是"字段缺失"）才是判据：detail 必须点名缺失的目录
@@ -323,23 +329,47 @@ describe("doctor —— worker PATH 的工具链缺口（path_dirs）", () => {
 
   it("已在 path_dirs 里的目录不算缺口（不重复建议）", async () => {
     writeHealthy({ profiles: { default: { executor: "claude", env: {}, path_dirs: ["/opt/nvm/v24/bin"] } } });
-    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }) });
+    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }), resolveInPath: notInWorker });
     expect(r.findings.some((x) => x.title.includes("missing the local toolchain"))).toBe(false);
   });
 
   it("工具链就在 dirname(bin) 或系统目录里时不算缺口（不制造噪音）", async () => {
     // bin 是 /bin/ls ⇒ dirname 是 /bin，node 也在 /bin
     writeHealthy();
-    const inBin = await doctor({ home, userHome, which: shellWith({ node: "/bin/node" }) });
+    const inBin = await doctor({ home, userHome, which: shellWith({ node: "/bin/node" }), resolveInPath: notInWorker });
     expect(inBin.findings.some((x) => x.title.includes("missing the local toolchain"))).toBe(false);
     // 系统目录 /usr/bin 同样已覆盖
-    const inUsrBin = await doctor({ home, userHome, which: shellWith({ node: "/usr/bin/node" }) });
+    const inUsrBin = await doctor({ home, userHome, which: shellWith({ node: "/usr/bin/node" }), resolveInPath: notInWorker });
     expect(inUsrBin.findings.some((x) => x.title.includes("missing the local toolchain"))).toBe(false);
+  });
+
+  it("同一命令有第二个提供者、worker PATH 下能解析到 ⇒ 不报缺口", async () => {
+    // 2026-11-25 的误报现场：doctor 由 WorkBuddy 拉起，node 解析到 WorkBuddy 自带的目录，
+    // 而 worker 的 path_dirs 里已经声明了 nvm 的 node 目录 —— worker 跑得了，不该报。
+    writeHealthy({ profiles: { default: { executor: "claude", env: {}, cost: "metered", path_dirs: ["/opt/nvm/v24/bin"] } } });
+    const seen: string[] = [];
+    const r = await doctor({
+      home,
+      userHome,
+      which: shellWith({ node: "/opt/workbuddy/node/22/bin/node" }),
+      resolveInPath: (n, path) => {
+        seen.push(path);
+        return `/opt/nvm/v24/bin/${n}`;
+      },
+    });
+    expect(r.findings.some((x) => x.title.includes("missing the local toolchain"))).toBe(false);
+    // 判据问的是 worker 的 PATH（含声明的目录），不是 doctor 进程自己的 PATH
+    expect(seen[0]).toContain("/opt/nvm/v24/bin");
   });
 
   it("已有 path_dirs 保留在前，缺失目录追加在后（顺序即优先级）", async () => {
     writeHealthy({ profiles: { default: { executor: "claude", env: {}, path_dirs: ["/opt/bun/bin"] } } });
-    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node", bun: "/opt/bun/bin/bun" }) });
+    const r = await doctor({
+      home,
+      userHome,
+      which: shellWith({ node: "/opt/nvm/v24/bin/node", bun: "/opt/bun/bin/bun" }),
+      resolveInPath: notInWorker,
+    });
     const f = r.findings.find((x) => x.title.includes("missing the local toolchain"));
     expect(f?.fix).toBe("agent-ex profile set default path_dirs /opt/bun/bin,/opt/nvm/v24/bin");
   });
@@ -352,7 +382,7 @@ describe("doctor —— worker PATH 的工具链缺口（path_dirs）", () => {
       },
       defaults: { profile: "a", timeout_sec: 3600 },
     });
-    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }) });
+    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }), resolveInPath: notInWorker });
     const hits = r.findings.filter((x) => x.title.includes("missing the local toolchain"));
     expect(hits).toHaveLength(1);
     expect(hits[0].title).toContain('"a"');
@@ -360,13 +390,13 @@ describe("doctor —— worker PATH 的工具链缺口（path_dirs）", () => {
 
   it("显式 [] 是用户表态（只要 bin + 系统目录）⇒ 不再提示缺口", async () => {
     writeHealthy({ profiles: { default: { executor: "claude", env: {}, path_dirs: [] } } });
-    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }) });
+    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }), resolveInPath: notInWorker });
     expect(r.findings.some((x) => x.title.includes("missing the local toolchain"))).toBe(false);
   });
 
   it("键缺失（从未配过 / 旧版本升级）⇒ 仍然提示缺口", async () => {
     writeHealthy();
-    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }) });
+    const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }), resolveInPath: notInWorker });
     expect(r.findings.some((x) => x.title.includes("missing the local toolchain"))).toBe(true);
   });
 
@@ -375,6 +405,80 @@ describe("doctor —— worker PATH 的工具链缺口（path_dirs）", () => {
     const r = await doctor({ home, userHome, which: shellWith({ node: "/opt/nvm/v24/bin/node" }) });
     expect(r.findings.some((x) => x.title.includes("missing the local toolchain"))).toBe(false);
   });
+
+  it("同目录的多个命令都要点名（nvm 下 node 与 npm 同目录，漏一个报告就在说谎）", async () => {
+    // node 与 npm 同在 /opt/nvm/v24/bin，两个都跑不了 ⇒ 报告必须两个都提到，
+    // 且目录与命令是**成对**的（不是两张清单，免得被读成笛卡尔积）。
+    writeHealthy();
+    const r = await doctor({
+      home,
+      userHome,
+      which: shellWith({ node: "/opt/nvm/v24/bin/node", npm: "/opt/nvm/v24/bin/npm" }),
+      resolveInPath: notInWorker,
+    });
+    const f = r.findings.find((x) => x.title.includes("missing the local toolchain"));
+    expect(f?.detail).toContain("node/npm from /opt/nvm/v24/bin");
+    // fix 命令仍按目录去重（同一目录追加一次就够）
+    expect(f?.fix).toBe("agent-ex profile set default path_dirs /opt/nvm/v24/bin");
+  });
+
+  it("不同目录的命令各自成对（node 在 /a、bun 在 /b）", async () => {
+    writeHealthy();
+    const r = await doctor({
+      home,
+      userHome,
+      which: shellWith({ node: "/opt/nvm/v24/bin/node", bun: "/opt/bun/bin/bun" }),
+      resolveInPath: notInWorker,
+    });
+    const f = r.findings.find((x) => x.title.includes("missing the local toolchain"));
+    expect(f?.detail).toContain("node from /opt/nvm/v24/bin");
+    expect(f?.detail).toContain("bun from /opt/bun/bin");
+  });
+
+  /**
+   * 默认探测（真起 `sh -c 'command -v <tool>'`）也判得对。
+   *
+   * 为什么挑「系统目录里没有」的命令：worker PATH 的尾段固定是 /usr/bin:/bin:/usr/sbin:/sbin，
+   * 机器上若正好装了同名命令，worker 就能解析到 ⇒ 用例的前提不成立。
+   * 四个候选里挑一个系统目录没有的；万一全都装了（本机几乎不可能）就跳过这条用例。
+   */
+  const absentInSystemDirs = (): string | undefined =>
+    TOOLCHAIN_BINS.find((t) => !WORKER_SYSTEM_PATH_DIRS.some((d) => existsSync(join(d, t))));
+
+  it.skipIf(!absentInSystemDirs())(
+    "默认探测走真实 PATH 解析：worker 解析不到 ⇒ 报缺口；解析得到 ⇒ 不报",
+    async () => {
+      const tool = absentInSystemDirs()!;
+      const shellDir = mkdtempSync(join(tmpdir(), "aex-shell-"));
+      const workerDir = mkdtempSync(join(tmpdir(), "aex-worker-"));
+      try {
+        // 两份真的可执行文件：shell 那份与 worker 声明的那份（模拟"另一个提供者"）
+        for (const d of [shellDir, workerDir]) {
+          writeFileSync(join(d, tool), "#!/bin/sh\nexit 0\n");
+          chmodSync(join(d, tool), 0o755);
+        }
+        const shellWhich = (n: string) => (n === tool ? join(shellDir, n) : null);
+
+        // ① worker 什么都没声明 ⇒ 解析不到 ⇒ 报缺口，fix 指向 shell 那份的目录
+        writeHealthy();
+        const gap = await doctor({ home, userHome, which: shellWhich });
+        const f = gap.findings.find((x) => x.title.includes("missing the local toolchain"));
+        expect(f?.severity).toBe("warn");
+        expect(f?.fix).toBe(`agent-ex profile set default path_dirs ${shellDir}`);
+
+        // ② worker 声明了另一份 provider ⇒ 解析得到 ⇒ 不报
+        //    （这正是 2026-11-25 修掉的那个误报：WorkBuddy 拉起的 doctor 曾把它报成缺口）
+        writeHealthy({
+          profiles: { default: { executor: "claude", env: {}, cost: "metered", path_dirs: [workerDir] } },
+        });
+        const ok = await doctor({ home, userHome, which: shellWhich });
+        expect(ok.findings.some((x) => x.title.includes("missing the local toolchain"))).toBe(false);
+      } finally {
+        rmSync(shellDir, { recursive: true, force: true });
+        rmSync(workerDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("classifyKeyword —— keyword 的四态判定（doctor 与 --fix 共用）", () => {

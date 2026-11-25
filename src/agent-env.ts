@@ -43,10 +43,15 @@ export function buildAgentEnv(
   };
 }
 
-/** `command -v` 的同步实现（唯一一处，init 与 doctor 共用）。 */
-export function which(name: string): string | null {
+/**
+ * `command -v` 的同步实现（唯一一处，init 与 doctor 共用）。
+ *
+ * `env` 可注入是为了回答另一个问题：「**worker 的** PATH 下能不能解析到这个命令」。
+ * 不传就沿用调用进程自己的环境（init / doctor 探测 shell 里的工具链）。
+ */
+export function which(name: string, env: NodeJS.ProcessEnv = process.env): string | null {
   try {
-    return execSync(`command -v ${name}`, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim() || null;
+    return execSync(`command -v ${name}`, { env, stdio: ["ignore", "pipe", "ignore"] }).toString().trim() || null;
   } catch {
     return null;
   }
@@ -56,12 +61,14 @@ export function which(name: string): string | null {
 export const TOOLCHAIN_BINS = ["node", "npm", "bun", "git"] as const;
 
 /**
- * 探测工具链所在目录，给 worker 的 PATH 补料。
+ * 探测工具链所在目录，给 worker 的 PATH 补料（`init` 预填 `path_dirs` 用）。
  *
- * 为什么要在用户的交互式终端里探测（init 直接探、doctor 探出来给修复命令）：
- * 那里的 PATH 就是用户真正在用的工具链（nvm/fnm/volta/homebrew …）；而 worker 的 PATH
- * 由 buildAgentEnv 完全自建，不继承 shell。二者的落差正是 node/npm/bun 在 worker 里
- * command not found 的根因。
+ * 为什么要在用户的交互式终端里探测：那里的 PATH 就是用户真正在用的工具链
+ * （nvm/fnm/volta/homebrew …）；而 worker 的 PATH 由 buildAgentEnv 完全自建，不继承 shell。
+ *
+ * ⚠️ 探测结果是「命令名 → 一个目录」，**不能**反过来当成「worker 缺不缺这个命令」的判据：
+ * 同一命令常有多个提供者（nvm 与 WorkBuddy 各装一份 node），按目录比会误报。
+ * doctor 的缺口判据因此改为「worker PATH 下 `which(name, {PATH})` 能否解析到」，不用本函数。
  *
  * `whichFn` 可注入（与 detectAgentClis 同款理由：测试不能依赖开发机装了什么）。
  */

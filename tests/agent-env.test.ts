@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { dirname } from "node:path";
-import { buildAgentEnv } from "../src/agent-env.js";
+import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { buildAgentEnv, which } from "../src/agent-env.js";
 
 const bin = process.execPath;
 const binDir = dirname(bin);
@@ -29,5 +31,29 @@ describe("buildAgentEnv —— worker 环境自建 PATH", () => {
     const env = buildAgentEnv(bin, {});
     expect(env.HOME).toBe(process.env.HOME);
     expect(typeof env.TMPDIR).toBe("string");
+  });
+});
+
+/**
+ * `which(name, {PATH})` 是 doctor「worker 跑不跑得动」这条判据的底座：
+ * 它必须**只在传入的那条 PATH 里**解析，不能漏回调用进程自己的 PATH。
+ *
+ * 这条断言一旦破了，doctor 的缺口判据就会去问错的问题
+ * （问的是 doctor 自己跑不跑得动，而不是 worker 跑不跑得动）。
+ */
+describe("which —— 注入 PATH 时的解析语义", () => {
+  it("只在那条 PATH 里找得到，找不到就返回 null", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aex-which-"));
+    const file = join(dir, "aex-fake-tool");
+    try {
+      writeFileSync(file, "#!/bin/sh\nexit 0\n");
+      chmodSync(file, 0o755);
+      expect(which("aex-fake-tool", { PATH: dir })).toBe(file);
+      expect(which("aex-fake-tool", { PATH: "/nonexistent-aex-dir" })).toBeNull();
+      // 不传 env 时才沿用调用进程自己的 PATH
+      expect(which("aex-fake-tool")).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

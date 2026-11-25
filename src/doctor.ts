@@ -14,7 +14,7 @@
  * 就能过闸 —— 配置错了也可能长期"看起来正常"。因此验证必须用正文干净的自检卡（--send）。
  */
 import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { agentExHome, logsDir } from "./paths.js";
 import { BRAND } from "./brand.js";
@@ -30,7 +30,7 @@ import {
 import { buildFeishuCard, sendFeishuCard } from "./notifier.js";
 import { extractModelRef, checkModelLiveness, type RunImpl } from "./model-check.js";
 import { collectSkillIssues } from "./skill.js";
-import { detectToolchainDirs, workerPathDirs } from "./agent-env.js";
+import { workerPathDirs, which, TOOLCHAIN_BINS } from "./agent-env.js";
 
 export type Severity = "error" | "warn" | "info" | "ok";
 
@@ -215,7 +215,6 @@ export function scanNotifyFailures(home: string = agentExHome()): NotifyFailureS
       }
     }
   }
-  stats.recent.sort((a, b) => (a.task_id < b.task_id ? 1 : -1));
   return stats;
 }
 
@@ -336,11 +335,17 @@ export function applyFixes(home: string): FixResult {
   return { applied, skipped, notes };
 }
 
-export async function doctor(opts: { home?: string; userHome?: string; send?: boolean; fetchImpl?: typeof fetch; delays?: number[]; probeImpl?: RunImpl; which?: (name: string) => string | null } = {}): Promise<DoctorReport> {
+export async function doctor(opts: { home?: string; userHome?: string; send?: boolean; fetchImpl?: typeof fetch; delays?: number[]; probeImpl?: RunImpl; which?: (name: string) => string | null; resolveInPath?: (name: string, path: string) => string | null } = {}): Promise<DoctorReport> {
   /**
    * 体检（只读，不改任何东西）。
    *
    * `send` 为真时额外发一张**正文不含产品名**的自检卡，并把飞书返回的 code 纳入结论。
+   *
+   * 两个探测口，**别接反**（接反了 WorkBuddy 那个误报就回来了）：
+   * - `which`：在**调用进程自己的** PATH 里找命令（=「用户 shell 里那份」）。
+   *   找不到 ⇒ 用户的工具链压根不在 PATH 里，无从谈起缺口。
+   * - `resolveInPath`：在**指定的** PATH 里找命令——这里传的是 worker 的 PATH，
+   *   问的是「worker 跑不跑得动」。
    */
   const home = opts.home ?? agentExHome();
   const findings: Finding[] = [];
@@ -648,14 +653,36 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
   // 从旧版本升级上来的 config 没有 path_dirs，于是 node/npm/bun/git 全不在 worker 的 PATH 里
   // —— 任务要到第一次 shell 出去调用它们时才以 "command not found" 的形式炸出来。
   //
-  // 判据是**缺口**而不是「字段缺失」：缺失但恰好在 dirname(bin) 或系统目录里 ⇒ 没缺口，不报。
-  // 显式 `[]` 是"不要额外目录"的表态，也不报（见循环里的 continue）。只有「键缺失 + 有缺口」
-  // 才提示——那正是旧版本升级上来的形状。
+  // 判据是**能不能跑**（在 worker PATH 下解析这个裸命令），而不是「shell 里那个目录有没有被 worker
+  // PATH 覆盖」。两者不等价：同一个命令常有多个提供者（nvm 与 WorkBuddy 各装一份 node），
+  // worker 能解析到任一份就够用；按目录比会把「另一个提供者的目录没被收录」误报成缺口
+  // （2026-11-25 实测：WorkBuddy 里跑的 doctor 把 ~/.workbuddy/binaries/node/... 报成缺口，
+  // 而 worker 的 path_dirs 里已经有 nvm 那份 node）。
+  //
+  // 显式 `[]` 是"不要额外目录"的表态，不报（见循环里的 continue）。
+  //
+  // ⚠️ 这条判据的**边界**：它回答的是「worker 跑不跑得动」，不是「跑的是不是你**现在**用的那一份」。
+  // worker 钉在 nvm v22、你 `nvm use 24` 了 —— worker 照样跑得动 v22 ⇒ 这里不报。
+  // 这不是漏检，是**判据本身到不了**：nvm v22/v24 与「WorkBuddy 自带的 node vs nvm 的 node」
+  // 在路径层面结构完全相同（都是"worker 能解析到一份、但不是你 shell 里那份"），
+  // 靠路径区分不开；要区分只能去比版本号/内容，那是启发式、且必然把误报引回来。
+  // 旧判据（按目录覆盖）之所以"能"报这个case，只是因为它把两件事混在同一个错标签下。
+  // ⇒ 换版本后请自己更新 path_dirs（见 docs/user-guide/configuration.md §4）。
   //
   // 探测要起子进程，所以放在这里、不进 collectConfigIssues（那是同步纯函数、零 I/O，所有写盘
   // 路径都消费它 —— AGENTS.md 硬约束 6）。探测实现与 init 共用 agent-env.ts。
-  const toolchainDirs = detectToolchainDirs(opts.which);
-  if (toolchainDirs.length > 0) {
+  const whichFn = opts.which ?? which;
+  const shellBins: Array<[string, string]> = [];
+  for (const tool of TOOLCHAIN_BINS) {
+    const found = whichFn(tool);
+    // 没装 / 不在 shell PATH：跳过。相对路径（含相对项的 PATH）补不进 worker PATH，同样跳过。
+    if (!found || !found.startsWith("/")) continue;
+    shellBins.push([tool, found]);
+  }
+  if (shellBins.length > 0) {
+    // 「在 worker 的 PATH 下跑 `command -v`」——用真实的解析行为当判据，不猜。
+    // resolveInPath：把命令名放进**指定的** PATH 里解析（不传就用调用进程自己的环境）。
+    const resolveInPath = opts.resolveInPath ?? ((name: string, path: string) => which(name, { PATH: path }));
     for (const [name, raw] of Object.entries(c.profiles ?? {})) {
       const p = (raw ?? {}) as { executor?: unknown; path_dirs?: unknown };
       const executor = typeof p.executor === "string" ? p.executor : "";
@@ -669,15 +696,35 @@ export async function doctor(opts: { home?: string; userHome?: string; send?: bo
       const declared = Array.isArray(p.path_dirs)
         ? p.path_dirs.filter((x): x is string => typeof x === "string")
         : [];
-      const covered = new Set(workerPathDirs(bin, declared));
-      const missing = toolchainDirs.filter((d) => !covered.has(d));
-      if (missing.length === 0) continue;
+      const workerDirs = workerPathDirs(bin, declared);
+      const workerPath = workerDirs.join(":");
+      // 按目录分组（dir → 该目录里跑不了的那些命令）。
+      //
+      // 为什么分组而不是「每个命令一条」：nvm 下 node 与 npm 同目录，两个都跑不了时**都得点名**，
+      // 少了 npm 报告就在说谎（它其实同样 command not found）。去重只发生在生成 fix 命令时——
+      // 那条命令按目录追加，重复列同一个目录没有意义。
+      const missing = new Map<string, string[]>();
+      for (const [tool, shellBin] of shellBins) {
+        const dir = dirname(shellBin);
+        // 已声明（或恰好在 dirname(bin) / 系统目录）⇒ 必然可解析，省一次探测
+        if (workerDirs.includes(dir)) continue;
+        // worker 能从这里解析到同一命令（另一个提供者）⇒ 跑得了，不是缺口
+        if (resolveInPath(tool, workerPath)) continue;
+        const group = missing.get(dir);
+        if (group) group.push(tool);
+        else missing.set(dir, [tool]);
+      }
+      if (missing.size === 0) continue;
+      const missingDirs = [...missing.keys()];
+      // 工具与目录**成对**说出：拆成「命令清单」+「目录清单」两张表会被读成笛卡尔积
+      // （"node/bun from /a, /b" 读起来像两个命令都来自两个目录）。
+      const pairs = [...missing.entries()].map(([dir, tools]) => `${tools.join("/")} from ${dir}`);
       findings.push({
         severity: "warn",
         title: `Profile "${name}" worker PATH is missing the local toolchain`,
-        detail: `Found ${missing.join(", ")} on your shell PATH, but a worker's PATH is dirname(bin) + path_dirs + system dirs only (it does not inherit the shell). Tasks that shell out to node/npm/bun/git fail with "command not found".`,
+        detail: `A worker's PATH is dirname(bin) + path_dirs + system dirs only (it does not inherit the shell), so it cannot run ${pairs.join(", ")}. Tasks that shell out to those commands fail with "command not found".`,
         // 命令必须能直接复制执行：已有 path_dirs 保留在前，缺的追加在后（顺序即优先级）
-        fix: `agent-ex profile set ${name} path_dirs ${[...declared, ...missing].join(",")}`,
+        fix: `agent-ex profile set ${name} path_dirs ${[...declared, ...missingDirs].join(",")}`,
       });
     }
   }

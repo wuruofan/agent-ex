@@ -166,13 +166,22 @@ agent-ex profile set minimax-3 path_dirs ""
 - 只在**该 profile** 里生效；executor 自己的 bin 目录恒排第一，不会被挤掉。
 - `[]` 与「字段不存在」是**两种状态**，对应的文件形状也不同：
   - `"path_dirs": []` —— 你明确表态过：worker 只要 bin 目录 + 系统目录。`doctor` 不再提示补全。
-  - 没有 `path_dirs` —— 从未配过（从旧版本升级上来的 config 就是这个形状）。`doctor` 探测到
-    工具链目录没被覆盖时会提示补全。
+  - 没有 `path_dirs` —— 从未配过（从旧版本升级上来的 config 就是这个形状）。`doctor` 在
+    worker PATH 下真跑不动这些命令时会提示补全。
   - 两者不能靠删键合并：字段一旦被删掉，文件里再没有任何痕迹能区分「你主动清空」与「从没配过」。
-- **从旧版本升级上来的 config 没有这个字段**：`agent-ex doctor` 会探测你 shell 里的
-  node/npm/bun/git，凡是没被 worker PATH 覆盖的目录都会报成一条 warn，并给出可直接执行的
+- **从旧版本升级上来的 config 没有这个字段**：`agent-ex doctor` 会检查你 shell 里的
+  node/npm/bun/git，凡是 **worker 自己的 PATH 解析不到**的都会报成一条 warn，并给出可执行的
   `agent-ex profile set <profile> path_dirs …` 补全命令（已有目录保留在前，缺的追加在后）。
+  判据是「能不能跑」而不是「目录有没有被收录」：同一命令常有多个提供者（nvm 与 WorkBuddy 各装一份
+  node），worker 能解析到任一份就不算缺口——何况 `doctor` 探测的是**调用它的那个进程**的 PATH，
+  同一个配置在不同宿主下拉起的 doctor 看到的目录并不相同。
   doctor 只报不写——写盘会覆盖你手写的配置，而它无法判断那份配置是不是你有意为之。
+- **工具链换了版本，`path_dirs` 不会自动跟着变**：上面这条判据只回答「worker 跑不跑得动」，
+  不回答「跑的是不是你**现在**用的那一份」。`nvm use 24` 之后 worker 仍在跑 `path_dirs` 里钉着的
+  v22——对 doctor 来说「worker 跑得动」就算合格，所以它不会报。换版本后自己更新一次：
+  ```bash
+  agent-ex profile set minimax-3 path_dirs /Users/you/.nvm/versions/node/v24.14.0/bin
+  ```
 - `agent-ex init` 会自动探测本机的 node/npm/bun/git 所在目录并预填该字段（各人的装法不同，不必手抄路径）；
   仍可用 `agent-ex profile set` 手工增删。
 - 每项必须是绝对路径、非空、不重复；不合法时加载/`doctor` 会报出，`profile set` 当场拒绝。

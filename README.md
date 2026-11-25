@@ -149,7 +149,7 @@ Inspect with `agent-ex skill status` (read-only), uninstall with `agent-ex skill
 | Command | What it does |
 | :--- | :--- |
 | `agent-ex init` | Interactive onboarding (detects CLIs, writes `config.json` + `.env`). Re-running overwrites `config.json`; it lists the diff and asks first, and backs up the old file. |
-| `agent-ex doctor` | Health check: aggregates the evidence for "does the notification path work" into a verdict + cause + copy-pasteable fix. Also flags a **worker PATH gap** (node/npm/bun/git on your shell PATH but not on the worker's) with the exact `profile set ... path_dirs` command to close it. **Read-only.** |
+| `agent-ex doctor` | Health check: aggregates the evidence for "does the notification path work" into a verdict + cause + copy-pasteable fix. Also flags a **worker PATH gap** (a command such as node/npm/bun/git that the worker's own PATH cannot resolve, even though your shell can) with the exact `profile set ... path_dirs` command to close it. **Read-only.** |
 | `agent-ex doctor --fix` | Auto-fixes *deterministic* defects (empty keyword, stale brand name, a plaintext webhook left in `config.json`). Never touches `dry_run` (that is your preference) nor a custom keyword (that is your bot's UI). |
 | `agent-ex doctor --send` | Additionally sends a self-test card whose body deliberately contains no product name. |
 | `agent-ex config list` | Shows profiles / executors / notify / defaults. |
